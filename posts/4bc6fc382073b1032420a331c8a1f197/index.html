@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>日志系统：一条更新SQL是如何执行的？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">日志系统：一条更新SQL是如何执行的？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="1_Update_0"></a>1. Update语句执行基本流程</h1> 
+<p>首先，我们先创建一个表，拥有两个字段，ID（主键，整形）和 c（整形）</p> 
+<pre><code class="prism language-mysql">mysql&gt; create table T(ID int primary key,c int);
+</code></pre> 
+<p>接着，我们对于ID=2的行进行更新</p> 
+<pre><code class="prism language-mysql">mysql&gt; update T set c=c+1 where ID=2;
+</code></pre> 
+<p>然后，其实update的基本流程和select的基本流程相似，具体如下：</p> 
+<ol>
+<li>用户通过连接器建立起连接</li>
+<li>分析器分析出来这个SQL语句是一条更新语句</li>
+<li>优化器决定要使用ID这个索引</li>
+<li>执行器找到这一行，进行更新。</li>
+</ol> 
+<p><img src="https://images2.imgbox.com/22/91/vgxAkseO_o.png" alt="在这里插入图片描述"></p> 
+<p>而select语句和update语句不同的地方在于，update还会涉及两个重要的日志模块：<mark>redo log（重做日志）和 bin log（归档日志）</mark>。</p> 
+<h1>
+<a id="2_redo_log_21"></a>2. redo log（重做日志）</h1> 
+<pre><code>小故事
+   在孔乙己的故事里，酒店掌柜有一个粉板，经常会在白天用来记录顾客的赊账，然后到晚上空闲的时候
+，才会将顾客的赊账记录转移到账本里面去。这是因为如果白天就直接记录到账本里面去，那么会耗费很多
+时间，来不及招待顾客，所以就直接先写在粉版上。
+   但是粉板有固定的大小，如果当天客户太多，那掌柜在白天就需要将粉板上的内容转移到账本上，这样
+后面赊账的顾客才能记录到粉板上。
+   此外，如果老板临时有事歇业两天，但是只要赊账记录记录在了粉板或者账本上，恢复生意后依然可以
+通过账本和粉板上的数据明确赊账数目
+</code></pre> 
+<p>在MySQL中，和掌柜面临着同样的问题，如果每一次更新操作都写进磁盘，然后磁盘找到那条对应的记录，然后更新，<strong>整个过程IO成本很高</strong>。</p> 
+<p>因此，MySQL中有一个<mark>Write-Ahead logging（WAL）技术</mark>，它的<strong>关键点就是先写日志，再写入磁盘</strong>。（相当于先写粉板，再写入账本。）<br> 具体来说，当一条记录需要更新的时候，InnoDB就<strong>会先把记录写道redo log（粉板）里面，并更新内存，这个时候更新就完成了</strong>。同时，InnoDB会<strong>在适当的时候，将这个操作记录更新到磁盘里面</strong>（写入账本）。</p> 
+<p><mark>redo log时InnoDB引擎特有的日志</mark>。此外，<mark>InnoDB的redo log是固定大小的</mark>，比如可以配置为4个文件，每个文件1GB。从头开始写，写到末尾就循环开始写。如下图所示，<strong>write pos代表写入的位置</strong>，从logfile0一直写入到logfile3，再循环，即顺时针方向。<strong>check point代表当前要擦除的位置</strong>，也是顺时针方向。图中绿色部分是可以写入的位置，黄色部分是已经写入内容的位置。<strong>当write pos指针追上check point时就代码log已满</strong>。<br> <img src="https://images2.imgbox.com/14/94/MuodPrE4_o.png" alt="在这里插入图片描述"></p> 
+<p>最后，因为有了redo log，InnoDB就可以保证数据库发生异常重启时，之前提交的记录不会丢失，这个能力称为crash-safe。（对比故事中的酒店停业后恢复）</p> 
+<h1>
+<a id="3_bin_log_44"></a>3. bin log（归档日志）</h1> 
+<p><mark>bin log是Server层的日志，无论使用什么存储引擎，都是会有bin log的</mark>。它也是用来保存用户对于数据库的修改操作的日志。bin log和redo log不太一样，<strong>它不是采用循环写入的方式，二是进行不断追加的</strong>。此外，<strong>bin log没有crash-safe能力</strong>，只能进行归档。</p> 
+<p>数据库的恢复通常就会用到bin log。如果想让数据库恢复到半个月内任意一秒的状态，那么就需要对于半个月前的数据进行一次全量备份，然后再根据bin log依次取出来操作，重放到想要恢复的时刻。</p> 
+<h1>
+<a id="4__49"></a>4. 两种日志的区别</h1> 
+<p>首先，两种日志都是用来记录对于数据库的修改，那么为什么需要两种日志呢？<br> 理由：这主要是因为最开始MySQL并没有InnoDB引擎，默认是使用MyISAM引擎的，但是MyISAM没有crash-safe能力，bin log只能用于归档。所以引入InnoDB的redo log来是实现crash-safe能力。</p> 
+<p>然后，两种日志的主要区别如下：</p> 
+<ol>
+<li>
+<strong>redo log是InnoDB引擎特有的</strong>。而<strong>bin log是属于MySQL的Server</strong>，所有引擎都可以用。</li>
+<li>
+<strong>redo log是物理日志</strong>，记录的是"在某个数据页上具体做了什么修改"。例如：T表第100行、第100列从0修改为1.<br> <strong>bin log是逻辑日志</strong>，记录的是这个句子的原始逻辑。例如：给ID=2这一行的c字段加1</li>
+<li>
+<strong>redo log是循环写的</strong>，空间固定会用完。<strong>bin log则是采用追加写的方式</strong>，写到一定大小后会切换到写一个，不会覆盖之前的。</li>
+</ol> 
+<h1>
+<a id="5_Update_59"></a>5. 执行器和存储引擎进行Update的内部执行流程</h1> 
+<p>下面是执行和InnoDB引擎执行简单的update语句的流程：</p> 
+<ol>
+<li>执行引擎先找到ID=2这一行，如果这一行本身就在内存中就直接返回。如果不在的话，就从磁盘读取到内存中。</li>
+<li>执行器拿到引擎给的数据，更新这一行数据，再调用引擎接口写入这行数据。</li>
+<li>引擎将这行数据更新到内存中，<strong><mark>同时将这个更新操作记录到redo log里面，此时redo log处于prepare状态</mark></strong>。然后就告诉执行器完成了，随时可以提交事务。</li>
+<li>
+<strong><mark>执行器生成这个操作的bin log，并把bin log写入到磁盘中</mark></strong>。</li>
+<li>执行器调用引擎的事务提交接口，<strong><mark>引擎把刚刚写入的redo log改成commit状态，更新完成</mark></strong>。</li>
+</ol> 
+<p>上面的流程也如下面这个图所示，深色的代表执行器，浅色的代表存储引擎：<br> <img src="https://images2.imgbox.com/a4/51/KCTybdHu_o.png" alt="在这里插入图片描述"></p> 
+<h1>
+<a id="6__72"></a>6. 两阶段提交</h1> 
+<p>从刚刚的执行步骤中可以看到，redo log的操作是分为两个阶段：prepare和commit阶段。那为什么要分为两个阶段呢？</p> 
+<p>我们假设不分为两个阶段，然后发生了这样的事情：假设存储引擎先写完了redo log，但是接着Server在写入bin log时发生了异常重启。因为<strong>redo log具有crash-safe功能</strong>，所以重启后可以恢复。但是由于<strong>bin log没有crash-safe功能</strong>，就会丢失一部分日志。</p> 
+<p>这样就会出现一个问题，<strong>存储引擎中记录了这次修改，之前会写入磁盘中</strong>。但是<strong>Server中的bin log没有这次修改</strong>。那么在利用bin log进行数据库恢复时，就会丢失一些操作。造成<strong>恢复的数据库和原来的数据库不一致</strong>的情况。</p> 
+<p>而两阶段提交中，<strong>当redo log进入prepare状态后，会等待bin log成功写入，再进行commit，这样就能保证数据的一致性</strong>。相当于是进行一个事务。</p> 
+<p>redo log的相关参数是<strong>innodb_flush_log_at_trx_commit</strong>，设置成1时，表示每次事务都持久化到磁盘。（建议这么做）<br> bin log的相关参数是<strong>sync-binlog</strong>，设置为1时，表示每次事务的binlog都会持久化到磁盘中。（建议这么做）</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

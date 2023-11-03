@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>RepVGG网络简介 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">RepVGG网络简介</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <p>论文名称：<strong>RepVGG: Making VGG-style ConvNets Great Again</strong><br> 论文下载地址：<a href="https://arxiv.org/abs/2101.03697">https://arxiv.org/abs/2101.03697</a><br> 官方源码（Pytorch实现）：<a href="https://github.com/DingXiaoH/RepVGG">https://github.com/DingXiaoH/RepVGG</a></p> 
+<hr> 
+<p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul><li>
+<ul>
+<li><a href="#0__10">0 前言</a></li>
+<li><a href="#1_RepVGG_Block_19">1 RepVGG Block详解</a></li>
+<li><a href="#2__39">2 结构重参数化</a></li>
+<li>
+<ul>
+<li><a href="#21_Conv2dBN_48">2.1 融合Conv2d和BN</a></li>
+<li><a href="#22_Conv2dBNPytorch_79">2.2 Conv2d+BN融合实验(Pytorch)</a></li>
+<li><a href="#23_1x13x3_152">2.3 将1x1卷积转换成3x3卷积</a></li>
+<li><a href="#24_BN3x3_159">2.4 将BN转换成3x3卷积</a></li>
+<li><a href="#25__165">2.5 多分支融合</a></li>
+<li><a href="#26_Pytorch_177">2.6 结构重参数化实验(Pytorch)</a></li>
+</ul>
+   </li>
+<li><a href="#3__328">3 模型配置</a></li>
+</ul>
+ </li></ul>
+</div>
+<p></p> 
+<hr> 
+<h2>
+<a id="0__10"></a>0 前言</h2> 
+<p>VGG网络是2014年由牛津大学著名研究组VGG (Visual Geometry Group) 提出的。在2014到2016年（ResNet提出之前），VGG网络可以说是当时最火并被广泛应用的Backbone。后面由于各种新的网络提出，论精度VGG比不上ResNet，论速度和参数数量VGG比不过MobileNet等轻量级网络，慢慢的VGG开始淡出人们的视线。当VGG已经被大家遗忘时，2021年清华大学、旷视科技以及香港科技大学等机构共同提出了RepVGG网络，希望能够让VGG-style网络Great Again。</p> 
+<p><img src="https://images2.imgbox.com/ec/ab/e9Q0aBzF_o.png" alt="在这里插入图片描述">通过论文的图一可以看出，RepVGG无论是在精度还是速度上都已经超过了ResNet、EffcientNet以及ReNeXt等网络。那RepVGG究竟用了什么方法使得VGG网络能够获得如此大的提升呢，在论文的摘要中，作者提到了<code>structural re-parameterization technique</code>方法，即<strong>结构重参数化</strong>。实际上就是在训练时，使用一个类似ResNet-style的多分支模型，而推理时转化成VGG-style的单路模型。如下图所示，图（B）表示RepVGG训练时所采用的网络结构，而在推理时采用图（C）的网络结构。关于如何将图（B）转换到图（C）以及为什么要这么做后面再细说，如果对模型优化部署有了解就会发现这和做网络图优化或者说算子融合非常类似。</p> 
+<p><img src="https://images2.imgbox.com/ca/74/Db2ahACV_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h2>
+<a id="1_RepVGG_Block_19"></a>1 RepVGG Block详解</h2> 
+<p>其实关于RepVGG整个模型没太多好说的，就是在不断堆叠RepVGG Block，只要之前看过VGG以及ResNet的代码，那么RepVGG也不在话下。这里主要还是聊下RepVGG Block中的一些细节。由于论文中的图都是简化过的，于是我自己根据源码绘制了下图的RepVGG Block（注意是针对训练时采用的结构）。其中图（a）是进行下采样（stride=2）时使用的RepVGG Block结构，图（b）是正常的（stride=1）RepVGG Block结构。通过图（b）可以看到训练时RepVGG Block并行了三个分支：一个卷积核大小为<code>3x3</code>的主分支，一个卷积核大小为<code>1x1</code>的shortcut分支以及一个只连了BN的shortcut分支。</p> 
+<p><img src="https://images2.imgbox.com/26/45/QiGGGE9L_o.png" alt="在这里插入图片描述">这里首先抛出一个问题，<strong>为什么训练时要采用多分支结构</strong>。如果之前看过像Inception系列、ResNet以及DenseNet等模型，我们能够发现这些模型都并行了多个分支。至少根据现有的一些经验来看，并行多个分支一般能够增加模型的表征能力。所以你会发现一些论文喜欢各种魔改网络并行分支。在论文的表6中，作者也做了个简单的消融实验，在使用单路结构时（不使用其他任何分支）Acc大概为<code>72.39</code>，在加上<code>Identity branch</code>以及<code>1x1 branch</code>后Acc达到了<code>75.14</code>。</p> 
+<p><img src="https://images2.imgbox.com/50/6e/wRzTYKU5_o.png" alt="在这里插入图片描述"></p> 
+<p>接着再问另外一个问题，<strong>为什么推理时作者要将多分支模型转换成单路模型</strong>。根据论文<code>3.1</code>章节的内容可知，采用单路模型会更快、更省内存并且更加的灵活。</p> 
+<ul>
+<li>
+<strong>更快</strong>：主要是考虑到模型在推理时硬件计算的并行程度以及MAC（memory access cost），对于多分支模型，硬件需要分别计算每个分支的结果，有的分支计算的快，有的分支计算的慢，而计算快的分支计算完后只能干等着，等其他分支都计算完后才能做进一步融合，这样会导致硬件算力不能充分利用，或者说并行度不够高。而且每个分支都需要去访问一次内存，计算完后还需要将计算结果存入内存（不断地访问和写入内存会在IO上浪费很多时间）。</li>
+<li>
+<strong>更省内存</strong>：在论文的图3当中，作者举了个例子，如图（A）所示的Residual模块，假设卷积层不改变channel的数量，那么在主分支和shortcut分支上都要保存各自的特征图或者称Activation，那么在add操作前占用的内存大概是输入Activation的两倍，而图（B）的Plain结构占用内存始终不变。<br> <img src="https://images2.imgbox.com/2e/27/p2OWmkLa_o.png" alt="在这里插入图片描述">
+</li>
+<li>
+<strong>更加灵活</strong>：作者在论文中提到了模型优化的剪枝问题，对于多分支的模型，结构限制较多剪枝很麻烦，而对于Plain结构的模型就相对灵活很多，剪枝也更加方便。</li>
+</ul> 
+<p>其实除此之外，在多分支转化成单路模型后很多算子进行了融合（比如Conv2d和BN融合），使得计算量变小了，而且算子减少后启动kernel的次数也减少了（比如在GPU中，每次执行一个算子就要启动一次kernel，启动kernel也需要消耗时间）。而且现在的硬件一般对<code>3x3</code>的卷积操作做了大量的优化，转成单路模型后采用的都是<code>3x3</code>卷积，这样也能进一步加速推理。如下图多分支模型（B）转换成单路模型图（C）。</p> 
+<p><img src="https://images2.imgbox.com/ca/74/Db2ahACV_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h2>
+<a id="2__39"></a>2 结构重参数化</h2> 
+<p>在简单了解RepVGG Block的训练结构后，接下来再来聊聊怎么将训练好的RepVGG Block转成推理时的模型结构，即<code>structural re-parameterization technique</code>过程。 根据论文中的图4（左侧）可以看到，结构重参数化主要分为两步，第一步主要是将Conv2d算子和BN算子融合以及将只有BN的分支转换成一个Conv2d算子，第二步将每个分支上的<code>3x3</code>卷积层融合成一个卷积层。关于参数具体融合的过程可以看图中右侧的部分，如果你能看懂图中要表达的含义，那么ok你可以跳过本文后续所有内容干其他事去了，如果没看懂可以接着往后看。</p> 
+<p><img src="https://images2.imgbox.com/e9/87/jQryXSWu_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h3>
+<a id="21_Conv2dBN_48"></a>2.1 融合Conv2d和BN</h3> 
+<p>关于Conv2d和BN的融合对于网络的优化而言已经是基操了。因为Conv2d和BN两个算子都是做线性运算，所以可以融合成一个算子。如果不了解卷积层的计算过程以及BN的计算过程的话建议先了解后再看该部分的内容。这里还需要强调一点，融合是在网络训练完之后做的，所以现在讲的默认都是推理模式，<strong>注意BN在训练以及推理时计算方式是不同的</strong>。对于卷积层，每个卷积核的通道数是与输入特征图的通道数相同，卷积核的个数决定了输出特征图的通道个数。对于BN层（推理模式），主要包含4个参数：<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        μ
+       
+      
+      
+       mu
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.19444em"></span><span class="mord mathdefault">μ</span></span></span></span></span>（均值）、<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         σ
+        
+        
+         2
+        
+       
+      
+      
+       sigma^2
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.814108em;vertical-align: 0em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">σ</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.814108em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span></span></span></span></span></span></span></span></span>（方差）、<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        γ
+       
+      
+      
+       gamma
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.19444em"></span><span class="mord mathdefault" style="margin-right: 0.05556em">γ</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        β
+       
+      
+      
+       beta
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.88888em;vertical-align: -0.19444em"></span><span class="mord mathdefault" style="margin-right: 0.05278em">β</span></span></span></span></span>，其中<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        μ
+       
+      
+      
+       mu
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.19444em"></span><span class="mord mathdefault">μ</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         σ
+        
+        
+         2
+        
+       
+      
+      
+       sigma^2
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.814108em;vertical-align: 0em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">σ</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.814108em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span></span></span></span></span></span></span></span></span>是训练过程中统计得到的，<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        γ
+       
+      
+      
+       gamma
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.19444em"></span><span class="mord mathdefault" style="margin-right: 0.05556em">γ</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        β
+       
+      
+      
+       beta
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.88888em;vertical-align: -0.19444em"></span><span class="mord mathdefault" style="margin-right: 0.05278em">β</span></span></span></span></span>是训练学习得到的。对于特征图第<code>i</code>个通道BN的计算公式如下，其中<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        ϵ
+       
+      
+      
+       epsilon
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em;vertical-align: 0em"></span><span class="mord mathdefault">ϵ</span></span></span></span></span>是一个非常小的常量，防止分母为零：<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         
+          y
+         
+         
+          i
+         
+        
+        
+         =
+        
+        
+         
+          
+           
+            x
+           
+           
+            i
+           
+          
+          
+           −
+          
+          
+           
+            μ
+           
+           
+            i
+           
+          
+         
+         
+          
+           
+            
+             σ
+            
+            
+             i
+            
+            
+             2
+            
+           
+           
+            +
+           
+           
+            ϵ
+           
+          
+         
+        
+        
+         ⋅
+        
+        
+         
+          γ
+         
+         
+          i
+         
+        
+        
+         +
+        
+        
+         
+          β
+         
+         
+          i
+         
+        
+       
+       
+         y_i = frac{x_i - mu_i}{sqrt{sigma^2_i + epsilon }} cdot gamma_i + beta_i 
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.19444em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 2.39033em;vertical-align: -1.13em"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.26033em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord sqrt"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.944522em"><span class="svg-align"><span class="pstrut" style="height: 3.2em"></span><span class="mord" style="padding-left: 1em"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">σ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.795908em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.276864em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord mathdefault">ϵ</span></span></span><span class=""><span class="pstrut" style="height: 3.2em"></span><span class="hide-tail" style="min-width: 1.02em;height: 1.28em">
+                   
+                    
+                   </span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.295478em"><span class=""></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line" style="border-bottom-width: 0.04em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord mathdefault">μ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 1.13em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">⋅</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 0.77777em;vertical-align: -0.19444em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.05556em">γ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.05556em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 0.88888em;vertical-align: -0.19444em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.05278em">β</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.05278em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span></span><br> 在论文的<code>3.3</code>章节中，作者给出了转换公式（对于通道<code>i</code>），其中<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        M
+       
+      
+      
+       M
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.68333em;vertical-align: 0em"></span><span class="mord mathdefault" style="margin-right: 0.10903em">M</span></span></span></span></span>代表输入BN层的特征图(Activation)，这里忽略了<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        ϵ
+       
+      
+      
+       epsilon
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em;vertical-align: 0em"></span><span class="mord mathdefault">ϵ</span></span></span></span></span>，因为：<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         b
+        
+        
+         n
+        
+        
+         (
+        
+        
+         M
+        
+        
+         ,
+        
+        
+         μ
+        
+        
+         ,
+        
+        
+         σ
+        
+        
+         ,
+        
+        
+         γ
+        
+        
+         ,
+        
+        
+         β
+        
+        
+         
+          )
+         
+         
+          
+           :
+          
+          
+           ,
+          
+          
+           i
+          
+          
+           ,
+          
+          
+           :
+          
+          
+           ,
+          
+          
+           :
+          
+         
+        
+        
+         =
+        
+        
+         (
+        
+        
+         
+          M
+         
+         
+          
+           :
+          
+          
+           ,
+          
+          
+           i
+          
+          
+           ,
+          
+          
+           :
+          
+          
+           ,
+          
+          
+           :
+          
+         
+        
+        
+         −
+        
+        
+         
+          μ
+         
+         
+          i
+         
+        
+        
+         )
+        
+        
+         
+          
+           γ
+          
+          
+           i
+          
+         
+         
+          
+           σ
+          
+          
+           i
+          
+         
+        
+        
+         +
+        
+        
+         
+          β
+         
+         
+          i
+         
+        
+       
+       
+         bn(M, mu, sigma, gamma, beta)_{:, i,:,:} = (M_{:, i,:,:} - mu_i)frac{gamma_i}{sigma_i} + beta_i 
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.03611em;vertical-align: -0.286108em"></span><span class="mord mathdefault">b</span><span class="mord mathdefault">n</span><span class="mopen">(</span><span class="mord mathdefault" style="margin-right: 0.10903em">M</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord mathdefault">μ</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord mathdefault" style="margin-right: 0.03588em">σ</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord mathdefault" style="margin-right: 0.05556em">γ</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord mathdefault" style="margin-right: 0.05278em">β</span><span class="mclose"><span class="mclose">)</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mrel mtight">:</span><span class="mpunct mtight">,</span><span class="mord mathdefault mtight">i</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 1.03611em;vertical-align: -0.286108em"></span><span class="mopen">(</span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.10903em">M</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.10903em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mrel mtight">:</span><span class="mpunct mtight">,</span><span class="mord mathdefault mtight">i</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 1.94356em;vertical-align: -0.836em"></span><span class="mord"><span class="mord mathdefault">μ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.10756em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">σ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line" style="border-bottom-width: 0.04em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.05556em">γ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.05556em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.836em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 0.88888em;vertical-align: -0.19444em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.05278em">β</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.05278em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span></span></p> 
+<p>所以转换后新的卷积层权重计算公式为（对于第<code>i</code>个卷积核），<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         W
+        
+        
+         ′
+        
+       
+      
+      
+       W^{prime}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.751892em;vertical-align: 0em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.13889em">W</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.751892em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span></span></span></span></span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         b
+        
+        
+         ′
+        
+       
+      
+      
+       b^{prime}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.751892em;vertical-align: 0em"></span><span class="mord"><span class="mord mathdefault">b</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.751892em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span></span></span></span></span></span></span></span></span>是新的权重和偏执：<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         
+          W
+         
+         
+          
+           i
+          
+          
+           ,
+          
+          
+           :
+          
+          
+           ,
+          
+          
+           :
+          
+          
+           ,
+          
+          
+           :
+          
+         
+         
+          ′
+         
+        
+        
+         =
+        
+        
+         
+          
+           γ
+          
+          
+           i
+          
+         
+         
+          
+           σ
+          
+          
+           i
+          
+         
+        
+        
+         
+          W
+         
+         
+          
+           i
+          
+          
+           ,
+          
+          
+           :
+          
+          
+           ,
+          
+          
+           :
+          
+          
+           ,
+          
+          
+           :
+          
+         
+        
+        
+         ,
+        
+        
+        
+         
+          b
+         
+         
+          i
+         
+         
+          ′
+         
+        
+        
+         =
+        
+        
+         
+          β
+         
+         
+          i
+         
+        
+        
+         −
+        
+        
+         
+          
+           
+            μ
+           
+           
+            i
+           
+          
+          
+           
+            γ
+           
+           
+            i
+           
+          
+         
+         
+          
+           σ
+          
+          
+           i
+          
+         
+        
+       
+       
+         W^{prime}_{i,:,:,:} = frac{gamma_i}{sigma_i}W_{i,:,:,:}, quad b^{prime}_i = beta_i -frac{mu_i gamma_i}{sigma_i} 
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.185em;vertical-align: -0.383108em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.13889em">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.801892em"><span class="" style="margin-left: -0.13889em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">i</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span></span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.383108em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 1.94356em;vertical-align: -0.836em"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.10756em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">σ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line" style="border-bottom-width: 0.04em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.05556em">γ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.05556em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.836em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.13889em">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.13889em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">i</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span><span class="mpunct mtight">,</span><span class="mrel mtight">:</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mspace" style="margin-right: 1em"></span><span class="mord"><span class="mord mathdefault">b</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.801892em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">′</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 0.88888em;vertical-align: -0.19444em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.05278em">β</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.05278em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 1.94356em;vertical-align: -0.836em"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.10756em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">σ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line" style="border-bottom-width: 0.04em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">μ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.05556em">γ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.05556em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.836em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span></span></span></span><br> 如果看懂了，可以直接跳过该小结，如果没看懂可以再看看下面的例子。</p> 
+<p>这里假设输入的特征图（Input feature map）如下图所示，输入通道数为2，然后采用两个卷积核（图中只画了第一个卷积核对应参数）。</p> 
+<p><img src="https://images2.imgbox.com/40/41/SGre2qER_o.png" alt="在这里插入图片描述">接着计算一下输出特征图（Output feature map）通道1上的第一个元素，即当卷积核1在输入特征图红色框区域卷积时得到的值（为了保证输入输出特征图高宽不变，所以对Input feature map进行了Padding）。其他位置的计算过程类似这里就不去演示了。</p> 
+<p><img src="https://images2.imgbox.com/02/f1/N0etZM9X_o.png" alt="在这里插入图片描述">然后再将卷积层输出的特征图作为BN层的输入，这里同样计算一下输出特征图（Output feature map）通道1上的第一个元素，按照上述BN在推理时的计算公式即可得到如下图所示的计算结果。</p> 
+<p><img src="https://images2.imgbox.com/34/86/xALcKvrZ_o.png" alt="在这里插入图片描述">最后对上述计算公式进行简单的变形，可以得到转化后新卷积层只需在对应第<code>i</code>个卷积核的权重上乘以<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          γ
+         
+         
+          i
+         
+        
+        
+         
+          
+           
+            σ
+           
+           
+            i
+           
+           
+            2
+           
+          
+          
+           +
+          
+          
+           ϵ
+          
+         
+        
+       
+      
+      
+       frac{gamma_i}{sqrt{sigma^2_i+epsilon}}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.5771em;vertical-align: -0.8296em"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.7475em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord sqrt mtight"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.02832em"><span class="svg-align"><span class="pstrut" style="height: 3.42857em"></span><span class="mord mtight" style="padding-left: 1.19em"><span class="mord mtight"><span class="mord mathdefault mtight" style="margin-right: 0.03588em">σ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.805114em"><span class="" style="margin-left: -0.03588em;margin-right: 0.0714286em"><span class="pstrut" style="height: 2.5em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mathdefault mtight">i</span></span></span><span class="" style="margin-right: 0.0714286em"><span class="pstrut" style="height: 2.5em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.322286em"><span class=""></span></span></span></span></span></span><span class="mbin mtight">+</span><span class="mord mathdefault mtight">ϵ</span></span></span><span class=""><span class="pstrut" style="height: 3.42857em"></span><span class="hide-tail mtight" style="min-width: 0.853em;height: 1.54286em">
+                   
+                    
+                   </span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.428246em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line" style="border-bottom-width: 0.04em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight"><span class="mord mathdefault mtight" style="margin-right: 0.05556em">γ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.328086em"><span class="" style="margin-left: -0.05556em;margin-right: 0.0714286em"><span class="pstrut" style="height: 2.5em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.143em"><span class=""></span></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.8296em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span></span></span>系数即可，对应第<code>i</code>个卷积核新的偏执就等于<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         β
+        
+        
+         i
+        
+       
+       
+        −
+       
+       
+        
+         
+          
+           μ
+          
+          
+           i
+          
+         
+         
+          
+           γ
+          
+          
+           i
+          
+         
+        
+        
+         
+          
+           
+            σ
+           
+           
+            i
+           
+           
+            2
+           
+          
+          
+           +
+          
+          
+           ϵ
+          
+         
+        
+       
+      
+      
+       beta_i-frac{mu_i gamma_i}{sqrt{sigma^2_i + epsilon}}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.88888em;vertical-align: -0.19444em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.05278em">β</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.05278em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 1.5771em;vertical-align: -0.8296em"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.7475em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord sqrt mtight"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.02832em"><span class="svg-align"><span class="pstrut" style="height: 3.42857em"></span><span class="mord mtight" style="padding-left: 1.19em"><span class="mord mtight"><span class="mord mathdefault mtight" style="margin-right: 0.03588em">σ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.805114em"><span class="" style="margin-left: -0.03588em;margin-right: 0.0714286em"><span class="pstrut" style="height: 2.5em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mathdefault mtight">i</span></span></span><span class="" style="margin-right: 0.0714286em"><span class="pstrut" style="height: 2.5em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.322286em"><span class=""></span></span></span></span></span></span><span class="mbin mtight">+</span><span class="mord mathdefault mtight">ϵ</span></span></span><span class=""><span class="pstrut" style="height: 3.42857em"></span><span class="hide-tail mtight" style="min-width: 0.853em;height: 1.54286em">
+                   
+                    
+                   </span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.428246em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line" style="border-bottom-width: 0.04em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight"><span class="mord mathdefault mtight">μ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.328086em"><span class="" style="margin-left: 0em;margin-right: 0.0714286em"><span class="pstrut" style="height: 2.5em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.143em"><span class=""></span></span></span></span></span></span><span class="mord mtight"><span class="mord mathdefault mtight" style="margin-right: 0.05556em">γ</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.328086em"><span class="" style="margin-left: -0.05556em;margin-right: 0.0714286em"><span class="pstrut" style="height: 2.5em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.143em"><span class=""></span></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.8296em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span></span></span></span></span>（因为之前采用Conv2d+BN的组合中Conv2d默认是不采用偏执的或者说偏执为零）。</p> 
+<p><img src="https://images2.imgbox.com/37/01/11bLxfKz_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h3>
+<a id="22_Conv2dBNPytorch_79"></a>2.2 Conv2d+BN融合实验(Pytorch)</h3> 
+<p>下面是参考作者提供的源码改的一个小实验，首先创建了一个<code>module</code>包含了卷积和BN模块，然后按照上述转换公式将卷积层的权重和BN的权重进行融合转换，接着载入到新建的卷积模块<code>fused_conv</code>中，最后随机创建一个Tensor（<code>f1</code>）将它分别输入到<code>module</code>以及<code>fused_conv</code>中，通过对比两者的输出可以发现它们的结果是一致的。</p> 
+<pre><code class="prism language-python3"><span class="token keyword">from</span> collections <span class="token keyword">import</span> OrderedDict
+
+<span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> torch
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>nn <span class="token keyword">as</span> nn
+
+
+<span class="token keyword">def</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    torch<span class="token punctuation">.</span>random<span class="token punctuation">.</span>manual_seed<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+
+    f1 <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">)</span>
+
+    module <span class="token operator">=</span> nn<span class="token punctuation">.</span>Sequential<span class="token punctuation">(</span>OrderedDict<span class="token punctuation">(</span>
+        conv<span class="token operator">=</span>nn<span class="token punctuation">.</span>Conv2d<span class="token punctuation">(</span>in_channels<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> out_channels<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        bn<span class="token operator">=</span>nn<span class="token punctuation">.</span>BatchNorm2d<span class="token punctuation">(</span>num_features<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+    module<span class="token punctuation">.</span><span class="token builtin">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">with</span> torch<span class="token punctuation">.</span>no_grad<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        output1 <span class="token operator">=</span> module<span class="token punctuation">(</span>f1<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span>output1<span class="token punctuation">)</span>
+
+    <span class="token comment"># fuse conv + bn</span>
+    kernel <span class="token operator">=</span> module<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>weight 
+    running_mean <span class="token operator">=</span> module<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>running_mean
+    running_var <span class="token operator">=</span> module<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>running_var
+    gamma <span class="token operator">=</span> module<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>weight
+    beta <span class="token operator">=</span> module<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>bias
+    eps <span class="token operator">=</span> module<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>eps
+    std <span class="token operator">=</span> <span class="token punctuation">(</span>running_var <span class="token operator">+</span> eps<span class="token punctuation">)</span><span class="token punctuation">.</span>sqrt<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    t <span class="token operator">=</span> <span class="token punctuation">(</span>gamma <span class="token operator">/</span> std<span class="token punctuation">)</span><span class="token punctuation">.</span>reshape<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span>  <span class="token comment"># [ch] -&gt; [ch, 1, 1, 1]</span>
+    kernel <span class="token operator">=</span> kernel <span class="token operator">*</span> t
+    bias <span class="token operator">=</span> beta <span class="token operator">-</span> running_mean <span class="token operator">*</span> gamma <span class="token operator">/</span> std
+    fused_conv <span class="token operator">=</span> nn<span class="token punctuation">.</span>Conv2d<span class="token punctuation">(</span>in_channels<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> out_channels<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    fused_conv<span class="token punctuation">.</span>load_state_dict<span class="token punctuation">(</span>OrderedDict<span class="token punctuation">(</span>weight<span class="token operator">=</span>kernel<span class="token punctuation">,</span> bias<span class="token operator">=</span>bias<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">with</span> torch<span class="token punctuation">.</span>no_grad<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        output2 <span class="token operator">=</span> fused_conv<span class="token punctuation">(</span>f1<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span>output2<span class="token punctuation">)</span>
+
+    np<span class="token punctuation">.</span>testing<span class="token punctuation">.</span>assert_allclose<span class="token punctuation">(</span>output1<span class="token punctuation">.</span>numpy<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> output2<span class="token punctuation">.</span>numpy<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> rtol<span class="token operator">=</span><span class="token number">1e-03</span><span class="token punctuation">,</span> atol<span class="token operator">=</span><span class="token number">1e-05</span><span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"convert module has been tested, and the result looks good!"</span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">'__main__'</span><span class="token punctuation">:</span>
+    main<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>终端输出结果：</p> 
+<pre><code>tensor([[[[ 0.2554, -0.0267,  0.1502],
+          [ 0.8394,  1.0100,  0.5443],
+          [-0.7252, -0.6889,  0.4716]],
+
+         [[ 0.6937,  0.1421,  0.4734],
+          [ 0.0168,  0.5665, -0.2308],
+          [-0.2812, -0.2572, -0.1287]]]])
+tensor([[[[ 0.2554, -0.0267,  0.1502],
+          [ 0.8394,  1.0100,  0.5443],
+          [-0.7252, -0.6889,  0.4716]],
+
+         [[ 0.6937,  0.1421,  0.4734],
+          [ 0.0168,  0.5665, -0.2308],
+          [-0.2812, -0.2572, -0.1287]]]])
+convert module has been tested, and the result looks good!
+</code></pre> 
+<hr> 
+<h3>
+<a id="23_1x13x3_152"></a>2.3 将1x1卷积转换成3x3卷积</h3> 
+<p>这个过程比较简单，如下图所示，以<code>1x1</code>卷积层中某一个卷积核为例，只需在原来权重周围补一圈零就行了，这样就变成了<code>3x3</code>的卷积层，注意为了保证输入输出特征图高宽不变，此时需要将padding设置成1（原来卷积核大小为<code>1x1</code>时padding为0）。最后按照上述<code>2.1</code>中讲的内容将卷积层和BN层进行融合即可。</p> 
+<p><img src="https://images2.imgbox.com/bd/91/VfRRtt9j_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h3>
+<a id="24_BN3x3_159"></a>2.4 将BN转换成3x3卷积</h3> 
+<p>对于只有BN的分支由于没有卷积层，所以我们可以先自己构建出一个卷积层来。如下图所示，构建了一个<code>3x3</code>的卷积层，该卷积层只做了恒等映射，即输入输出特征图不变。既然有了卷积层，那么又可以按照上述<code>2.1</code>中讲的内容将卷积层和BN层进行融合。</p> 
+<p><img src="https://images2.imgbox.com/8f/e5/1PLZNTve_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h3>
+<a id="25__165"></a>2.5 多分支融合</h3> 
+<p>在上面的章节中，我们已经讲了怎么把每个分支融合转换成一个<code>3x3</code>的卷积层，接下来需要进一步将多分支转换成一个单路<code>3x3</code>卷积层。</p> 
+<p><img src="https://images2.imgbox.com/04/06/su3XGBbp_o.png" alt="在这里插入图片描述"><br> 合并的过程其实也很简单，直接将这三个卷积层的参数相加即可，具体推理过程就不讲了，如果不了解的可以自己动手算算。<br> <img src="https://images2.imgbox.com/09/41/CPfpWsQB_o.png" alt="在这里插入图片描述"><br> 最后我们再来看下原论文中的图4就非常清晰了。</p> 
+<p><img src="https://images2.imgbox.com/e9/87/jQryXSWu_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h3>
+<a id="26_Pytorch_177"></a>2.6 结构重参数化实验(Pytorch)</h3> 
+<p>下面是参考作者提供的源码改的一个小实验，在该实验中测试了 <strong>结构重参数化</strong> 前后推理速度的比较，以及检查转换前后的输出是否一致。</p> 
+<pre><code class="prism language-python3"><span class="token keyword">import</span> time
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>nn <span class="token keyword">as</span> nn
+<span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> torch
+
+
+<span class="token keyword">def</span> <span class="token function">conv_bn</span><span class="token punctuation">(</span>in_channels<span class="token punctuation">,</span> out_channels<span class="token punctuation">,</span> kernel_size<span class="token punctuation">,</span> stride<span class="token punctuation">,</span> padding<span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    result <span class="token operator">=</span> nn<span class="token punctuation">.</span>Sequential<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    result<span class="token punctuation">.</span>add_module<span class="token punctuation">(</span><span class="token string">'conv'</span><span class="token punctuation">,</span> nn<span class="token punctuation">.</span>Conv2d<span class="token punctuation">(</span>in_channels<span class="token operator">=</span>in_channels<span class="token punctuation">,</span> out_channels<span class="token operator">=</span>out_channels<span class="token punctuation">,</span>
+                                        kernel_size<span class="token operator">=</span>kernel_size<span class="token punctuation">,</span> stride<span class="token operator">=</span>stride<span class="token punctuation">,</span> padding<span class="token operator">=</span>padding<span class="token punctuation">,</span>
+                                        groups<span class="token operator">=</span>groups<span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    result<span class="token punctuation">.</span>add_module<span class="token punctuation">(</span><span class="token string">'bn'</span><span class="token punctuation">,</span> nn<span class="token punctuation">.</span>BatchNorm2d<span class="token punctuation">(</span>num_features<span class="token operator">=</span>out_channels<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> result
+
+
+<span class="token keyword">class</span> <span class="token class-name">RepVGGBlock</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> in_channels<span class="token punctuation">,</span> out_channels<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span>
+                 stride<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> dilation<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> groups<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> padding_mode<span class="token operator">=</span><span class="token string">'zeros'</span><span class="token punctuation">,</span> deploy<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>RepVGGBlock<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>deploy <span class="token operator">=</span> deploy
+        self<span class="token punctuation">.</span>groups <span class="token operator">=</span> groups
+        self<span class="token punctuation">.</span>in_channels <span class="token operator">=</span> in_channels
+        self<span class="token punctuation">.</span>nonlinearity <span class="token operator">=</span> nn<span class="token punctuation">.</span>ReLU<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">if</span> deploy<span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>rbr_reparam <span class="token operator">=</span> nn<span class="token punctuation">.</span>Conv2d<span class="token punctuation">(</span>in_channels<span class="token operator">=</span>in_channels<span class="token punctuation">,</span> out_channels<span class="token operator">=</span>out_channels<span class="token punctuation">,</span>
+                                         kernel_size<span class="token operator">=</span>kernel_size<span class="token punctuation">,</span> stride<span class="token operator">=</span>stride<span class="token punctuation">,</span>
+                                         padding<span class="token operator">=</span>padding<span class="token punctuation">,</span> dilation<span class="token operator">=</span>dilation<span class="token punctuation">,</span> groups<span class="token operator">=</span>groups<span class="token punctuation">,</span>
+                                         bias<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> padding_mode<span class="token operator">=</span>padding_mode<span class="token punctuation">)</span>
+
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>rbr_identity <span class="token operator">=</span> nn<span class="token punctuation">.</span>BatchNorm2d<span class="token punctuation">(</span>num_features<span class="token operator">=</span>in_channels<span class="token punctuation">)</span> 
+                <span class="token keyword">if</span> out_channels <span class="token operator">==</span> in_channels <span class="token keyword">and</span> stride <span class="token operator">==</span> <span class="token number">1</span> <span class="token keyword">else</span> <span class="token boolean">None</span>
+            self<span class="token punctuation">.</span>rbr_dense <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>in_channels<span class="token operator">=</span>in_channels<span class="token punctuation">,</span> out_channels<span class="token operator">=</span>out_channels<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span>kernel_size<span class="token punctuation">,</span>
+                                     stride<span class="token operator">=</span>stride<span class="token punctuation">,</span> padding<span class="token operator">=</span>padding<span class="token punctuation">,</span> groups<span class="token operator">=</span>groups<span class="token punctuation">)</span>
+            self<span class="token punctuation">.</span>rbr_1x1 <span class="token operator">=</span> conv_bn<span class="token punctuation">(</span>in_channels<span class="token operator">=</span>in_channels<span class="token punctuation">,</span> out_channels<span class="token operator">=</span>out_channels<span class="token punctuation">,</span> kernel_size<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span>
+                                   stride<span class="token operator">=</span>stride<span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">,</span> groups<span class="token operator">=</span>groups<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> inputs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> <span class="token builtin">hasattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token string">'rbr_reparam'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token keyword">return</span> self<span class="token punctuation">.</span>nonlinearity<span class="token punctuation">(</span>self<span class="token punctuation">.</span>rbr_reparam<span class="token punctuation">(</span>inputs<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">if</span> self<span class="token punctuation">.</span>rbr_identity <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            id_out <span class="token operator">=</span> <span class="token number">0</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            id_out <span class="token operator">=</span> self<span class="token punctuation">.</span>rbr_identity<span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>nonlinearity<span class="token punctuation">(</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">(</span>inputs<span class="token punctuation">)</span> <span class="token operator">+</span> self<span class="token punctuation">.</span>rbr_1x1<span class="token punctuation">(</span>inputs<span class="token punctuation">)</span> <span class="token operator">+</span> id_out<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">get_equivalent_kernel_bias</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        kernel3x3<span class="token punctuation">,</span> bias3x3 <span class="token operator">=</span> self<span class="token punctuation">.</span>_fuse_bn_tensor<span class="token punctuation">(</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">)</span>
+        kernel1x1<span class="token punctuation">,</span> bias1x1 <span class="token operator">=</span> self<span class="token punctuation">.</span>_fuse_bn_tensor<span class="token punctuation">(</span>self<span class="token punctuation">.</span>rbr_1x1<span class="token punctuation">)</span>
+        kernelid<span class="token punctuation">,</span> biasid <span class="token operator">=</span> self<span class="token punctuation">.</span>_fuse_bn_tensor<span class="token punctuation">(</span>self<span class="token punctuation">.</span>rbr_identity<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> kernel3x3 <span class="token operator">+</span> self<span class="token punctuation">.</span>_pad_1x1_to_3x3_tensor<span class="token punctuation">(</span>kernel1x1<span class="token punctuation">)</span> <span class="token operator">+</span> kernelid<span class="token punctuation">,</span> bias3x3 <span class="token operator">+</span> bias1x1 <span class="token operator">+</span> biasid
+
+    <span class="token keyword">def</span> <span class="token function">_pad_1x1_to_3x3_tensor</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> kernel1x1<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> kernel1x1 <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            <span class="token keyword">return</span> <span class="token number">0</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            <span class="token keyword">return</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>functional<span class="token punctuation">.</span>pad<span class="token punctuation">(</span>kernel1x1<span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">_fuse_bn_tensor</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> branch<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> branch <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span>
+        <span class="token keyword">if</span> <span class="token builtin">isinstance</span><span class="token punctuation">(</span>branch<span class="token punctuation">,</span> nn<span class="token punctuation">.</span>Sequential<span class="token punctuation">)</span><span class="token punctuation">:</span>
+            kernel <span class="token operator">=</span> branch<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>weight
+            running_mean <span class="token operator">=</span> branch<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>running_mean
+            running_var <span class="token operator">=</span> branch<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>running_var
+            gamma <span class="token operator">=</span> branch<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>weight
+            beta <span class="token operator">=</span> branch<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>bias
+            eps <span class="token operator">=</span> branch<span class="token punctuation">.</span>bn<span class="token punctuation">.</span>eps
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            <span class="token keyword">assert</span> <span class="token builtin">isinstance</span><span class="token punctuation">(</span>branch<span class="token punctuation">,</span> nn<span class="token punctuation">.</span>BatchNorm2d<span class="token punctuation">)</span>
+            <span class="token keyword">if</span> <span class="token keyword">not</span> <span class="token builtin">hasattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token string">'id_tensor'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                input_dim <span class="token operator">=</span> self<span class="token punctuation">.</span>in_channels <span class="token operator">//</span> self<span class="token punctuation">.</span>groups
+                kernel_value <span class="token operator">=</span> np<span class="token punctuation">.</span>zeros<span class="token punctuation">(</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>in_channels<span class="token punctuation">,</span> input_dim<span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">)</span><span class="token punctuation">,</span> dtype<span class="token operator">=</span>np<span class="token punctuation">.</span>float32<span class="token punctuation">)</span>
+                <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>in_channels<span class="token punctuation">)</span><span class="token punctuation">:</span>
+                    kernel_value<span class="token punctuation">[</span>i<span class="token punctuation">,</span> i <span class="token operator">%</span> input_dim<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">1</span>
+                self<span class="token punctuation">.</span>id_tensor <span class="token operator">=</span> torch<span class="token punctuation">.</span>from_numpy<span class="token punctuation">(</span>kernel_value<span class="token punctuation">)</span><span class="token punctuation">.</span>to<span class="token punctuation">(</span>branch<span class="token punctuation">.</span>weight<span class="token punctuation">.</span>device<span class="token punctuation">)</span>
+            kernel <span class="token operator">=</span> self<span class="token punctuation">.</span>id_tensor
+            running_mean <span class="token operator">=</span> branch<span class="token punctuation">.</span>running_mean
+            running_var <span class="token operator">=</span> branch<span class="token punctuation">.</span>running_var
+            gamma <span class="token operator">=</span> branch<span class="token punctuation">.</span>weight
+            beta <span class="token operator">=</span> branch<span class="token punctuation">.</span>bias
+            eps <span class="token operator">=</span> branch<span class="token punctuation">.</span>eps
+        std <span class="token operator">=</span> <span class="token punctuation">(</span>running_var <span class="token operator">+</span> eps<span class="token punctuation">)</span><span class="token punctuation">.</span>sqrt<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        t <span class="token operator">=</span> <span class="token punctuation">(</span>gamma <span class="token operator">/</span> std<span class="token punctuation">)</span><span class="token punctuation">.</span>reshape<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> kernel <span class="token operator">*</span> t<span class="token punctuation">,</span> beta <span class="token operator">-</span> running_mean <span class="token operator">*</span> gamma <span class="token operator">/</span> std
+
+    <span class="token keyword">def</span> <span class="token function">switch_to_deploy</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> <span class="token builtin">hasattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token string">'rbr_reparam'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token keyword">return</span>
+        kernel<span class="token punctuation">,</span> bias <span class="token operator">=</span> self<span class="token punctuation">.</span>get_equivalent_kernel_bias<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>rbr_reparam <span class="token operator">=</span> nn<span class="token punctuation">.</span>Conv2d<span class="token punctuation">(</span>in_channels<span class="token operator">=</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>in_channels<span class="token punctuation">,</span>
+                                     out_channels<span class="token operator">=</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>out_channels<span class="token punctuation">,</span>
+                                     kernel_size<span class="token operator">=</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>kernel_size<span class="token punctuation">,</span> stride<span class="token operator">=</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>stride<span class="token punctuation">,</span>
+                                     padding<span class="token operator">=</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>padding<span class="token punctuation">,</span> dilation<span class="token operator">=</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>dilation<span class="token punctuation">,</span>
+                                     groups<span class="token operator">=</span>self<span class="token punctuation">.</span>rbr_dense<span class="token punctuation">.</span>conv<span class="token punctuation">.</span>groups<span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>rbr_reparam<span class="token punctuation">.</span>weight<span class="token punctuation">.</span>data <span class="token operator">=</span> kernel
+        self<span class="token punctuation">.</span>rbr_reparam<span class="token punctuation">.</span>bias<span class="token punctuation">.</span>data <span class="token operator">=</span> bias
+        <span class="token keyword">for</span> para <span class="token keyword">in</span> self<span class="token punctuation">.</span>parameters<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            para<span class="token punctuation">.</span>detach_<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>__delattr__<span class="token punctuation">(</span><span class="token string">'rbr_dense'</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>__delattr__<span class="token punctuation">(</span><span class="token string">'rbr_1x1'</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> <span class="token builtin">hasattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token string">'rbr_identity'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>__delattr__<span class="token punctuation">(</span><span class="token string">'rbr_identity'</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> <span class="token builtin">hasattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token string">'id_tensor'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>__delattr__<span class="token punctuation">(</span><span class="token string">'id_tensor'</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>deploy <span class="token operator">=</span> <span class="token boolean">True</span>
+
+<span class="token keyword">def</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    f1 <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">64</span><span class="token punctuation">)</span>
+    block <span class="token operator">=</span> RepVGGBlock<span class="token punctuation">(</span>in_channels<span class="token operator">=</span><span class="token number">64</span><span class="token punctuation">,</span> out_channels<span class="token operator">=</span><span class="token number">64</span><span class="token punctuation">)</span>
+    block<span class="token punctuation">.</span><span class="token builtin">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">with</span> torch<span class="token punctuation">.</span>no_grad<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        output1 <span class="token operator">=</span> block<span class="token punctuation">(</span>f1<span class="token punctuation">)</span>
+        start_time <span class="token operator">=</span> time<span class="token punctuation">.</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            block<span class="token punctuation">(</span>f1<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string-interpolation"><span class="token string">f"consume time: </span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>time<span class="token punctuation">.</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> start_time<span class="token punctuation">}</span></span><span class="token string">"</span></span><span class="token punctuation">)</span>
+
+        <span class="token comment"># re-parameterization</span>
+        block<span class="token punctuation">.</span>switch_to_deploy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        output2 <span class="token operator">=</span> block<span class="token punctuation">(</span>f1<span class="token punctuation">)</span>
+        start_time <span class="token operator">=</span> time<span class="token punctuation">.</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            block<span class="token punctuation">(</span>f1<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string-interpolation"><span class="token string">f"consume time: </span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>time<span class="token punctuation">.</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> start_time<span class="token punctuation">}</span></span><span class="token string">"</span></span><span class="token punctuation">)</span>
+
+        np<span class="token punctuation">.</span>testing<span class="token punctuation">.</span>assert_allclose<span class="token punctuation">(</span>output1<span class="token punctuation">.</span>numpy<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> output2<span class="token punctuation">.</span>numpy<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> rtol<span class="token operator">=</span><span class="token number">1e-03</span><span class="token punctuation">,</span> atol<span class="token operator">=</span><span class="token number">1e-05</span><span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"convert module has been tested, and the result looks good!"</span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">'__main__'</span><span class="token punctuation">:</span>
+    main<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>终端输出结果如下：</p> 
+<pre><code>consume time: 0.6152701377868652
+consume time: 0.30626463890075684
+convert module has been tested, and the result looks good!
+</code></pre> 
+<p>通过对比能够发现，<strong>结构重参数化</strong>后推理速度翻倍了，并且转换前后的输出保持一致。</p> 
+<hr> 
+<h2>
+<a id="3__328"></a>3 模型配置</h2> 
+<p>在论文中对模型进一步细分有<code>RepVGG-A</code>、<code>RepVGG-B</code>以及<code>RepVGG-Bxgy</code>三种配置。<br> <img src="https://images2.imgbox.com/b1/b3/T7oLcAsE_o.png" alt="在这里插入图片描述"></p> 
+<p>根据表2可以看出<code>RepVGG-B</code>比<code>RepVGG-A</code>要更深。可以细看这两种配置在每个stage重复block的次数。<code>RepVGG-A</code>中的base Layers of each stage为<code>1, 2, 3, 14, 1</code>而<code>RepVGG-B</code>中的base Layers of each stage为<code>1, 4, 6, 16, 1</code>，更加详细的模型配置可以看表3. 其中<code>a</code>代表模型stage2~4的宽度缩放因子，<code>b</code>代表模型最后一个stage的宽度缩放因子。</p> 
+<p><img src="https://images2.imgbox.com/3b/04/7TTnTbMz_o.png" alt="在这里插入图片描述"></p> 
+<p>而<code>RepVGG-Bxgy</code>配置是在<code>RepVGG-B</code>的基础上加入了组卷积（Group Convolution），其中<code>gy</code>表示组卷积采用的groups参数为<code>y</code>，注意并不是所有卷积层都采用组卷积，根据源码可以看到，是从Stage2开始（索引从1开始）的第<code>2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26</code>的卷积层采用组卷积。</p> 
+<pre><code class="prism language-python3">optional_groupwise_layers <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">6</span><span class="token punctuation">,</span> <span class="token number">8</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">12</span><span class="token punctuation">,</span> <span class="token number">14</span><span class="token punctuation">,</span> <span class="token number">16</span><span class="token punctuation">,</span> <span class="token number">18</span><span class="token punctuation">,</span> <span class="token number">20</span><span class="token punctuation">,</span> <span class="token number">22</span><span class="token punctuation">,</span> <span class="token number">24</span><span class="token punctuation">,</span> <span class="token number">26</span><span class="token punctuation">]</span>
+</code></pre> 
+<hr> 
+<p>到此，有关RepVGG的内容就基本讲完了。如果觉得这篇文章对你有用，记得点赞、收藏并分享给你的小伙伴们哦?。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

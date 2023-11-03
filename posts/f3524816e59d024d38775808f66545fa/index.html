@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>PawningShop：一种NFT抵押借贷的实现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">PawningShop：一种NFT抵押借贷的实现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>代码：<a class="link-info" href="https://github.com/khanh1998/NFTPawnShopSmartContract/blob/aa1e0b19a8e55b0d184cbefccad323a6b928f54c/solidity/contracts/PawningShop.sol" title="PawningShop">PawningShop</a></p> 
+<pre><code class="language-javascript">contract PawningShop {
+
+    using SafeMath for uint256;
+    using SafeMath for uint8;
+
+    enum PawnStatus {
+        CREATED,
+        CANCELLED,
+        DEAL,
+        LIQUIDATED,
+        REPAID
+    }
+    struct Pawn {
+        // who borrows money
+        address creator;
+        address contractAddress;
+        uint256 tokenId;
+        PawnStatus status;
+    }
+    struct Bid {
+        address creator; // who create the bid
+        uint256 loanAmount;
+        // the amount of wei the lender lend to the borrower
+        uint256 interest; // the maximum interest that the borrower have to pay in wei
+        uint256 loanStartTime; // timestamp
+        uint256 loanDuration; // duration in days
+        bool isInterestProRated; // if the borrower pays sonner, then pays less interest
+    }
+    address public owner;
+    address[] public _whiteListNFT;
+    uint256 public _feeRate;
+    uint256 public _totalNumberOfPawn = 0;
+    uint256 public _totalNumberOfBid = 0;
+    // mapping nft address -&gt; token id -&gt; pawn
+    mapping(uint256 =&gt; Pawn) public _pawns;
+    // mapping bid id =&gt; bid
+    mapping(uint256 =&gt; Bid) public _bids;
+    // mapping bid id to pawn id
+    mapping(uint256 =&gt; uint256) public _bidToPawn;
+    mapping(uint256 =&gt; uint256) public _pawnToBid;
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    event PawnCreated(address borrower, uint256 indexed pawnId);
+    event PawnCancelled(address borrower, uint256 indexed pawnId);
+    event PawnDeal(address borrower, address lender, uint256 indexed pawnId, uint256 bidId);
+    event PawnRepaid(address borrower, address lender, uint256 indexed pawnId, uint256 bidId);
+    event PawnLiquidated(address borrower, address lender, uint256 indexed pawnId, uint256 bidId);
+    event BidCreated(address borrower, address lender, uint256 pawnId, uint256 indexed bidId);
+    event BidAccepted(address borrower, address lender, uint256 pawnId, uint256 indexed bidId);
+    event BidCancelled(address borrower, address lender, uint256 pawnId, uint256 indexed bidId);
+    event WhiteListAdded(address smartContract);
+    event WhiteListRemoved(address smartContract);
+
+    function getPawnById(uint256 id) public view returns(Pawn memory) {
+        return _pawns[id];
+    }
+
+    function createPawn(address tokenAddress, uint256 tokenId) public {
+        _totalNumberOfPawn += 1;
+        bool isInWhiteList = false;
+        for (uint256 i = 0; i &lt; _whiteListNFT.length; i++) {
+            if (tokenAddress == _whiteListNFT[i]) {
+                isInWhiteList = true;
+            }
+        }
+        address sender = msg.sender;
+        require(
+            isInWhiteList == true,
+            "PawningShop: smart contract is not in white list"
+        );
+        bool isApproved = IERC721(tokenAddress).getApproved(tokenId) ==
+            address(this);
+        bool isApprovedForAll = IERC721(tokenAddress).isApprovedForAll(
+            sender,
+            address(this)
+        );
+        require(
+            isApproved || isApprovedForAll,
+            "PawningShop: haven't got permission to transfer"
+        );
+
+        IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
+
+        _pawns[_totalNumberOfPawn].creator = sender;
+        _pawns[_totalNumberOfPawn].contractAddress = tokenAddress;
+        _pawns[_totalNumberOfPawn].tokenId = tokenId;
+        _pawns[_totalNumberOfPawn].status = PawnStatus.CREATED;
+        emit PawnCreated(sender, _totalNumberOfPawn);
+    }
+
+    function cancelPawn(uint256 pawnId) public {
+        Pawn storage pawn = _pawns[pawnId];
+        address creator = pawn.creator;
+        require(
+            pawn.status == PawnStatus.CREATED,
+            "PawningShop: Only can cancel when it has status of CREATED"
+        );
+        require(
+            msg.sender == creator,
+            "PawningShop: Only owner of the pawn can cancel it"
+        );
+        require(
+            _pawnToBid[pawnId] == 0,
+            "PawningShop: Only can cancel when no bid is accepted"
+        );
+        pawn.status = PawnStatus.CANCELLED;
+        IERC721(pawn.contractAddress).transferFrom(address(this), creator, pawn.tokenId);
+        emit PawnCancelled(owner, pawnId);
+    }
+
+    function createBid(
+        uint256 rate,
+        uint256 duration,
+        bool isInterestProRated,
+        uint256 pawnId
+    ) public payable {
+        _totalNumberOfBid += 1;
+        address lender = msg.sender;
+        uint256 amount = msg.value;
+        Pawn storage pawn = _pawns[pawnId];
+        address borrower = pawn.creator;
+        require(pawnId &gt; 0, "PawningShop: pawn id is not valid");
+        require(
+            borrower != address(0) || pawn.contractAddress != address(0), 
+            "Pawningshop: pawn is not existed"
+        );
+        require(
+            borrower != lender,
+            "PawningShop: creator of the pawn cannot make a bid"
+        );
+        require(
+            pawn.status == PawnStatus.CREATED,
+            "PawningShop: cannot bid this pawn"
+        );
+        require(
+            amount &gt; 0,
+            "PawningShop: amount of money must be bigger than 0"
+        );
+
+        _bids[_totalNumberOfBid].creator = lender;
+        _bids[_totalNumberOfBid].loanAmount = amount;
+        _bids[_totalNumberOfBid].interest = rate;
+        _bids[_totalNumberOfBid].loanDuration = duration;
+        _bids[_totalNumberOfBid].isInterestProRated = isInterestProRated;
+        // _bids[_totalNumberOfBid].loanStartTime = loanStartTime;
+        // loanStartTime will be set when the borrower accepts bid
+
+        _bidToPawn[_totalNumberOfBid] = pawnId;
+        emit BidCreated(borrower, lender, pawnId, _totalNumberOfBid);
+    }
+
+    function cancelBid(uint256 bidId) public {
+        Bid memory currBid = _bids[bidId];
+        address payable lender = payable(currBid.creator);
+        address sender = msg.sender;
+        require(
+            sender == lender,
+            "PawningShop: only creator can cancel the bid"
+        );
+        uint256 pawnId = _bidToPawn[bidId];
+        address borrower = _pawns[pawnId].creator;
+        require(
+            _pawnToBid[pawnId] != bidId,
+            "PawningShop: your bid is accepted, cannot cancel"
+        );
+        lender.transfer(currBid.loanAmount);
+        delete _bids[bidId];
+        delete _bidToPawn[bidId];
+        emit BidCancelled(borrower, lender, pawnId, bidId);
+    }
+
+    function acceptBid(uint256 bidId) public {
+        Bid storage currBid = _bids[bidId];
+        address lender = currBid.creator;
+        uint256 pawnId = _bidToPawn[bidId];
+        require(
+            pawnId &gt; 0,
+            "PawningShop: The pawn is not existed"
+        );
+        Pawn storage pawn = _pawns[pawnId];
+        address payable borrower = payable(pawn.creator);
+        require(
+            borrower == msg.sender,
+            "PawningShop: only creator of pawn can accept bid"
+        );
+        borrower.transfer(currBid.loanAmount);
+        pawn.status = PawnStatus.DEAL;
+        _pawnToBid[pawnId] = bidId;
+        currBid.loanStartTime = block.timestamp;
+        emit BidAccepted(borrower, lender, pawnId, bidId);
+    }
+
+    function repaid(uint256 pawnId) public payable {
+        Pawn storage currPawn = _pawns[pawnId];
+        address borrower = currPawn.creator;
+        require(
+            borrower == msg.sender,
+            "PawningShop: Only creator of pawn can repay"
+        );
+        uint256 bidId = _pawnToBid[pawnId];
+        require(
+            bidId != 0,
+            "PawningShop: This pawn doen't have any accepted bid"
+        );
+        Bid storage currBid = _bids[bidId];
+        uint256 repayDeadline = _calculateRepayDeadline(currBid.loanStartTime, currBid.loanDuration);
+        require(
+            block.timestamp &lt;= repayDeadline,
+            "PawningShop: to late to repaid"
+        );
+        uint256 value = msg.value;
+        uint256 repaidAmount = _calculateRepaidAmount(
+            currBid.loanAmount,
+            currBid.interest,
+            currBid.loanStartTime,
+            currBid.loanDuration,
+            currBid.isInterestProRated
+        );
+        require(
+            value == repaidAmount,
+            "PawningShop: pay exactly repaid amount"
+        );
+        // transfer token back to borrower
+        IERC721(currPawn.contractAddress).transferFrom(address(this), currPawn.creator, currPawn.tokenId);
+        // transfer money to lender
+        address payable lender = payable(currBid.creator);
+        lender.transfer(value);
+        delete _pawnToBid[pawnId];
+        delete _bidToPawn[bidId];
+        emit PawnRepaid(borrower, lender, pawnId, bidId);
+    }
+
+    function _calculateRepayDeadline(uint256 loanStartTime, uint256 loanDuration) public pure returns(uint256) {
+        uint256 loanDurationInSeconds = loanDuration.mul(1 days);
+        uint256 repayDeadline = loanStartTime.add(loanDurationInSeconds);
+        return repayDeadline;
+    }
+
+    function _calculateRepaidAmount(
+        uint256 original, uint256 interest, uint256 loanStartTime, uint256 duration, bool isInterestProRated
+    ) public view returns (uint256) {
+        uint256 interestDue = interest;
+        if (isInterestProRated) {
+            uint256 interestPerDay = interest.div(duration);
+            uint256 secondPassed = block.timestamp.sub(loanStartTime);
+            uint256 dayPassed = ceilDiv(secondPassed, 1 days);
+            interestDue = dayPassed.mul(interestPerDay);
+        }
+        return original.add(interestDue);
+    }
+
+    function getRepaidAmount(uint256 pawnId) public view returns(uint256) {
+        require(pawnId &gt; 0, "PawningShop: pawn id is not existed");
+        uint256 bidId = _pawnToBid[pawnId];
+        require(bidId &gt; 0, "PawningShop: pawn doesn't have a accepted bid or the pawn is done");
+        Bid storage bid = _bids[bidId];
+        return _calculateRepaidAmount(bid.loanAmount, bid.interest, bid.loanStartTime, bid.loanDuration, bid.isInterestProRated);
+    }
+    
+    // get this from openzeppelin
+    function ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+        // (a + b - 1) / b can overflow on addition, so we distribute.
+        return a / b + (a % b == 0 ? 0 : 1);
+    }
+
+    function liquidate(uint256 bidId) public {
+        Bid storage currBid = _bids[bidId];
+        address lender = currBid.creator;
+        require(lender == msg.sender, "PawningShop: only creator of bid can liquidate token");
+        require(block.timestamp &gt; currBid.loanStartTime + currBid.loanAmount, "PawningShop: Not valid time to liquidate");
+        uint256 pawnId = _bidToPawn[bidId];
+        require(_pawnToBid[pawnId] == bidId, "PawningShop: this bid is not accepted by borrower");
+        Pawn storage currPawn = _pawns[pawnId];
+        address pawner = currPawn.creator;
+        IERC721(currPawn.contractAddress).transferFrom(address(this), lender, currPawn.tokenId);
+        emit PawnLiquidated(pawner, lender, pawnId, bidId);
+    }
+
+    function addToWhiteList(address smartContract) public {
+        require(msg.sender == owner, "PawningShop: Only owner can add address to white list");
+        require(smartContract != address(0), "PawningShop: smart contract address must be different with 0");
+        uint256 i = 0;
+        for (i = 0; i &lt; _whiteListNFT.length; i++) {
+            if (_whiteListNFT[i] == smartContract) {
+                return;
+            }
+        }
+        _whiteListNFT.push(smartContract);
+        emit WhiteListAdded(smartContract);
+    }
+
+    function removeFromWhiteList(address smartContract) public {
+        require(msg.sender == owner, "PawningShop: Only owner can remove address from white list");
+        uint256 i;
+        for (i = 0; i &lt; _whiteListNFT.length; i++) {
+            if (_whiteListNFT[i] == smartContract) {
+                break;
+            }
+        }
+        delete _whiteListNFT[i];
+        emit WhiteListRemoved(smartContract);
+    }
+
+    function getWhiteList() public view returns(address[] memory) {
+        return _whiteListNFT;
+    }
+}</code></pre> 
+<h2>1、概述</h2> 
+<p>PawningShop是一种基于NFT的抵押借贷的实现。PawningShop中有两种角色：一种是抵押NFT的人，他需要通过抵押NFT借入一笔钱，我们叫他borrower，另一种是借出钱的人，我们叫他lender。</p> 
+<p>PawningShop的大致流程如下：</p> 
+<p>1、borrower创建一个NFT的抵押订单</p> 
+<p>2、lender针对抵押订单创建出价单，出价信息包括借出多少钱，借出的时间，以及借出的利息。</p> 
+<p>3、borrower选择一个合适出价单进行抵押借贷</p> 
+<p>4、borrower在规定时间内还本金和利息，就可以收回抵押的NFT</p> 
+<p>5、borrower如果没有在规定时间内归还本金和利息，lender就可以进行清算，这时候NFT就会被转移给lender。</p> 
+<p>PawningShop合约其实是有bug的，详情见下文，但是整体设计思路值得借鉴。</p> 
+<p></p> 
+<h2>2、borrower创建抵押订单</h2> 
+<pre><code class="language-javascript">function createPawn(address tokenAddress, uint256 tokenId) public {
+        _totalNumberOfPawn += 1;
+        bool isInWhiteList = false;
+        for (uint256 i = 0; i &lt; _whiteListNFT.length; i++) {
+            if (tokenAddress == _whiteListNFT[i]) {
+                isInWhiteList = true;
+            }
+        }
+        address sender = msg.sender;
+        require(
+            isInWhiteList == true,
+            "PawningShop: smart contract is not in white list"
+        );
+        bool isApproved = IERC721(tokenAddress).getApproved(tokenId) ==
+            address(this);
+        bool isApprovedForAll = IERC721(tokenAddress).isApprovedForAll(
+            sender,
+            address(this)
+        );
+        require(
+            isApproved || isApprovedForAll,
+            "PawningShop: haven't got permission to transfer"
+        );
+
+        IERC721(tokenAddress).transferFrom(msg.sender, address(this), tokenId);
+
+        _pawns[_totalNumberOfPawn].creator = sender;
+        _pawns[_totalNumberOfPawn].contractAddress = tokenAddress;
+        _pawns[_totalNumberOfPawn].tokenId = tokenId;
+        _pawns[_totalNumberOfPawn].status = PawnStatus.CREATED;
+        emit PawnCreated(sender, _totalNumberOfPawn);
+    }</code></pre> 
+<p>首先生成订单号，然后校验是否是白名单，然后需要给PawningShop这个合约授权，然后将NFT转给这个合约保管。最后生成一条抵押记录。</p> 
+<p></p> 
+<h2>3、borrower取消抵押订单</h2> 
+<pre><code class="language-javascript">function cancelPawn(uint256 pawnId) public {
+        Pawn storage pawn = _pawns[pawnId];
+        address creator = pawn.creator;
+        require(
+            pawn.status == PawnStatus.CREATED,
+            "PawningShop: Only can cancel when it has status of CREATED"
+        );
+        require(
+            msg.sender == creator,
+            "PawningShop: Only owner of the pawn can cancel it"
+        );
+        require(
+            _pawnToBid[pawnId] == 0,
+            "PawningShop: Only can cancel when no bid is accepted"
+        );
+        pawn.status = PawnStatus.CANCELLED;
+        IERC721(pawn.contractAddress).transferFrom(address(this), creator, pawn.tokenId);
+        emit PawnCancelled(owner, pawnId);
+    }</code></pre> 
+<p>首先根据订单号拿到抵押订单，然后校验订单状态，必须是创建状态，然后校验抵押人身份和当前操作人是否一致以及抵押订单是否存在，最后把订单改成取消状态，并且把NFT还给抵押人。</p> 
+<p></p> 
+<h2>4、lender创建出借订单</h2> 
+<pre><code class="language-javascript">function createBid(
+        uint256 rate,
+        uint256 duration,
+        bool isInterestProRated,
+        uint256 pawnId
+    ) public payable {
+        _totalNumberOfBid += 1;
+        address lender = msg.sender;
+        uint256 amount = msg.value;
+        Pawn storage pawn = _pawns[pawnId];
+        address borrower = pawn.creator;
+        require(pawnId &gt; 0, "PawningShop: pawn id is not valid");
+        require(
+            borrower != address(0) || pawn.contractAddress != address(0), 
+            "Pawningshop: pawn is not existed"
+        );
+        require(
+            borrower != lender,
+            "PawningShop: creator of the pawn cannot make a bid"
+        );
+        require(
+            pawn.status == PawnStatus.CREATED,
+            "PawningShop: cannot bid this pawn"
+        );
+        require(
+            amount &gt; 0,
+            "PawningShop: amount of money must be bigger than 0"
+        );
+
+        _bids[_totalNumberOfBid].creator = lender;
+        _bids[_totalNumberOfBid].loanAmount = amount;
+        _bids[_totalNumberOfBid].interest = rate;
+        _bids[_totalNumberOfBid].loanDuration = duration;
+        _bids[_totalNumberOfBid].isInterestProRated = isInterestProRated;
+        // _bids[_totalNumberOfBid].loanStartTime = loanStartTime;
+        // loanStartTime will be set when the borrower accepts bid
+
+        _bidToPawn[_totalNumberOfBid] = pawnId;
+        emit BidCreated(borrower, lender, pawnId, _totalNumberOfBid);
+    }</code></pre> 
+<p>首先生成出借单订单号，然后校验抵押订单的合法性，然后需要保证抵押人和出借人不能是同一个人，最后生成一个出借订单。这里使用msg.value作为出借金额，因此出借金额暂时由当前合约保管。</p> 
+<p></p> 
+<h2>5、lender取消出借订单</h2> 
+<pre><code class="language-javascript">function cancelBid(uint256 bidId) public {
+        Bid memory currBid = _bids[bidId];
+        address payable lender = payable(currBid.creator);
+        address sender = msg.sender;
+        require(
+            sender == lender,
+            "PawningShop: only creator can cancel the bid"
+        );
+        uint256 pawnId = _bidToPawn[bidId];
+        address borrower = _pawns[pawnId].creator;
+        require(
+            _pawnToBid[pawnId] != bidId,
+            "PawningShop: your bid is accepted, cannot cancel"
+        );
+        lender.transfer(currBid.loanAmount);
+        delete _bids[bidId];
+        delete _bidToPawn[bidId];
+        emit BidCancelled(borrower, lender, pawnId, bidId);
+    }</code></pre> 
+<p>取消出借单会校验操作人权限，然后校验出借单是否被执行。如果没有被执行，会把出借金额转还给出借人。</p> 
+<p></p> 
+<h2>6、borrower选择出借单</h2> 
+<pre><code class="language-javascript">function acceptBid(uint256 bidId) public {
+        Bid storage currBid = _bids[bidId];
+        address lender = currBid.creator;
+        uint256 pawnId = _bidToPawn[bidId];
+        require(
+            pawnId &gt; 0,
+            "PawningShop: The pawn is not existed"
+        );
+        Pawn storage pawn = _pawns[pawnId];
+        address payable borrower = payable(pawn.creator);
+        require(
+            borrower == msg.sender,
+            "PawningShop: only creator of pawn can accept bid"
+        );
+        borrower.transfer(currBid.loanAmount);
+        pawn.status = PawnStatus.DEAL;
+        _pawnToBid[pawnId] = bidId;
+        currBid.loanStartTime = block.timestamp;
+        emit BidAccepted(borrower, lender, pawnId, bidId);
+    }</code></pre> 
+<p>先通过出借单找到抵押单，然后找到抵押单对应的borrower，然后需要校验当前操作人就是borrower，最后把出借的钱转给borrower，更新抵押单的状态为完成，更新抵押单到出借单的关联关系。</p> 
+<p><span style="color:#fe2c24">这里似乎少了对抵押单状态的校验，这样borrower就可以多次执行acceptBid方法，如果当前合约有大量的ETH余额，就可以被全部套出来。</span></p> 
+<p></p> 
+<h2>7、borrower正常还贷</h2> 
+<pre><code class="language-javascript">function repaid(uint256 pawnId) public payable {
+        Pawn storage currPawn = _pawns[pawnId];
+        address borrower = currPawn.creator;
+        require(
+            borrower == msg.sender,
+            "PawningShop: Only creator of pawn can repay"
+        );
+        uint256 bidId = _pawnToBid[pawnId];
+        require(
+            bidId != 0,
+            "PawningShop: This pawn doen't have any accepted bid"
+        );
+        Bid storage currBid = _bids[bidId];
+        uint256 repayDeadline = _calculateRepayDeadline(currBid.loanStartTime, currBid.loanDuration);
+        require(
+            block.timestamp &lt;= repayDeadline,
+            "PawningShop: to late to repaid"
+        );
+        uint256 value = msg.value;
+        uint256 repaidAmount = _calculateRepaidAmount(
+            currBid.loanAmount,
+            currBid.interest,
+            currBid.loanStartTime,
+            currBid.loanDuration,
+            currBid.isInterestProRated
+        );
+        require(
+            value == repaidAmount,
+            "PawningShop: pay exactly repaid amount"
+        );
+        // transfer token back to borrower
+        IERC721(currPawn.contractAddress).transferFrom(address(this), currPawn.creator, currPawn.tokenId);
+        // transfer money to lender
+        address payable lender = payable(currBid.creator);
+        lender.transfer(value);
+        delete _pawnToBid[pawnId];
+        delete _bidToPawn[bidId];
+        emit PawnRepaid(borrower, lender, pawnId, bidId);
+    }</code></pre> 
+<p>首先校验borrower和操作人是否一致，然后拿到出借单，计算出借最晚归还时间，而且当前时间必须小于这个最晚归还时间，然后计算应付金额。然后把NFT转还给borrower，把应付金额转给lender。最后删除抵押单和出借单之间的关系。</p> 
+<p>这里多次调用repaid是不会有问题的，因为最后删掉了关联关系：delete _bidToPawn[bidId];</p> 
+<h2>7、borrower还款超时，lender发起清算</h2> 
+<pre><code class="language-javascript">function liquidate(uint256 bidId) public {
+        Bid storage currBid = _bids[bidId];
+        address lender = currBid.creator;
+        require(lender == msg.sender, "PawningShop: only creator of bid can liquidate token");
+        require(block.timestamp &gt; currBid.loanStartTime + currBid.loanAmount, "PawningShop: Not valid time to liquidate");
+        uint256 pawnId = _bidToPawn[bidId];
+        require(_pawnToBid[pawnId] == bidId, "PawningShop: this bid is not accepted by borrower");
+        Pawn storage currPawn = _pawns[pawnId];
+        address pawner = currPawn.creator;
+        IERC721(currPawn.contractAddress).transferFrom(address(this), lender, currPawn.tokenId);
+        emit PawnLiquidated(pawner, lender, pawnId, bidId);
+    }</code></pre> 
+<p>首先校验操作人权限，然后校验是否真的超时，然后根据出借单找到抵押单，将抵押物转移给lender。</p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

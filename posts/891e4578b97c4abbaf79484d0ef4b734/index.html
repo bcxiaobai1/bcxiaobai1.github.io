@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>ovn 架构介绍 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ovn 架构介绍</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>ovn是什么就不多说了，网上有很多介绍的文章。这里主要是学习下ovn的架构，并通过实践认识一下ovn。<br> ovn代码最初是在ovs源码下，但是从版本v2.13.0开始，ovn被移除ovs，有了独立的仓库，地址为 <a href="https://links.jianshu.com/go?to=https%3A%2F%2Fgithub.com%2Fovn-org%2Fovn" title="https://github.com/ovn-org/ovn">https://github.com/ovn-org/ovn</a></p> 
+<p>ovn架构图如下，是从<a href="https://links.jianshu.com/go?to=https%3A%2F%2Fman7.org%2Flinux%2Fman-pages%2Fman7%2Fovn-architecture.7.html" title="ovn-architecture">ovn-architecture</a>截图的</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/4e/bf/V7o4XSem_o.png"></p> 
+<p>image.png</p> 
+<p><br> 下面这几个组件运行在集群的中心节点，对于openstack来说，其运行在controller节点上。对于k8s来说，运行在master节点上。</p> 
+<p></p> 
+<p></p> 
+<pre><code>CMS(cloud management system): OVN的最终用户，比如openstack，OVN最初就是被设计给openstack用的。
+
+OVN/CMS plugin: CMS的一部分，对于openstack来说，就是neutron plugin，用来和OVN交互，主要目的就是将逻辑网络配置转换成OVN理解的数据，并写到nbdb中。
+
+OVN Northbound DB: 保存CMS plugin下发的配置，数据库格式可以参考 [ovn-nb](https://man7.org/linux/man-pages/man5/ovn-nb.5.html)。它只有两个客户端：图中它上面的CMS plugin和它下面的ovn-northd。其实还有个命令行公司 ovn-nbctl 也可以直接操作它。
+
+ovn-northd: 同时连接到OVN Northbound DB:和OVN Southbound DB。用来将OVN Northbound DB中的数据进行转换并保存到OVN Southbound DB。
+
+OVN Southbound DB: 系统的核心, 数据库格式可以参考[ovn-sb](https://man7.org/linux/man-pages/man8/ovn-northd.8.html)。它也有两个客户端: 向上的ovn-northd和下面的运行在每个hypervisor上的ovn-controller。
+
+ovn-nbctl和ovnsbctl：这是两个命令行工具，分别用来查看/操作Northbound DB和Southbound DB。
+</code></pre> 
+<p>下面的组件运行在每个hypervisor上，对于openstack来说，其运行在compute节点上。对于k8s来说，运行在worker节点上。当然中心节点也可以是hypervisor。</p> 
+<p></p> 
+<pre><code>ovn-controller：相当于OVN在每个hypervisor上的agent。北向它连接到OVN Southbound Database学习最新的配置转换成openflow流表，南向它连接到ovs-vswitchd下发转换后的流表，同时也连接到ovsdb-server获取它需要的配置信息。
+
+ovs-vswitchd和ovsdb-server: 是ovs的两个后台进程，就不在多说了。
+</code></pre> 
+<h1>实践</h1> 
+<p>下面通过源码安装ovn，并且创建一个logical switch，使用namespace模拟创建三个VM，连接到这个switch上，实现ping通的功能。<br><strong>安装</strong><br> 可以参考<a href="https://links.jianshu.com/go?to=https%3A%2F%2Fgithub.com%2Fovn-org%2Fovn%2Fblob%2Fmaster%2FDocumentation%2Fintro%2Finstall%2Fgeneral.rst" title="官网">官网</a>进行安装，但是貌似少了几个步骤，废了半天劲，查看了源码才知道少了哪些步骤。</p> 
+<p>编译并安装，需要在中心节点和hypervisor上都执行。</p> 
+<p></p> 
+<pre><code>//下载ovn源码
+$ git clone https://github.com/ovn-org/ovn.git
+
+//ovn依赖ovs的lib，所以需要先编译ovs
+$ git submodule update --init
+$ cd ovs
+$ ./boot.sh
+$ ./configure
+$ make
+//实验也需要ovs，顺便就安装一下ovs
+$ make install
+$ cd ..
+
+//编译并安装ovn
+$ ./boot.sh
+$ ./configure
+$ make
+$ make install
+</code></pre> 
+<p>ovs和ovn都安装后，启动他们。<br> 先启动ovs的两个后台进程，只需要在hypervisor上执行。</p> 
+<p></p> 
+<pre><code>//首先清理下之前启动ovs
+$ ovs-appctl -t ovs-vswitchd exit
+$ ovs-appctl -t ovsdb-server exit
+$ rm /usr/local/etc/openvswitch/conf.db
+
+//创建需要的目录
+$ mkdir -p /usr/local/etc/openvswitch
+$ mkdir -p /usr/local/var/run/openvswitch
+$ mkdir -p /usr/local/var/log/openvswitch
+
+//创建数据库
+$ ovsdb-tool create /usr/local/etc/openvswitch/conf.db  
+     /usr/local/share/openvswitch/vswitch.ovsschema
+
+//启动ovsdb-server
+$ ovsdb-server --remote=punix:/usr/local/var/run/openvswitch/db.sock 
+  --remote=db:Open_vSwitch,Open_vSwitch,manager_options 
+  --private-key=db:Open_vSwitch,SSL,private_key 
+  --bootstrap-ca-cert=db:Open_vSwitch,SSL,ca_cert --pidfile --detach
+
+$ ovs-vsctl --no-wait init
+
+//启动ovs-vswitchd
+$ export DB_SOCK=/usr/local/var/run/openvswitch/db.sock
+$ ovs-vswitchd unix:$DB_SOCK --pidfile --detach --log-file=/usr/local/var/log/openvswitch/ovs-vswitchd.log
+</code></pre> 
+<p>接下来启动ovn，只需要在中心节点启动。可以使用ovn自带的脚本ovn-ctl启动，脚本内部会将依赖的数据库和进程创建好。也可以参考官网步骤手动创建所有的东西。</p> 
+<p></p> 
+<pre><code>//添加ovn-ctl路径
+$ export PATH=$PATH:/usr/local/share/ovn/scripts
+//启动 ovn-northd，会自动创建数据库，只需要在中心节点上执行
+$ ovn-ctl start_northd
+ * /usr/local/etc/ovn/ovnnb_db.db does not exist
+ * Creating empty database /usr/local/etc/ovn/ovnnb_db.db
+ * Starting ovsdb-nb
+ * /usr/local/etc/ovn/ovnsb_db.db does not exist
+ * Creating empty database /usr/local/etc/ovn/ovnsb_db.db
+ * Starting ovsdb-sb
+ * Starting ovn-northd
+
+//启动 ovn-controller，只需要在hypervisor上执行
+$ ovn-ctl start_controller
+ * Starting ovn-controller
+</code></pre> 
+<p>官网的步骤只到这里就结束了，我们看一下现在的情况</p> 
+<p></p> 
+<pre><code>//会自动生成一个br-int网桥，这个是ovn-controller启动创建的
+$ ovs-vsctl show
+a891c32e-dec1-4168-8e17-1516fa55341b
+    Bridge br-int
+        fail_mode: secure
+        Port br-int
+            Interface br-int
+                type: internal
+
+//ovn-sbctl show 应该可以显示出hypervisor的信息，但是没有任何信息
+$ ovn-sbctl show
+
+//查看一些启动的ovn进程
+$ ps -ef | grep ovn
+//启动一个ovsdb-server进程，用来管理nbdb，并且监听socket /usr/local/var/run/ovn/ovnnb_db.sock
+root     11529 11528  0 20:26 ?        00:00:00 ovsdb-server -vconsole:off -vfile:info --log-file=/usr/local/var/log/ovn/ovsdb-server-nb.log --remote=punix:/usr/local/var/run/ovn/ovnnb_db.sock --pidfile=/usr/local/var/run/ovn/ovnnb_db.pid --unixctl=/usr/local/var/run/ovn/ovnnb_db.ctl --detach --monitor --remote=db:OVN_Northbound,NB_Global,connections --private-key=db:OVN_Northbound,SSL,private_key --certificate=db:OVN_Northbound,SSL,certificate --ca-cert=db:OVN_Northbound,SSL,ca_cert --ssl-protocols=db:OVN_Northbound,SSL,ssl_protocols --ssl-ciphers=db:OVN_Northbound,SSL,ssl_ciphers /usr/local/etc/ovn/ovnnb_db.db
+//启动一个ovsdb-server进程，用来管理sbdb，并且监听socket /usr/local/var/run/ovn/ovnsb_db.sock
+root     11545 11544  0 20:26 ?        00:00:00 ovsdb-server -vconsole:off -vfile:info --log-file=/usr/local/var/log/ovn/ovsdb-server-sb.log --remote=punix:/usr/local/var/run/ovn/ovnsb_db.sock --pidfile=/usr/local/var/run/ovn/ovnsb_db.pid --unixctl=/usr/local/var/run/ovn/ovnsb_db.ctl --detach --monitor --remote=db:OVN_Southbound,SB_Global,connections --private-key=db:OVN_Southbound,SSL,private_key --certificate=db:OVN_Southbound,SSL,certificate --ca-cert=db:OVN_Southbound,SSL,ca_cert --ssl-protocols=db:OVN_Southbound,SSL,ssl_protocols --ssl-ciphers=db:OVN_Southbound,SSL,ssl_ciphers /usr/local/etc/ovn/ovnsb_db.db
+root     11553     1  0 20:26 ?        00:00:00 ovn-northd: monitoring pid 11554 (healthy)
+//启动ovn-northd进程，可看到它已经通过ovnnb_db.sock和ovnsb_db.sock连接到了两个数据库
+root     11554 11553  0 20:26 ?        00:00:00 ovn-northd -vconsole:emer -vsyslog:err -vfile:info --ovnnb-db=unix:/usr/local/var/run/ovn/ovnnb_db.sock --ovnsb-db=unix:/usr/local/var/run/ovn/ovnsb_db.sock --no-chdir --log-file=/usr/local/var/log/ovn/ovn-northd.log --pidfile=/usr/local/var/run/ovn/ovn-northd.pid --detach --monitor
+root     11695     1  0 20:26 ?        00:00:00 ovn-controller: monitoring pid 11696 (healthy)
+//启动ovn-controller进程，它已经通过db.sock连接到ovs的db
+root     11696 11695  0 20:26 ?        00:00:00 ovn-controller unix:/usr/local/var/run/openvswitch/db.sock -vconsole:emer -vsyslog:err -vfile:info --no-chdir --log-file=/usr/local/var/log/ovn/ovn-controller.log --pidfile=/usr/local/var/run/ovn/ovn-controller.pid --detach --monitor
+</code></pre> 
+<p>通过上面的观察发现两个问题，一个是ovn-sbctl show显示不出hypervisor的信息，另一个是ovn-controller应该连接到sbdb的，但是没有任何信息能显示连接成功。<br> 经过搜索和源码分析，这两个问题其实是同一个原因，即ovn-controller没有成功连接到sbdb。解决方法如下</p> 
+<p></p> 
+<pre><code>//在中心节点上添加如下两条命令，其中6641端口用于监听OVN北向数据库，6642端口用于监听OVN南向数据库。
+//第一个在实验环境不加也可以，因为它主要是给CMS plugin用的，我们这里直接通过ovn-nbctl操作数据库即可。
+$ ovn-nbctl set-connection ptcp:6641:192.168.122.20
+$ ovn-sbctl set-connection ptcp:6642:192.168.122.20
+
+//查看两个监听端口
+$ netstat -nap | grep ovsdb-server
+tcp        0      0 192.168.122.20:6641     0.0.0.0:*               LISTEN      14976/ovsdb-server
+tcp        0      0 192.168.122.20:6642     0.0.0.0:*               LISTEN      14996/ovsdb-server
+
+//sbdb有了监听端口号6642后，ovn-controller才可以去连接sbnb。
+//ovn-controller通过ovsdb的字段获取sbdb的连接信息。
+//设置 Open_vSwitch table的 external-ids 字段，在所有hypervisor上执行下面命令
+$ ovs-vsctl set open . external-ids:ovn-remote=tcp:192.168.122.20:6642
+
+//在中心节点上执行下面命令
+$ ovs-vsctl set open . external-ids:system-id=master
+$ ovs-vsctl set open . external-ids:ovn-encap-type=geneve
+$ ovs-vsctl set open . external-ids:ovn-encap-ip=192.168.122.20
+
+//在hypervisor节点上执行下面命令
+ovs-vsctl set open . external-ids:ovn-remote=tcp:192.168.122.20:6642
+ovs-vsctl set open . external-ids:system-id=node1
+ovs-vsctl set open . external-ids:ovn-encap-type=geneve
+//上报自己的ip，相当于向集群报告其他节点如何连接到自己
+ovs-vsctl set open . external-ids:ovn-encap-ip=192.168.122.21
+
+//可看到ovn-controller连接到了sbdb的6442端口
+$ netstat -nap | grep 6642
+tcp        0      0 192.168.122.20:6642     0.0.0.0:*               LISTEN      14996/ovsdb-server
+tcp        0      0 192.168.122.20:6642     192.168.122.20:49516    ESTABLISHED 14996/ovsdb-server
+tcp        0      0 192.168.122.20:49516    192.168.122.20:6642     ESTABLISHED 19322/ovn-controlle
+</code></pre> 
+<p>再次查看，可以看到两个hypervisor都连接到了sbdb。在ovn里使用chassis表示一个hypervisor。</p> 
+<p></p> 
+<pre><code>$ ovn-sbctl show
+Chassis node1
+    hostname: node1
+    Encap geneve
+        ip: "192.168.122.21"
+        options: {csum="true"}
+Chassis master
+    hostname: master
+    Encap geneve
+        ip: "192.168.122.20"
+        options: {csum="true"}
+</code></pre> 
+<p><strong>验证</strong><br> 在两个节点上安装ovn成功后，接下来进行验证，环境信息如下</p> 
+<p></p> 
+<pre><code>master  192.168.122.20 既是中心节点，也是hypervisor
+node1    192.168.122.21 hypervisor
+</code></pre> 
+<p>在中心节点上执行如下命令，创建一个ls和三个lsp</p> 
+<p></p> 
+<pre><code>//创建 logical switch ls1
+ovn-nbctl ls-add ls1
+
+//添加第一个 logical port ls1-vm1
+ovn-nbctl lsp-add ls1 ls1-vm1
+ovn-nbctl lsp-set-addresses ls1-vm1 00:00:00:00:00:01
+ovn-nbctl lsp-set-port-security ls1-vm1 00:00:00:00:00:01
+
+//添加第二个 logical port ls1-vm2
+ovn-nbctl lsp-add ls1 ls1-vm2
+ovn-nbctl lsp-set-addresses ls1-vm2 00:00:00:00:00:02
+ovn-nbctl lsp-set-port-security ls1-vm2 00:00:00:00:00:02
+
+//添加第三个 logical port ls1-vm3
+ovn-nbctl lsp-add ls1 ls1-vm3
+ovn-nbctl lsp-set-addresses ls1-vm3 00:00:00:00:00:03
+ovn-nbctl lsp-set-port-security ls1-vm3 00:00:00:00:00:03
+
+//显示nbdb中的信息
+$ ovn-nbctl show
+switch 6e5f7249-5501-4e34-8b63-4aa35d2ee6be (ls1)
+    port ls1-vm1
+        addresses: ["00:00:00:00:00:01"]
+    port ls1-vm3
+        addresses: ["00:00:00:00:00:03"]
+    port ls1-vm2
+        addresses: ["00:00:00:00:00:02"]
+</code></pre> 
+<p>接下来分别创建三个namespace，模拟三个vm，分别添加一个internal类型的ovs端口作为vm的接口，并配置同网段ip</p> 
+<p></p> 
+<pre><code>//在master上创建vm1 namespace
+ip netns add vm1
+ovs-vsctl add-port br-int vm1 -- set interface vm1 type=internal
+ip link set vm1 netns vm1
+ip netns exec vm1 ip link set vm1 address 00:00:00:00:00:01
+ip netns exec vm1 ip addr add 10.10.10.1/24 dev vm1
+ip netns exec vm1 ip link set vm1 up
+//ovn-controller通过观察iface-id自动判断是否有需要的接口创建
+ovs-vsctl set Interface vm1 external_ids:iface-id=ls1-vm1
+ 
+//在node1上创建vm2 namespace
+ip netns add vm2
+ovs-vsctl add-port br-int vm2 -- set interface vm2 type=internal
+ip link set vm2 netns vm2
+ip netns exec vm2 ip link set vm2 address 00:00:00:00:00:02
+ip netns exec vm2 ip addr add 10.10.10.2/24 dev vm2
+ip netns exec vm2 ip link set vm2 up
+ovs-vsctl set Interface vm2 external_ids:iface-id=ls1-vm2
+ 
+//在master上创建vm3 namespace
+ip netns add vm3
+ovs-vsctl add-port br-int vm3 -- set interface vm3 type=internal
+ip link set vm3 netns vm3
+ip netns exec vm3 ip link set vm3 address 00:00:00:00:00:03
+ip netns exec vm3 ip addr add 10.10.10.3/24 dev vm3
+ip netns exec vm3 ip link set vm3 up
+ovs-vsctl set Interface vm3 external_ids:iface-id=ls1-vm3
+</code></pre> 
+<p>最后通过sbctl命令可看到，每个chassis下绑定了多少个接口。</p> 
+<p></p> 
+<pre><code>$ ovn-sbctl show
+Chassis node1
+    hostname: node1
+    Encap geneve
+        ip: "192.168.122.21"
+        options: {csum="true"}
+    Port_Binding ls1-vm2
+Chassis master
+    hostname: master
+    Encap geneve
+        ip: "192.168.122.20"
+        options: {csum="true"}
+    Port_Binding ls1-vm1
+    Port_Binding ls1-vm3
+</code></pre> 
+<p>vm1也可以ping通vm2和vm3</p> 
+<p></p> 
+<pre><code>$ ip netns exec vm1 ping 10.10.10.2
+PING 10.10.10.2 (10.10.10.2) 56(84) bytes of data.
+64 bytes from 10.10.10.2: icmp_seq=1 ttl=64 time=6.65 ms
+^C
+--- 10.10.10.2 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 6.652/6.652/6.652/0.000 ms
+$ ip netns exec vm1 ping 10.10.10.3
+PING 10.10.10.3 (10.10.10.3) 56(84) bytes of data.
+64 bytes from 10.10.10.3: icmp_seq=1 ttl=64 time=0.939 ms
+^C
+--- 10.10.10.3 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 0.939/0.939/0.939/0.000 ms
+</code></pre> 
+<h1>参考</h1> 
+<p>以下是ovn官网最新的文档，可以结合代码查看<br> ovn-architecture<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-architecture.7.txt" title="https://www.ovn.org/support/dist-docs/ovn-architecture.7.txt">https://www.ovn.org/support/dist-docs/ovn-architecture.7.txt</a></p> 
+<p>ovn-northd<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-northd.8.txt" title="https://www.ovn.org/support/dist-docs/ovn-northd.8.txt">https://www.ovn.org/support/dist-docs/ovn-northd.8.txt</a></p> 
+<p>ovn-controller<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-controller.8.txt" title="https://www.ovn.org/support/dist-docs/ovn-controller.8.txt">https://www.ovn.org/support/dist-docs/ovn-controller.8.txt</a></p> 
+<p>vtep<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-controller-vtep.8.txt" title="https://www.ovn.org/support/dist-docs/ovn-controller-vtep.8.txt">https://www.ovn.org/support/dist-docs/ovn-controller-vtep.8.txt</a></p> 
+<p>ovn-ctl<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-ctl.8.txt" title="https://www.ovn.org/support/dist-docs/ovn-ctl.8.txt">https://www.ovn.org/support/dist-docs/ovn-ctl.8.txt</a></p> 
+<p>ovn-trace<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-trace.8.txt" title="https://www.ovn.org/support/dist-docs/ovn-trace.8.txt">https://www.ovn.org/support/dist-docs/ovn-trace.8.txt</a></p> 
+<p>ovn-sb<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-sb.5.txt" title="https://www.ovn.org/support/dist-docs/ovn-sb.5.txt">https://www.ovn.org/support/dist-docs/ovn-sb.5.txt</a></p> 
+<p>ovn-nb<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-nb.5.txt" title="https://www.ovn.org/support/dist-docs/ovn-nb.5.txt">https://www.ovn.org/support/dist-docs/ovn-nb.5.txt</a></p> 
+<p>ovn-sbctl<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-sbctl.8.txt" title="https://www.ovn.org/support/dist-docs/ovn-sbctl.8.txt">https://www.ovn.org/support/dist-docs/ovn-sbctl.8.txt</a></p> 
+<p>ovn-nbctl<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fwww.ovn.org%2Fsupport%2Fdist-docs%2Fovn-nbctl.8.txt" title="https://www.ovn.org/support/dist-docs/ovn-nbctl.8.txt">https://www.ovn.org/support/dist-docs/ovn-nbctl.8.txt</a></p> 
+<p>install guide<br><a href="https://links.jianshu.com/go?to=https%3A%2F%2Fgithub.com%2Fovn-org%2Fovn%2Fblob%2Fmaster%2FDocumentation%2Fintro%2Finstall%2Fgeneral.rst" title="https://github.com/ovn-org/ovn/blob/master/Documentation/intro/install/general.rst">https://github.com/ovn-org/ovn/blob/master/Documentation/intro/install/general.rst</a></p> 
+<p>也可参考：<a href="https://www.jianshu.com/p/a2965b268e75" title="ovn 架构介绍 - 简书">ovn 架构介绍 - 简书</a> </p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

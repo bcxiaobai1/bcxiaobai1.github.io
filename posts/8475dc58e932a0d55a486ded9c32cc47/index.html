@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>字节一面：Redis主节点宕机，如何处理？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">字节一面：Redis主节点宕机，如何处理？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <blockquote> 
+ <p>微信搜索 【微观技术】，关注这个不喜欢内卷的程序员。<br><br> 精彩文章汇总 GitHub https://github.com/aalansehaiyang/technology-talk ，Star 12K ，汇总java生态圈常用技术框架、开源中间件，系统架构、数据库、大公司架构案例、常用三方类库、项目管理、线上问题排查、个人成长、思考等知识</p> 
+</blockquote> 
+<p>大家好，我是Tom哥~</p> 
+<p>今天跟大家聊下，如果Redis某个节点宕机了，要怎么处理？</p> 
+<img src="https://images2.imgbox.com/de/90/hhm1LfVz_o.png" width="400"> 
+<p>我们知道，Redis集群一般采用主从模式，主节点负责写，从节点负责读。</p> 
+<h3>
+<a id="_11"></a><strong>从节点故障</strong>
+</h3> 
+<p>从节点主要提供读服务，为了分摊主服务器压力，一般会有多个从节点。</p> 
+<img src="https://images2.imgbox.com/43/c1/k957uBlY_o.png" width="400"> 
+<p>如果是从节点故障，不算什么大问题，客户端把该故障节点屏蔽即可，仍可访问其他的主、从节点满足正常的业务功能。</p> 
+<h3>
+<a id="_19"></a><strong>主节点故障</strong>
+</h3> 
+<p>如果是主节点宕机了，那就有点麻烦了，毕竟写操作是在主节点上，无法替代。</p> 
+<img src="https://images2.imgbox.com/14/36/7i5ktM6B_o.png" width="400"> 
+<p>这时候，我们要干一件事，从所有的<code>从库</code>节点中挑选一台做为主节点。这里要介绍下Sentienl 哨兵机制了。</p> 
+<p><strong>哨兵机制分为三个阶段：</strong></p> 
+<p>1、监控。哨兵进程会周期给所有的主库、从库发送 PING 命令，检测机器是否处于服务状态。如果没有在设置时间内收到回复，则判定为下线。</p> 
+<p>2、选主。主要是看各个节点的打分情况，打分规则分为 <code>从库优先级</code>、<code>从库复制进度</code>、<code>从库ID号</code>。只要有一轮，某个从库得分最高，则选举它为主库。</p> 
+<ul>
+<li> <p>从库优先级，主要是考虑到不同的机器可能配置不一样，配置高的机器，优先级高一些，通过<code>slave-priority</code> 来配置</p> </li>
+<li> <p>从库复制进度，主要是看<code>slave_repl_offset</code> 的值大小，值越大表示已经同步的数据越多，得分越高。</p> </li>
+<li> <p>从库ID号，每个Redis 实例启动时，都会生成一个 ID，在优先级和复制进度相同的条件下，ID号最小的从库分数最高，会被选为新主库。</p> </li>
+</ul> 
+<p>3、通知。把选举后的新主库发送给所有节点，让所有的从库执行 <code>replicaof</code> 命令，和新 master建立主从关系、数据同步复制。另外，也会把最新的主库信息同步给客户端。这样后续的写请求会打到新的 主节点上。</p> 
+<p><strong>我们知道网络存在不稳定性，所以会不会有什么特殊问题？我们继续往下看</strong></p> 
+<p><strong>网络抖动，引发误判</strong></p> 
+<p><strong>问题描述：</strong></p> 
+<blockquote> 
+ <p>哨兵节点监控到主节点超时未响应，主节点不一定是真的宕机。可能是之间的网络拥堵，或者主库自身压力过大，导致响应超时。</p> 
+</blockquote> 
+<p><strong>如何避免这种情况？</strong></p> 
+<p>引入哨兵集群，多个哨兵实例一起判断，降低误判率。判断标准就是，假如 n 个哨兵实例，至少有 n/2+1 个判定一致，才可以定论。</p> 
+<p><strong>注意：</strong></p> 
+<p>上面的误判只会用在主库，从库只是负责读，如果监测到未响应，直接标记为 ”下线“，并不需要集群投票验证其真实性。</p> 
+<p>如果是主库超时未响应，则不能这么草率决定，毕竟后面的选主和通知都是一笔不小的开销，所以，标记主库”下线“，一定要慎之又慎。</p> 
+<p><strong>那么，哨兵集群集如何投票，确认主节点是否真的下线呢？在深入这个问题之前，我们先来了解下哨兵集群</strong></p> 
+<p><strong>哨兵集群如何构建？</strong></p> 
+<p><strong>首先，在redis-sentinel 的conf文件里添加两个配置项：</strong></p> 
+<pre><code>sentinel monitor &lt;master-name&gt; &lt;ip&gt; &lt;redis-port&gt; &lt;quorum&gt; 
+
+</code></pre> 
+<ul>
+<li> <p>master-name：对某个master+slave 组合的一个区分标识（一套sentinel是可以监听多套master+slave这样的组合）</p> </li>
+<li> <p>ip 和 port：就是master节点的 ip 和 端口号。</p> </li>
+<li> <p>quorum：进行客观下线的一个依据，意思是至少有 quorum 个sentinel主观的认为这个master有故障，才会对这个master下线或故障转移。</p> </li>
+</ul> 
+<blockquote> 
+ <p>整理了一份大厂常考面试题，这份pdf包括 Java基础、Java并发、JVM、MySQL、Redis、Spring、MyBatis、Kafka、设计模式等面试题，分享给大家。<br> 下载地址：百度云链接：https://pan.baidu.com/s/1XHT4ppXTp430MEMW2D0-Bg 提取码: s3ab</p> 
+</blockquote> 
+<pre><code>sentinel down-after-milliseconds &lt;master-name&gt;  &lt;timeout&gt;
+
+</code></pre> 
+<ul><li>timeout：毫秒值，如果这台sentinel超过timeout时间无法连通master或slave（slave不需要客观下线，因为不需要故障转移），就会主观认为该master已经下线（实际下线需要客观下线的判断通过才会真正下线）</li></ul> 
+<img src="https://images2.imgbox.com/db/90/lt3pt2RD_o.png" width="500"> 
+<p><strong>借助发布/订阅组建哨兵集群</strong></p> 
+<p>我们知道Redis 有<code>pub/sub</code> 机制，当一个哨兵与主库建立连接，可以在主库上发布自己的消息（ip、port），当然也可以在主库上订阅其他哨兵发布的消息。</p> 
+<blockquote> 
+ <p>有点类似MQ的topic味道，大家基于同一个topic完成数据交换。</p> 
+</blockquote> 
+<p>当所有的哨兵都完成上述动作，哨兵集群也就组建完成。</p> 
+<p>为什么要组建哨兵集群呢？因为后面的选主需要有一个leader带头操作。</p> 
+<p><strong>哨兵如何知道所有从库地址呢？</strong></p> 
+<p>我们知道每个哨兵实例的配置参数里有配置主库的ip和port，而每个主库要同步数据给从库，自然有挂载的所有从库信息。</p> 
+<p>所以，哨兵实例只需向主库发送<code>INFO</code>命令即可获取到所需要的信息，然后哨兵实例在依次与从库建立连接。</p> 
+<p><strong>至此，一个哨兵实例便可以收集到整个Redis 集群的数据，包含三块：</strong></p> 
+<ul>
+<li> <p>所有的哨兵节点ip、port</p> </li>
+<li> <p>主节点ip、port</p> </li>
+<li> <p>主节点挂载的所有从节点的 ip、port</p> </li>
+</ul> 
+<p>其他哨兵实例也是一样道理，这里就不在赘述了。</p> 
+<p><strong>哨兵是个集群，选主需要有个带头大哥</strong></p> 
+<p>当一个哨兵实例监控到主库”主观下线“后，给其他实例发送 <code>is-master-down-by-addr</code> 命令，其他哨兵实例根据自己与主库的连接情况，做出 Y 或 N的回复。</p> 
+<p>当这个哨兵收集到了超过 quorum 配置项的 Y 回复后，就会标记主库”客观下线“。</p> 
+<p>下面，就要进入<code>选主</code>阶段了。正所谓”一山不容二虎“，那么由哪个哨兵实例来执行选主操作呢？</p> 
+<p><img src="https://images2.imgbox.com/f3/e6/eah7jD0D_o.png" alt="图片"></p> 
+<p>还是公平点，采用民主投票。先在 哨兵集群中选出一个带头大哥，由它代表大家执行后续操作。</p> 
+<p><strong>如何选哨兵Leader？</strong></p> 
+<img src="https://images2.imgbox.com/1c/4c/96TP52Oc_o.png" width="500"> 
+<p>上图画了个流程实例，三个哨兵节点在 t1~t6 不同时刻点的投票情况。</p> 
+<p>当一个哨兵实例收到超过 设置的<code>quorum</code> 票Y后，它会成为新的Leader。然后由它（哨兵S3）负责后面的从库选主，通知从库与新主库建立关系并同步数据，通知客户端访问新主库。</p> 
+<p>如果本轮没有选出Leader节点，等哨兵故障转移超时时间的 2 倍时间后，重新发起新一轮选举。</p> 
+<p>为了保证哨兵Leader选举的顺利进行，除了对网络质量有要求外，最好配置奇数个哨兵节点且最好三个以上。</p> 
+<p><strong>哨兵也是实例，如果挂了怎么办？</strong></p> 
+<p>哨兵主要是用来监控Redis集群的健康状况，本身并不提供服务。</p> 
+<p>当一个哨兵实例挂掉后，会影响到集群的监测。为了降低影响，我们引入哨兵集群，降低单点风险，由哨兵集群保障Redis主从集群的健康。</p> 
+<p><strong>举个例子：</strong></p> 
+<p>哨兵集群配置了三个实例，<code>quorum</code> 配置值为2。当一个哨兵实例宕机后，其余两个哨兵实例依然可以完成选举，只是可能存在一定风险而已。</p> 
+<p><strong>哨兵集群完成了主从切换，客户端如何感知？</strong></p> 
+<p>我们知道Redis有<code>pub/sub</code>机制，为了便于外部知道当前的切换进度，哨兵提供了多个订阅频道。</p> 
+<p>其中就有一个新主库切换频道，（switch-master）</p> 
+<pre><code>SUBSCRIBE +switch-master
+
+</code></pre> 
+<p>订阅对应频道，可以获得切换后的新主库ip、port，并与之建立连接，继续享受Redis服务。</p> 
+<hr> 
+<p>关于我：Tom哥，前阿里P7技术专家，出过专利，多年大厂实战经验。欢迎关注，我会持续输出更多经典原创文章，为你大厂助力。</p> 
+<p>欢迎小伙伴找Tom哥唠嗑聊天， 技术交流，围观朋友圈，人生打怪不再寂寞。</p> 
+<img src="https://images2.imgbox.com/95/2d/Db0LWmNK_o.png" width="400">
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

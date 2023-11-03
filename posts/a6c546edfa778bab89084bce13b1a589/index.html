@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>[NLP]LLaMA与LLamMA2解读 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">[NLP]LLaMA与LLamMA2解读</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p><strong>摘要</strong></p> 
+<p>Meta最近提出了LLaMA(开放和高效的基础语言模型)模型参数包括从7B到65B等多个版本。最值得注意的是，LLaMA-13B的性能优于GPT-3，而体积却小了10倍以上，LLaMA-65B与Chinchilla-70B和PaLM-540B具有竞争性。</p> 
+<h2 id="h_632102048_1"><strong>一、引言</strong></h2> 
+<p>一般而言，模型越大，效果越好。然而有文献指出<a href="https://zhuanlan.zhihu.com/p/632102048#ref_1" id="ref_1_0" title="[1]">[1]</a>，当给定计算量的预算之后，最好的performance，并不是最大的模型，而是在一个小模型上用更多的数据进行训练。针对给定的计算量预算，scaling laws可以计算如何选择数据量的大小和模型的大小。然而这忽略了inference的预算，而这一点在模型推理时非常关键。当给定一个模型performance目标之后，最好的模型不是训练最快的模型，而是推理最快的模型。尽管在这种情况下，训练一个更大的模型成本会更低。</p> 
+<p>文献<a href="https://zhuanlan.zhihu.com/p/632102048#ref_2" id="ref_2_0" title="[2]">[2]</a>中推荐，训练一个 10B 的模型，需要 200B 的 tokens，而本文的实验发现，一个7B的模型，经过 1T tokens 训练之后，performance 仍然在增加。本文的目标在于，通过在超大规模的数据上训练，给出一系列可能最好 performance 的 LLM。</p> 
+<p></p> 
+<h2 id="h_632102048_2">二、预训练数据</h2> 
+<h3 id="h_632102048_3"><strong>2.1 数据集</strong></h3> 
+<p>训练语料是混合的开源语料，<strong>中文占比很低</strong>，几乎不支持中文。详细占比为：CommonCrawl 67%, C4 15%, GitHub 4.5%, Wikipedia 4.5%, Books 4.5%, ArXiv 2.5%, Stack Exchange 2%.</p> 
+<p>一共有1.4T的tokens，大部分的训练数据都只用了一次，除了Wikipedia 和 Books 使用了大概2个epochs。</p> 
+<p></p> 
+<p><img alt="" height="906" src="https://images2.imgbox.com/7c/b8/AJlGFGaT_o.png" width="1200"></p> 
+<p></p> 
+<h3><img alt="" height="1182" src="https://images2.imgbox.com/bb/84/5tCrCBg2_o.png" width="1200"></h3> 
+<h3></h3> 
+<h3 id="h_632102048_4"><strong>2.2 Tokenizer</strong></h3> 
+<p>使用byte pair encoding (BPE) 算法，使用的是Sentence-Piece的实现。所有数字被拆分为单独的digit，所有未知的UTF-8 字符，回退到字节来进行分解。因此，LLaMA 可以通过byte 的方式，构造出很多不在 vocab 中的字符，从而也具有较好的多语言能力。</p> 
+<h2></h2> 
+<h2 id="h_632102048_5">三、网络结构改进</h2> 
+<h3 id="h_617745693_4">优化器</h3> 
+<p>论文的模型使用<strong>AdamW优化器</strong>（Loshchilov和Hutter，2017）进行训练，具有以下超参数：</p> 
+<p><img alt="" height="244" src="https://images2.imgbox.com/0d/90/XNxb1p7j_o.png" width="962">使用<strong>余弦学习率</strong>计划，使得最终学习率等于最大学习率的10%。论文使用0.1的权重衰减和1.0的梯度剪裁。使用2000个预热步骤，并随着模型的大小而改变学习率和批次大小。</p> 
+<p></p> 
+<p>使用了基于transformer的架构，并做了如下3点改进：</p> 
+<h3 id="h_632102048_6"><strong>3.1 Pre-normalization</strong></h3> 
+<p>为了提高训练的稳定性，对每个transformer层的输入进行归一化，而不是输出进行归一化。</p> 
+<p>同时，使用 RMS Norm 归一化函数。RMS Norm 的全称为 Root Mean Square layer normalization。与 layer Norm 相比，RMS Norm的主要区别在于去掉了减去均值的部分，计算公式为：</p> 
+<p><img alt="" height="170" src="https://images2.imgbox.com/e7/75/tealKAXS_o.png" width="1062"></p> 
+<p> RMS Norm 的作者认为这种模式在简化了Layer Norm 的计算，可以在减少约 7%∼64% 的计算时间<a href="https://zhuanlan.zhihu.com/p/632102048#ref_3" id="ref_3_0" title="[3]">[3]</a>。</p> 
+<pre><code class="language-python">class LlamaRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        LlamaRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+
+        return (self.weight * hidden_states).to(input_dtype)</code></pre> 
+<h3 id="h_632102048_7"><strong>3.2 SwiGLU</strong></h3> 
+<p>使用SwiGLU替代了ReLU作为激活函数。和PaLM中不同，维度采用 234� 而不是 4� 。</p> 
+<p>SwiGLU 在论文<a href="https://zhuanlan.zhihu.com/p/632102048#ref_4" id="ref_4_0" title="[4]">[4]</a> 中提出，相比于其他的激活函数变体，可以取得 log-perplexity 的最优值（和 GEGLU 并列）。</p> 
+<p><img alt="" height="1014" src="https://images2.imgbox.com/42/37/qhJiKDUC_o.png" width="1200"></p> 
+<p></p> 
+<pre><code class="language-python">class LlamaMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+    ):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        # config 中 hidden_act = 'silu'
+        # 'silu' 和 'swish' 对应的激活函数均为：SiLUActivation 
+        # https://github.com/huggingface/transformers/blob/717dadc6f36be9f50abc66adfd918f9b0e6e3502/src/transformers/activations.py#L229
+        self.act_fn = ACT2FN[hidden_act]
+
+    def forward(self, x):
+        # 对应上述公式的 SwiGLU
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+</code></pre> 
+<p>从代码可以看到 LlamaMLP 中一共有 3 个 Linear 层，原因就在于 SwiGLU 激活函数比类似 ReLU 的激活函数，需要多一个 Linear 层进行门控。</p> 
+<h3 id="h_632102048_8"><strong>3.3 RoPE</strong></h3> 
+<p>RoPE 的核心思想是“通过绝对位置编码的方式实现相对位置编码”，可以说是具备了绝对位置编码的方便性，同时可以表示不同 token 之间的相对位置关系。<a href="https://zhuanlan.zhihu.com/p/632102048#ref_5" id="ref_5_0" title="[5]">[5]</a> 不同于原始 Transformers 论文中，将 pos embedding 和 token embedding 进行相加，RoPE 是将位置编码和 query （或者 key） 进行相乘。具体如下：</p> 
+<p><img alt="" height="518" src="https://images2.imgbox.com/92/7a/8I1y6dHf_o.png" width="1200"></p> 
+<p> <img alt="" height="680" src="https://images2.imgbox.com/a5/c6/mEPkdgPh_o.png" width="1200"></p> 
+<p></p> 
+<pre><code class="language-python"># 代码增加了注释，可以看到和原始公式的对应关系。
+class LlamaRotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+        super().__init__()
+        # 此处 inv_freq 对应公式中的 theta
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+        self.max_seq_len_cached = max_position_embeddings
+        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        # 此处 freqs 对应公式中的 m * theta, t 对应公式中的 m，表示位置
+        freqs = torch.einsum("i,j-&gt;ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        # 此处和原始公式不同，theta_0 和 theta_0 不再相邻
+        # 而是分在向量的前半部分和后半部分
+        emb = torch.cat((freqs, freqs), dim=-1)
+        dtype = torch.get_default_dtype()
+        self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
+        self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
+
+    def forward(self, x, seq_len=None):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        if seq_len &gt; self.max_seq_len_cached:
+            self.max_seq_len_cached = seq_len
+            t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
+            freqs = torch.einsum("i,j-&gt;ij", t, self.inv_freq)
+            # Different from paper, but it uses a different permutation in order to obtain the same calculation
+            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(x.dtype), persistent=False)
+            self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(x.dtype), persistent=False)
+        # 大部分情况下，直接从这里返回
+        return (
+            self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
+            self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
+        )
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    # 此次和原始推导中不同，正负号不是间隔的，而是分前半部分和后半部分。但对于结果没有影响
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
+    # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
+    cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
+    sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
+    cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
+    # 对应上图中 RoPE 的简化计算
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed</code></pre> 
+<h2 id="h_632102048_9">四、高效实现</h2> 
+<h3 id="h_632102048_10"><strong>加速训练：</strong></h3> 
+<ul>
+<li>使用 <strong>随机多头注意力机制(causal multi-head attention)</strong> 提高模型的训练速度。该机制的实现借用了<a href="https://github.com/facebookresearch/xformers" title="xformers库">xformers库</a>，它的思路是不存储注意力权重，不计算其中注意力得分</li>
+<li>手动实现了Transformer的激活函数，而没有用pytorch库的autograd，以得到更优的训练速度。同时使用了并行化技术提高训练速度。</li>
+<li>减少了activation checkpointing 中，重新计算 activation 的计算量。手动实现 transformer 层的反向传递函数，保存了计算成本高的 activations，例如线性层的输出。</li>
+<li>通过使用 model parallelism 和 sequence parallelism 来减少显存的使用量。</li>
+<li>尽可能地将 activations 的计算和GPU之间的通讯进行并行。</li>
+</ul> 
+<h3 id="h_632102048_11"><strong>加速效果：</strong></h3> 
+<ul><li>65B的模型，在2048个80G的A100 GPU上，可以达到380 tokens/sec/GPU的速度。训练1.4T tokens需要21天。</li></ul> 
+<h2 id="h_632102048_12">五、主要结果与结论</h2> 
+<p><img alt="" height="766" src="https://images2.imgbox.com/9f/c8/CgEVWB9F_o.png" width="1200"></p> 
+<p>LLaMA-13B 优于 GPT-3，尽管只有1/10大小。 LLaMA-65B 是可以与 Chinchilla-70B 和 PaLM-540B 这种最佳的LLM相竞争的模型。经过微调之后，LLaMA的效果有显著的提升。</p> 
+<p>未来打算发布在更大的语料上预训练上的更大的模型，因为随着数据和模型的增大，可以看到 performance 的稳定提升。</p> 
+<p></p> 
+<h1>五、高效实现</h1> 
+<p></p> 
+<p>LLaMA2的开源地址：<u><a href="https://link.zhihu.com/?target=https%3A//github.com/facebookresearch/llama/blob/main/MODEL_CARD.md" title="https://github.com/facebookresearch/llama/blob/main/MODEL_CARD.md">https://github.com/facebookresearch/llama/blob/main/MODEL_CARD.md</a></u></p> 
+<p>LLaMA2的下载地址：<u><a href="https://link.zhihu.com/?target=https%3A//ai.meta.com/resources/models-and-libraries/llama-downloads/" title="https://ai.meta.com/resources/models-and-libraries/llama-downloads/">https://ai.meta.com/resources/models-and-libraries/llama-downloads/</a></u></p> 
+<p>LLaMA2的官方博客地址：<u><a href="https://link.zhihu.com/?target=https%3A//ai.meta.com/resources/models-and-libraries/llama/" title="https://ai.meta.com/resources/models-and-libraries/llama/">https://ai.meta.com/resources/models-and-libraries/llama/</a></u></p> 
+<h2><strong>5.1 技术细节记录</strong></h2> 
+<ol>
+<li>
+<strong>模型尺寸</strong>：LLaMA 2提供了三种不同的模型尺寸：7B、13B和70B。其中，7B和13B的架构与LLaMA 1相同，可直接用于商业应用。</li>
+<li>
+<strong>训练</strong>：LLaMA 2模型经过了2万亿个标记的训练，其上下文长度是LLaMA 1的两倍。此外，LLaMA-2-chat模型还接受了超过100万个新的人类注释的训练。LLaMA 2的训练语料比LLaMA 1多出40%，上下文长度从2048增加到4096，使其能够理解和生成更长的文本。</li>
+<li>
+<strong>预训练</strong>：LLaMA 2使用公开的在线数据进行预训练，然后通过监督微调创建LLaMA-2-chat的初始版本。接下来，LLaMA-2-chat使用人类反馈强化学习（RLHF）进行迭代细化，其中包括拒绝采样和近端策略优化（PPO）。</li>
+<li>
+<strong>模型架构</strong>：LLaMA 2采用了LLaMA 1的大部分预训练设置和模型架构，使用标准Transformer架构，使用RMSNorm应用预归一化、使用SwiGLU激活函数和旋转位置嵌入RoPE。与LLaMA 1的主要架构差异包括增加了上下文长度和分组查询注意力（GQA）。</li>
+<li>
+<strong>分组查询注意力（GQA）</strong>：这是一个新的注意力机制，可以提高大模型的推理可扩展性。它的工作原理是将键和值投影在多个头之间共享，而不会大幅降低性能。可以使用具有单个KV投影的原始多查询格式（MQA）或具有8KV投影的分组查询注意力变体（GQA）。</li>
+<li>
+<strong>超参数</strong>：使用AdamW优化器进行训练，其中β1=0.9，β2=0.95，eps=10−5。使用余弦学习率计划，预热2000步，衰减最终学习率降至峰值学习率的10%。使用0.1的权重衰减和1.0的梯度裁剪。</li>
+<li>
+<strong>分词器</strong>：LLaMA 2使用与LLaMA 1相同的分词器；它采用字节对编码（BPE）算法，使用SentencePiece实现。与LLaMA 1一样，将所有数字拆分为单独的数字，并使用字节来分解未知的UTF-8字符。总数词汇量为32k个token。</li>
+<li>
+<strong>微调</strong>：LLaMA 2-Chat是数月实验研究和对齐技术迭代应用的结果，包括指令微调和RLHF，需要大量的计算和数据标注资源。有监督微调指令数据质量非常重要，包括多样性，注重隐私安全不包含任何元用户数据。</li>
+<li>
+<strong>安全性</strong>：该研究使用三个常用基准评估了Llama 2的安全性，针对三个关键维度：真实性，指语言模型是否会产生错误信息，采用TruthfulQA基准；毒性，指语言模型是否会产生「有毒」、粗鲁、有害的内容，采用ToxiGen基准；偏见，指语言模型是否会产生存在偏见的内容，采用BOLD基准。</li>
+</ol> 
+<h2><strong>5.2 llama1&amp;2 论文对比</strong></h2> 
+<ul>
+<li>llama1论文详细介绍了训练数据的工作方式，读者可以复制其训练过程。</li>
+<li>llama2论文主要集中在介绍模型训练的方法论，对于数据部分的透明度较低。</li>
+<li>llama1由67%的公共爬虫数据和15%的精选数据组成。</li>
+<li>关于llama2的数据，论文中提供的信息较少，但meta提到llama2的预训练语料库比llama1大40%，可能与llama1的数据集类似。</li>
+</ul> 
+<h3></h3> 
+<h2>5.3 数据质量的重要性</h2> 
+<ul>
+<li>llama2加大了数据集中高可信度的权重，导致了模型的可信度更高；</li>
+<li>清理和整理出更好的数据是确保模型生成准确文本的关键步骤；</li>
+<li>随着对数据质量评估和去除重复数据等方法的进步，是否会继续增加训练数据量引发讨论；</li>
+<li>预训练数据量和Chinchilla Optimal的关系：在训练过程中，llama2预训练数据的量超过了Chinchilla Optimal所设定的限制，并且在训练结束时损失曲线仍在下降。这引发了对Chinchilla Optimal是否仍然适用的疑问——</li>
+</ul> 
+<p></p> 
+<p></p> 
+<p></p> 
+<h2>参考</h2> 
+<p>Training Compute-Optimal Large Language Models <a href="https://arxiv.org/abs/2203.15556" title="https://arxiv.org/abs/2203.15556">https://arxiv.org/abs/2203.15556</a></p> 
+<p>Root Mean Square Layer Normalization <a href="https://arxiv.org/pdf/1910.07467.pdf" title="https://arxiv.org/pdf/1910.07467.pdf">https://arxiv.org/pdf/1910.07467.pdf</a></p> 
+<p>GLU Variants Improve Transformer <a href="https://arxiv.org/pdf/2002.05202.pdf" title="https://arxiv.org/pdf/2002.05202.pdf">https://arxiv.org/pdf/2002.05202.pdf</a></p> 
+<p><a href="https://spaces.ac.cn/archives/8265" title="Transformer升级之路：2、博采众长的旋转式位置编码 - 科学空间|Scientific Spaces">Transformer升级之路：2、博采众长的旋转式位置编码 - 科学空间|Scientific Spaces</a></p> 
+<p><a href="https://zhuanlan.zhihu.com/p/645886809" title="Llama2｜得数据者得天下——Latent Space上LLaMA2讨论的精彩整理 - 知乎 (zhihu.com)">Llama2｜得数据者得天下——Latent Space上LLaMA2讨论的精彩整理 - 知乎 (zhihu.com)</a></p> 
+<p><a href="https://zhuanlan.zhihu.com/p/638036267" title="LLM/Meta的LLAMA-2__简介及论文翻译 - 知乎 (zhihu.com)">LLM/Meta的LLAMA-2__简介及论文翻译 - 知乎 (zhihu.com)</a></p> 
+<p><a href="https://zhuanlan.zhihu.com/p/644680366" title="LLaMA2 RLHF 技术细节 - 知乎 (zhihu.com)">LLaMA2 RLHF 技术细节 - 知乎 (zhihu.com)</a></p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

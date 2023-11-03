@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Flink sink Elasticsearch 防止任务中断 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Flink sink Elasticsearch 防止任务中断</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h4>
+<a id="_1"></a>前言</h4> 
+<p>从半年现在从0开始搭建Flink实时计算平台，部分存储层用到了Elasticsearch，从零开始接触Flink，这半年来遇到了好多坑，由传统的开发转变成了大数据开发，Elasticsearch内含有多种熔断器，为了防止OOM。由于目前业务查询的方式会造成成本很高，（可以看一下allow_expensive_querys），某次查询可能会引起服务的熔断，这时候有可能引起实时任务 sink Elasticsearch请求也会被熔断。<br> 当然 Flink Connector 提供了几种失败处理机制</p> 
+<ol>
+<li>
+<code>IgnoringFailureHandler</code>: 会忽略所有 sink elasticsearch Connector的异常 ；</li>
+<li>
+<code>NoOpFailureHandler</code>: 不处理任何异常，只输出异常栈信息（默认）；</li>
+<li>
+<code>RetryRejectedExecutionFailureHandler</code>: 遇到特定异常时会进行重试 包涵 <code>EsRejectedExecutionException</code>类以及他的子类。</li>
+</ol> 
+<p>当我们遇到更新比较多频繁的时候，用<code>IgnoringFailureHandler</code>当写入ES失败时不影响Flink任务，当然遇到比较敏感统计时，我们需要对失败的结果集进行重试，<br> 需要配合<code>RetryRejectedExecutionFailureHandler</code> 来进行处理，源码中只会处理<code>EsRejectedExecutionException</code>类以及他的子类，当然熔断类型的异常归属于<code>ElasticsearchStatusException</code> 异常，两者并没有关系。为防止Flink因elasticsearch集群熔断导致挂掉，我们需要做特定的处理，重写<code>ActionRequestFailureHandler</code>。</p> 
+<h4>
+<a id="_13"></a>重写处理类</h4> 
+<h5>
+<a id="_14"></a>策略类</h5> 
+<p>为了可以更好地扩展，我们首先定义一个策略类<code>ElasticsearchExceptionHandlerStrategy</code>代码如下：</p> 
+<pre><code class="prism language-java">
+<span class="token comment">/**
+ * @author liweigao
+ * @date 2021/12/2 下午11:17
+ */</span>
+<span class="token annotation punctuation">@Getter</span>
+<span class="token keyword">public</span> <span class="token keyword">enum</span> <span class="token class-name">ElasticsearchExceptionHandlerStrategy</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * 默认空不处理或默认使用父类 由handler来决定实现
+     */</span>
+    <span class="token function">DEFAULT</span><span class="token punctuation">(</span><span class="token class-name">Lists</span><span class="token punctuation">.</span><span class="token function">newArrayList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+
+    <span class="token comment">/***
+     * 全部异常 Throwable 级别
+     * 需要注意
+     */</span>
+    <span class="token function">ALL_EXCEPTION</span><span class="token punctuation">(</span><span class="token class-name">Lists</span><span class="token punctuation">.</span><span class="token function">newArrayList</span><span class="token punctuation">(</span><span class="token class-name">Throwable</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+
+    <span class="token comment">/**
+     * @see org.elasticsearch.ElasticsearchException
+     * @see org.elasticsearch.ElasticsearchException.ElasticsearchExceptionHandle
+     * &lt;p&gt;
+     * elasticsearch 封装的异常
+     */</span>
+    <span class="token function">ELASTICSEARCH_EXCEPTION</span><span class="token punctuation">(</span><span class="token class-name">Lists</span><span class="token punctuation">.</span><span class="token function">newArrayList</span><span class="token punctuation">(</span><span class="token class-name">ElasticsearchException</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+
+    <span class="token comment">/**
+     * @see org.elasticsearch.ElasticsearchStatusException
+     * @see org.elasticsearch.rest.RestStatus
+     * @see EsRejectedExecutionException
+     * &lt;p&gt;
+     * elasticsearch 状态异常
+     * todo 可根据相应的异常进行细化~
+     * 可进行通信的链接状态错误(比如 es熔断导致的429错误)
+     */</span>
+    <span class="token function">ELASTICSEARCH_STATUS_AND_REJECTED_EXCEPTION</span><span class="token punctuation">(</span><span class="token class-name">Lists</span><span class="token punctuation">.</span><span class="token function">newArrayList</span><span class="token punctuation">(</span><span class="token class-name"><span class="token namespace">org<span class="token punctuation">.</span>elasticsearch<span class="token punctuation">.</span></span>ElasticsearchStatusException</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">,</span>
+                                                <span class="token class-name">EsRejectedExecutionException</span> <span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">final</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Class</span><span class="token punctuation">&lt;</span><span class="token operator">?</span> <span class="token keyword">extends</span> <span class="token class-name">Throwable</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> exceptionClass<span class="token punctuation">;</span>
+
+    <span class="token class-name">ElasticsearchExceptionHandlerStrategy</span><span class="token punctuation">(</span><span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Class</span><span class="token punctuation">&lt;</span><span class="token operator">?</span> <span class="token keyword">extends</span> <span class="token class-name">Throwable</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> exceptionClass<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>exceptionClass <span class="token operator">=</span> exceptionClass<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>定义了四种策略</p> 
+<ol>
+<li>
+<code>ALL_EXCEPTION</code> 全部异常</li>
+<li>
+<code>ELASTICSEARCH_EXCEPTION</code> ELASTICSEARCH_EXCEPTION elasticsearch全部异常</li>
+<li>
+<code>ELASTICSEARCH_STATUS_AND__EXCEPTION</code> <code>EsRejectedExecutionException</code> 和 <code>ElasticsearchStatusException</code> 异常</li>
+<li>
+<code>DEFAULT</code> 默认空不处理或默认使用父类, 由handler来决定实现</li>
+</ol> 
+<blockquote> 
+ <p>可根据实际业务去扩展ElasticsearchExceptionHandlerStrategy 枚举类。</p> 
+</blockquote> 
+<h5>
+<a id="_75"></a>重写异常处理类</h5> 
+<ul><li>
+<code>RetryExecutionFailureHandler</code>: 特定的异常失败重试 如果策略为DEFAULT时 会交由父类去处理(<code>RetryRejectedExecutionFailureHandler</code>) 代码如下：</li></ul> 
+<pre><code class="prism language-java">
+<span class="token comment">/**
+ * 可重试异常处理,根据{@link ElasticsearchExceptionHandlerStrategy} 进行处理
+ *
+ * @author liweigao
+ * @date 2021/12/2 下午11:27
+ */</span>
+<span class="token annotation punctuation">@Slf4j</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">RetryExecutionFailureHandler</span> <span class="token keyword">extends</span> <span class="token class-name">RetryRejectedExecutionFailureHandler</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">long</span> serialVersionUID <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">ElasticsearchExceptionHandlerStrategy</span> strategy<span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Nullable</span>
+    <span class="token keyword">public</span> <span class="token class-name">RetryExecutionFailureHandler</span><span class="token punctuation">(</span><span class="token class-name">ElasticsearchExceptionHandlerStrategy</span> strategy<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>strategy <span class="token operator">=</span> strategy<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onFailure</span><span class="token punctuation">(</span><span class="token class-name">ActionRequest</span> action<span class="token punctuation">,</span> <span class="token class-name">Throwable</span> failure<span class="token punctuation">,</span> <span class="token keyword">int</span> restStatusCode<span class="token punctuation">,</span> <span class="token class-name">RequestIndexer</span> indexer<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Throwable</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">Objects</span><span class="token punctuation">.</span><span class="token function">isNull</span><span class="token punctuation">(</span>strategy<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token class-name">CollectionUtils</span><span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span>strategy<span class="token punctuation">.</span><span class="token function">getExceptionClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">super</span><span class="token punctuation">.</span><span class="token function">onFailure</span><span class="token punctuation">(</span>action<span class="token punctuation">,</span> failure<span class="token punctuation">,</span> restStatusCode<span class="token punctuation">,</span> indexer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"Failed Elasticsearch item request: {}"</span><span class="token punctuation">,</span> failure<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> failure<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token operator">?</span> <span class="token keyword">extends</span> <span class="token class-name">Throwable</span><span class="token punctuation">&gt;</span></span> exceptionClass <span class="token operator">:</span> strategy<span class="token punctuation">.</span><span class="token function">getExceptionClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">ExceptionUtils</span><span class="token punctuation">.</span><span class="token function">findThrowable</span><span class="token punctuation">(</span>failure<span class="token punctuation">,</span> exceptionClass<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isPresent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                indexer<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>action<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">// rethrow all other failures</span>
+        <span class="token keyword">throw</span> failure<span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<ul><li>
+<code>IgnoringExceptionFailureHandler</code>: 特定的异常忽略 如果策略为DEFAULT时 类似于<code>IgnoringFailureHandler</code>处理代码如下：</li></ul> 
+<pre><code class="prism language-java">
+<span class="token comment">/**
+ * 忽略特定异常，如果没指定时默认为全部忽略
+ *
+ * @author liweigao
+ * @date 2021/12/2 下午11:35
+ */</span>
+<span class="token annotation punctuation">@Slf4j</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">IgnoringExceptionFailureHandler</span> <span class="token keyword">implements</span> <span class="token class-name">ActionRequestFailureHandler</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">long</span> serialVersionUID <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">ElasticsearchExceptionHandlerStrategy</span> strategy<span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onFailure</span><span class="token punctuation">(</span><span class="token class-name">ActionRequest</span> action<span class="token punctuation">,</span> <span class="token class-name">Throwable</span> failure<span class="token punctuation">,</span> <span class="token keyword">int</span> restStatusCode<span class="token punctuation">,</span> <span class="token class-name">RequestIndexer</span> indexer<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Throwable</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">Objects</span><span class="token punctuation">.</span><span class="token function">isNull</span><span class="token punctuation">(</span>strategy<span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token class-name">CollectionUtils</span><span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span>strategy<span class="token punctuation">.</span><span class="token function">getExceptionClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"Failed Elasticsearch item request: {}"</span><span class="token punctuation">,</span> failure<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> failure<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token operator">?</span> <span class="token keyword">extends</span> <span class="token class-name">Throwable</span><span class="token punctuation">&gt;</span></span> exceptionClass <span class="token operator">:</span> strategy<span class="token punctuation">.</span><span class="token function">getExceptionClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">ExceptionUtils</span><span class="token punctuation">.</span><span class="token function">findThrowable</span><span class="token punctuation">(</span>failure<span class="token punctuation">,</span> exceptionClass<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isPresent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">// rethrow all other failures</span>
+        <span class="token keyword">throw</span> failure<span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<h4>
+<a id="Sink_ES__154"></a>Sink ES 代码详细配置</h4> 
+<p>伪代码如下：</p> 
+<pre><code class="prism language-java">
+<span class="token class-name">ElasticsearchSink<span class="token punctuation">.</span>Builder</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Object</span><span class="token punctuation">&gt;</span></span> builder <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ElasticsearchSink<span class="token punctuation">.</span>Builder</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Object</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>httpHosts<span class="token punctuation">,</span>
+                <span class="token keyword">new</span> <span class="token class-name">ElasticsearchSinkFunction</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//配置批量提交</span>
+builder<span class="token punctuation">.</span><span class="token function">setBulkFlushBackoff</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//设置重试次数</span>
+builder<span class="token punctuation">.</span><span class="token function">setBulkFlushBackoffRetries</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//设置重试间隔</span>
+builder<span class="token punctuation">.</span><span class="token function">setBulkFlushBackoffDelay</span><span class="token punctuation">(</span><span class="token number">2000L</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//设置重试策略CONSTANT: 常数 eg: 重试间隔为2s 重试3次 会在2s-&gt;4s-&gt;6s进行; EXPONENTIAL:指数 eg:  重试间隔为2s 重试3次 会在2s-&gt;4s-&gt;8s进行</span>
+builder<span class="token punctuation">.</span><span class="token function">setBulkFlushBackoffType</span><span class="token punctuation">(</span><span class="token class-name">ElasticsearchSinkBase<span class="token punctuation">.</span>FlushBackoffType</span><span class="token punctuation">.</span>CONSTANT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//设置批量提交最大数据量</span>
+builder<span class="token punctuation">.</span><span class="token function">setBulkFlushMaxSizeMb</span><span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//设置批量提交间隔</span>
+builder<span class="token punctuation">.</span><span class="token function">setBulkFlushInterval</span><span class="token punctuation">(</span><span class="token number">2000L</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//设置批量提交的最大条数</span>
+builder<span class="token punctuation">.</span><span class="token function">setBulkFlushMaxActions</span><span class="token punctuation">(</span><span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//设置重试机制</span>
+<span class="token class-name"><span class="token namespace">builder<span class="token punctuation">.</span></span>Builder</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Object</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">.</span><span class="token function">setFailureHandler</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">RetryExecutionFailureHandler</span><span class="token punctuation">(</span><span class="token class-name">ElasticsearchExceptionHandlerStrategy</span><span class="token punctuation">.</span>DEFAULT<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+</code></pre> 
+<blockquote> 
+ <p>Elasticsearch失败重试机制依赖于checkpoint 可参看源码：<code>ElasticsearchSinkBase</code>类</p> 
+</blockquote> 
+<h4>
+<a id="_181"></a>总结</h4> 
+<p>以上拙见，毕竟才入坑，欢迎交流~ 推荐一波<a href="https://github.com/streamxhub/streamx">Flink 的发布平台</a>。切记：没有最优的公共配置，需要根据特定场景才能达到相应的效果。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

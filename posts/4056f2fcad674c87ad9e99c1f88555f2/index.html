@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>kafka使用心得（二） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">kafka使用心得（二）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="kafka_0"></a>kafka进阶</h1> 
+<h2>
+<a id="_2"></a>消息顺序保证</h2> 
+<p>Kafka它在设计的时候就是要保证分区下消息的顺序，也就是说消息在一个分区中的顺序是怎样的，那么消费者在消费的时候看到的就是什么样的顺序。</p> 
+<h2>
+<a id="_6"></a>消费者和分区的对应关系</h2> 
+<p>参考这篇<a href="https://www.cnblogs.com/cjsblog/p/9664536.html">文章</a>。</p> 
+<h2>
+<a id="_12"></a>分区文件</h2> 
+<p>一个分区对应着log.dirs下的一个子目录，例如主题test1的0号分区，其对应目录的内容为：<br> ls test1-0<br> 00000000000000000000.index 00000000000000000000.log 00000000000000000000.timeindex<br> 分别有日志文件和索引文件。</p> 
+<p>Kafka解决查询效率的手段之一是将数据文件分段，比如有100条Message，它们的offset是从0到99。假设将数据文件分成5段，第一段为0-19，第二段为20-39，以此类推，<strong>每段放在一个单独的数据文件里面</strong>，数据文件以该段中最小的offset命名。这样在查找指定offset的Message的时候，用二分查找就可以定位到该Message在哪个段中。<br> 数据文件分段使得可以在一个较小的数据文件中查找对应offset的Message了，但是这依然需要顺序扫描才能找到对应offset的Message。为了进一步提高查找的效率，Kafka为每个分段后的数据文件建立了索引文件，文件名与数据文件的名字是一样的，只是文件扩展名为.index。<br> 索引文件中包含若干个索引条目，每个条目表示数据文件中一条Message的索引。索引包含两个部分（均为4个字节的数字），分别为相对offset和position。<br> 相对offset：因为数据文件分段以后，每个数据文件的起始offset不为0，相对offset表示这条Message相对于其所属数据文件中最小的offset的大小。举例，分段后的一个数据文件的offset是从20开始，那么offset为25的Message在index文件中的相对offset就是25-20 = 5。存储相对offset可以减小索引文件占用的空间。<br> position，表示该条Message在数据文件中的绝对位置。只要打开文件并移动文件指针到这个position就可以读取对应的Message了。<br> index文件中并没有为数据文件中的每条Message建立索引，而是采用了<strong>稀疏存储</strong>的方式，每隔一定字节的数据建立一条索引。这样避免了索引文件占用过多的空间，从而可以将索引文件保留在内存中。但缺点是那些没有建立索引的Message也不能一次定位到其在数据文件中的位置，从而需要做一次局部的顺序扫描，但是这次顺序扫描的范围就很小了。<br> 总的来说，<strong>log+index的设计方式类似于hdfs上的MapFile，MapFile也是通过“定位到大致位置”+“局部顺序扫描”来快速定位的</strong>。</p> 
+<h2>
+<a id="_26"></a>分区副本</h2> 
+<p>分区有多个副本，其中一个是leader副本，leader副本通过特定的策略选举产生，其他是follower副本。读写操作均由leader副本处理，follower副本仅仅是从leader副本处把新的消息同步过来，这个过程有一定延迟，所以follower副本的消息可能略少于leader副本，这在一定阈值范围内是可以容忍的。</p> 
+<p><strong>kafka的主从副本机制与mysql的对比</strong>：<br> 1、由于只从leader副本处读写，kafka的分区副本并不支持负载均衡，而纯粹是一种高可靠设计。mysql的slave是可以分摊查询压力的。由此也可看出，kafka分区副本的一致性保证要强于mysql的读写分离。<br> 2、为保证生产者的效率，leader和follower之间是异步同步，不会因为某个follower太慢拖慢整个集群。这点跟mysql的master/slave异步同步是相似的。<br> 3、leader宕机，会从follower（follower副本一般会放到不同的机器上）中选举新的leader，可以认为是不存在单点问题的。mysql不会从slave中选举新的master，而是通过双主双活（近似于主备机）措施来保证master可用。</p> 
+<h2>
+<a id="offset_34"></a>消费者位置（offset）</h2> 
+<p>消费者在消费的过程中需要记录自己消费了多少数据，即消费位置信息。在Kafka中这个位置信息有个专门的术语：位移(offset)。很多消息引擎都把这部分信息保存在服务器端(broker端)。这样做的好处当然是实现简单，但会有三个主要的问题：</p> 
+<ol>
+<li>broker从此变成有状态的，会影响伸缩性；</li>
+<li>需要引入应答机制(acknowledgement)来确认消费成功。</li>
+<li>由于要保存很多consumer的offset信息，必然引入复杂的数据结构，造成资源浪费。<br> 而Kafka选择了不同的方式：每个consumer group保存自己的位移信息，那么只需要简单的一个整数表示位置就够了；同时可以引入checkpoint机制定期持久化，简化了应答机制的实现。</li>
+</ol> 
+<p>老版本（0.8及之前）的位移是提交到zookeeper中的，目录结构是：/consumers/&lt;group.id&gt;/offsets//，但是zookeeper其实并不适合进行大批量的读写操作，尤其是写操作。因此kafka提供了另一种解决方案：增加consumer offsets topic，将offset信息写入这个topic，摆脱对zookeeper的依赖。__consumer_offsets中的消息保存了每个consumer group某一时刻提交的offset信息，结构大概是：<br> group id + topic-partition + offset</p> 
+<p>我们可以使用bin/kafka-consumer-groups.sh 来查看offset。</p> 
+<ol><li>列出基于java consumer API访问的所有consumer group</li></ol> 
+<pre><code>./kafka-consumer-groups.sh --bootstrap-server xx.xx.xx.xx:9092 --list
+</code></pre> 
+<p>列出基于zk访问的consumer group（kafka的最新版本里已没有–zookeeper选项了）：</p> 
+<pre><code>./kafka-consumer-groups.sh --zookeeper localhost:2181 --list
+</code></pre> 
+<ol start="2"><li>查看某consumer group的offset<br> ./kafka-consumer-groups.sh --bootstrap-server xx.xx.xx.xx:9092 --describe --group uniquelip1<br> 输出是这样的：<br> TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG CONSUMER-ID<br> mykafka 0 0 0 0 -<br> heyHaha1 0 1974 30887 28913 -<br> 记录了该consumer组commit过（注意不是消费过，而是commit过）的各topic下分区的当前位置（CURRENT-OFFSET）及最后一个消息的位置（LOG-END-OFFSET，简称LEO）</li></ol> 
+<h3>
+<a id="enableautocommit_71"></a>enable.auto.commit</h3> 
+<p>特别注意：enable.auto.commit默认是开启的！所以，如果要手工控制offset，必须显式关闭：</p> 
+<pre><code>props.put("enable.auto.commit", "false");
+</code></pre> 
+<p>建议显式关闭，因为commit动作必须在消息真正被业务消费之后才能执行，否则在异常情况下可能导致消息丢失。比如提前commit，但此刻消息只处理了部分，这时进程core掉，即使随后进程重启，由于offset已被commit成最新的值new-pos，new-pos之前可能有部分消息已经无法处理了。</p> 
+<h3>
+<a id="autooffsetreset_78"></a>auto.offset.reset值含义解释</h3> 
+<p>三个值：earliest、latest、none</p> 
+<p>earliest<br> 当各分区下有已提交的offset（即CURRENT-OFFSET有效，下同）时，从提交的offset开始消费；<br> 无提交的offset时（例如该topic尚未被当前consumer组消费），从头开始消费</p> 
+<p>latest<br> 当各分区下有已提交的offset时，从提交的offset开始消费；<br> 无提交的offset时，等待消费新产生的数据，对已存在的历史数据会置之不理。注意若关闭了enable.auto.commit，此时查看的offset的位置如下：<br> TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG CONSUMER-ID HOST CLIENT-ID<br> test4 0 - 5 - consumer-1-b4c5c879-c649-4198-9e4c-13735e9eaab4 /10.180.53.159 consumer-1<br> 我们发现CURRENT-OFFSET的值是-，并非一个有效值。</p> 
+<p>none<br> topic各分区都存在已提交的offset时，从offset后开始消费；<br> 只要有一个分区不存在已提交的offset，则抛出异常：<br> Undefined offset with no reset policy for partition: test4-0</p> 
+<p>经测试，<strong>auto.offset.reset默认是latest</strong>。</p> 
+<h3>
+<a id="offset_99"></a>offset小结</h3> 
+<p>offset是一个客户端的概念，而非服务端概念，每个consumer组都有自己独立的offset，互不干扰，只是offset信息会存在服务端的磁盘里而已。</p> 
+<p>生产者已经往某个topic插入数据，但consumer却从该topic取不到数据，有两种可能：<br> 1、CURRENT-OFFSET等于LEO，说明该consumer所在的组已经消费过消息了，看看是否忽略了“enable.auto.commit默认是开启”的情况；<br> 2、consumer访问的是一个之前未访问过的topic，该topic有历史数据但无新的数据到来，由于auto.offset.reset默认是latest，consumer会挂住等待新的消息。</p> 
+<h2>
+<a id="enableautocommit_106"></a>enable.auto.commit</h2> 
+<p>默认为true，kafka后台会每隔5s（默认值，可以通过auto_commit_interval_ms修改）自动提交一次offset。所以，如果用auto commit选项，消费和commit之间实际上是有延迟的。</p> 
+<p>实际使用中，consumer定期poll，且auto.offset.reset=latest，且开启了auto commit，则有可能在消费之后，commit之前，consumer group就会因没有初始offset信息而被kafka后台干掉，从而导致后续每次都poll不到消息。为解决该问题，此时应该手工commit。</p> 
+<p>特别说明一下，如果consumer group没有消耗任何消息就显式commit，且auto.offset.reset=latest，此时CURRENT-OFFSET会被设置为LEO。</p> 
+<h2>
+<a id="consumer_group_116"></a>consumer group</h2> 
+<p>consumer构成的组。组中的consumer会被分配到不同的partition上。因此，<strong>一条消息只会被Consumer Group中的一个Consumer消费</strong>。</p> 
+<h2>
+<a id="producer_122"></a>关于producer</h2> 
+<p>producer的send方法是异步的，它会将ProducerRecord缓存起来，然后由单独的sender线程批量发送。<br> KafkaProducer是线程安全的，且按照官方文档，<strong>多线程共享一个producer实例性能更好</strong>。<br> 我们看KafkaProducer有一个close方法，其中所做的事情包含：<br> 将缓存里的消息清空；<br> 关闭sender线程。<br> 所以,KafkaProducer其实是一个运算资源的集合体。</p> 
+<h2>
+<a id="08_131"></a>性能测试脚本(0.8版本)</h2> 
+<pre><code>./kafka-producer-perf-test.sh --broker-list localhost:9092 --messages 1000000 --topics test1 --threads 6 --message-size 1000 --batch-size 200 --compression-codec 0 
+</code></pre> 
+<p>参数说明：</p> 
+<pre><code>--messages &lt;Long: count&gt;                The number of messages to send or      
+
+                                          consume (default:                    
+
+                                          9223372036854775807) 
+
+--threads &lt;Integer: number of threads&gt;  Number of sending threads. (default: 1)
+
+                                        可令线程数等于分区数
+
+--message-size &lt;Integer: size&gt;          The size of each message. (default:    
+
+                                          100)    
+
+--batch-size &lt;Integer: size&gt;            Number of messages to write in a       
+
+                                          single batch. (default: 200)  
+
+--compression-codec &lt;Integer:           If set, messages are sent compressed   
+
+  supported codec: NoCompressionCodec     (default: 0)                         
+
+  as 0, GZIPCompressionCodec as 1,                                             
+
+  SnappyCompressionCodec as 2,                                                 
+
+  LZ4CompressionCodec as 3&gt;    
+
+</code></pre> 
+<h1>
+<a id="kafka_170"></a>kafka调优</h1> 
+<h2>
+<a id="producer_171"></a>producer总体架构</h2> 
+<p>有几点需注意：</p> 
+<ul>
+<li>producer的send只是把消息放到发送缓存里，会有单独的发送线程把消息从socket发送给kafka服务器，这也说明producer必然是线程安全的；</li>
+<li>发送缓存使用了内存池机制，它维护了一个freelist，里面都是batch.size大小的内存块，一旦涉及内存分配或回收，只是简单的从这个freelist里pop或push内存块，几乎不涉及java堆分配，自然也无需gc；</li>
+<li>发送线程会等到一个batch.size大小的内存块被消息填满才发送，这样可提升produce效率。一个内存块对应一个分区，所以同一时间，可能有多个内存块从socket发送给不同的节点；</li>
+<li>整个发送缓存的大小由buffer.memory参数指定。</li>
+</ul> 
+<h2>
+<a id="produce_179"></a>produce调优总结</h2> 
+<p>我们看produce的“远端执行”性能数据，有几个结论：</p> 
+<ul>
+<li>producer建议做成单例在多线程间共享，多个producer实例会将发送的消息总量分摊掉，造成的结果是：一方面由于多producer的分摊，消息不能及时发送（因为每个producer有batch.size的约束），另一方面多个producer的消息可能堆在一起发送，产生大量的网络IO。</li>
+<li>指示发送缓存大小的batch.size不能设置太小，否则严重影响发送效率。这点可跟写文件时的进程内缓存做一类比，实际上batch.size的默认值为16k，也是诸实现中写文件时进程内缓存的常用大小（一般是8k或16k）。</li>
+<li>acks=1，表示仅等待分区的leader副本返回，而非所有的isr副本返回，虽然效率提升了，但可能存在单点风险。</li>
+<li>compression.type=snappy或lz4可极大提升produce效率，压缩之后，意味着相同的batch.size内存块可以发送更多的消息，提升了吞吐量。</li>
+</ul> 
+<p>顺带说一下压缩的问题，kafka producer支持三种压缩格式：<br> gzip、snappy和lz4<br> 压缩比方面，三者的关系是：<br> gzip &gt; lz4 &gt; snappy<br> gzip压缩比最高。</p> 
+<p>压缩解压效率方面则反过来：<br> gzip &lt; lz4 &lt; snappy<br> snappy压缩解压效率最高。</p> 
+<p>其中，gzip是jdk自带的，lz4 是kafka自带的，snappy则需要额外的snappy-java包才可支持。lz4和snappy压缩库的协议都是apache 2.0，商业友好。</p> 
+<p>还有一些可能的性能提升点：</p> 
+<ul><li>控制消息的大小，避免超过batch.size的值。因为producer内部有一个BufferPool，消息所需内存空间的分配不是用new，而是分配自该pool，从而避免gc。一旦消息大小超过batch.size，意味着无法使用pool，只能new，从而带来gc开销。</li></ul> 
+<h3>
+<a id="buffermemorybatchsize_203"></a>buffer.memory和batch.size</h3> 
+<p>我们在producer config里指定的两个参数：</p> 
+<pre><code>props.put("buffer.memory", 33554432);
+props.put("batch.size", 16384);
+</code></pre> 
+<p>最终是用于构造BufferPool：</p> 
+<pre><code>//totalSize就是buffer.memory, batchSize就是batch.size
+this.free = new BufferPool(totalSize, batchSize, metrics, time, metricGrpName);
+</code></pre> 
+<p>则可知buffer.memory就是缓存池的内存总量，而batchSize则是缓存池里每个内存块的大小，这些内存块构成了一个free链表。BufferPool.allocate里计算可用空间的几行代码证明了这一点：</p> 
+<pre><code class="prism language-java"><span class="token comment">//poolableSize就是batch.size，size是待分配的大小</span>
+<span class="token keyword">int</span> freeListSize <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>free<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token keyword">this</span><span class="token punctuation">.</span>poolableSize<span class="token punctuation">;</span>
+<span class="token comment">//availableMemory是原始的、还未分配过的内存量</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>availableMemory <span class="token operator">+</span> freeListSize <span class="token operator">&gt;=</span> size<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// we have enough unallocated or pooled memory to immediately</span>
+    <span class="token comment">// satisfy the request</span>
+    <span class="token function">freeUp</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>availableMemory <span class="token operator">-=</span> size<span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token keyword">return</span> <span class="token class-name">ByteBuffer</span><span class="token punctuation">.</span><span class="token function">allocate</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里有个疑问，似乎producer将batch.size作为标准大小，如果待分配的内存量不是这个标准值，就new之，关于这点，也可从deallocate实现里取得印证：</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">deallocate</span><span class="token punctuation">(</span><span class="token class-name">ByteBuffer</span> buffer<span class="token punctuation">,</span> <span class="token keyword">int</span> size<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        lock<span class="token punctuation">.</span><span class="token function">lock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>size <span class="token operator">==</span> <span class="token keyword">this</span><span class="token punctuation">.</span>poolableSize <span class="token operator">&amp;&amp;</span> size <span class="token operator">==</span> buffer<span class="token punctuation">.</span><span class="token function">capacity</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                buffer<span class="token punctuation">.</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span>free<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>buffer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span>availableMemory <span class="token operator">+=</span> size<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token class-name">Condition</span> moreMem <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>waiters<span class="token punctuation">.</span><span class="token function">peekFirst</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>moreMem <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+                moreMem<span class="token punctuation">.</span><span class="token function">signal</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            lock<span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>只有待回收的内存量恰好等于batch.size才会放入free队列，供后续复用。如不等的话，只是简单的增加availableMemory的大小，实际走的还是jvm的gc释放流程。</p> 
+<h3>
+<a id="_249"></a>压缩</h3> 
+<p>kafka自带支持的是gzip和lz4压缩，snappy要额外的库支持,这是MemoryRecordsBuilder类里的相关代码：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">MemoizingConstructorSupplier</span> snappyOutputStreamSupplier <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">MemoizingConstructorSupplier</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ConstructorSupplier</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token annotation punctuation">@Override</span>
+        <span class="token keyword">public</span> <span class="token class-name">Constructor</span> <span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">ClassNotFoundException</span><span class="token punctuation">,</span> <span class="token class-name">NoSuchMethodException</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token class-name">Class</span><span class="token punctuation">.</span><span class="token function">forName</span><span class="token punctuation">(</span><span class="token string">"org.xerial.snappy.SnappyOutputStream"</span><span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">getConstructor</span><span class="token punctuation">(</span><span class="token class-name">OutputStream</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">,</span> <span class="token class-name">Integer</span><span class="token punctuation">.</span><span class="token constant">TYPE</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">MemoizingConstructorSupplier</span> snappyInputStreamSupplier <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">MemoizingConstructorSupplier</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ConstructorSupplier</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token annotation punctuation">@Override</span>
+        <span class="token keyword">public</span> <span class="token class-name">Constructor</span> <span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">ClassNotFoundException</span><span class="token punctuation">,</span> <span class="token class-name">NoSuchMethodException</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token class-name">Class</span><span class="token punctuation">.</span><span class="token function">forName</span><span class="token punctuation">(</span><span class="token string">"org.xerial.snappy.SnappyInputStream"</span><span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">getConstructor</span><span class="token punctuation">(</span><span class="token class-name">InputStream</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>    
+</code></pre> 
+<p>其中，snappyOutputStreamSupplier用于producer的压缩，snappyInputStreamSupplier则用于consumer的解压。</p> 
+<p>关于几种压缩算法，有人做了验证，结论如下：<br> 1）不管对于大量数据或是少量数据，压缩性能snappy都是最佳，只是在数据量大的情况下，压缩性能略慢于lz4。通过对比还是可以发现snappy要优于lz4，难怪hadoop选用snappy。<br> 2）从压缩比来看无疑xz是最出色的，而且解压速度相对于压缩比来说也是相当可观，就是压缩太慢。追加高压缩比对解压速度有要求的可以使用看看。(xz和common xz其实是一样的)<br> 3）综合来看jdk gzip和common zip不论是压缩比和解压性能都不错，对于解压和压缩比有要求的可以使用，但仔细分析发现common gzip更善于处理大数据量的压缩。<br> 4）最后，bzip2压缩比还可以，但是压缩和解压速度都偏慢。</p> 
+<h2>
+<a id="consumer_277"></a>consumer总体架构</h2> 
+<p>总体结构比较简单，大致流程是：<br> consumer先通过Coordinator与服务端交互完成rebalance操作（多个consumer构成一个ConsumerGroup，rebalance相当于组内的负载均衡），rebalance之后，哪些分区分配给哪个consumer就确定了，这时fetcher要准备从服务端拿消息了，但还有两个关键参数要告诉服务端：一是分区上次提交的offset，即我要从哪个位置开始读；二是我最多要读多大数据量。前者由Coordinator从服务端的offset topic里获得,后者则由max.partition.fetch.bytes参数指定。</p> 
+<h2>
+<a id="consumer_282"></a>consumer调优总结</h2> 
+<p>测试下来有几点：</p> 
+<ul>
+<li>max.partition.fetch.bytes并非越大越好，需均衡考虑producer的写入速度及网络IO的开销，设置过大会导致等待时间较长且一次网络传输量较大， 实测使用默认值（1M）较好。</li>
+<li>合理设置“心跳超时”和“连续poll调用间隔超时”，kafka 0.10.1版本之前，这两种监测是用同一个参数session.timeout.ms表示，0.10.1之后则分别用session.timeout.ms（心跳超时）和max.poll.interval.ms（连续poll调用间隔超时）表示。0.10.1版本之后，我们可将session.timeout.ms设小点（默认是10s），确保服务端尽快监测到consumer挂掉，同时可将max.poll.interval.ms设大点（默认300s），争取更多的消息处理时间。但0.10.1版本之前，我们不能为了更长的处理时间而把session.timeout.ms调的过大，那样服务端无法快速监测到consumer挂掉的情况，反而导致费时甚久的消息处理白做了。</li>
+<li>connections.max.idle.ms是连接空闲关闭时间，但consumer似乎有重连机制，即使我们故意延迟超出这个时间，依然可以poll出数据；</li>
+</ul> 
+<h3>
+<a id="maxpartitionfetchbytes_289"></a>max.partition.fetch.bytes</h3> 
+<p>consumer向kafka server申请数据，需构造FetchRequest，这里有两个关键参数要告诉服务端：一是分区offset，即我要从哪个位置开始读；二是我要读多大数据量。前者可从kafka的offset topic里获得，我们可以得到最近一次consumer提交的该分区的位置。后者就是由max.partition.fetch.bytes指定。涉及的代码是：</p> 
+<pre><code class="prism language-java"><span class="token class-name">Fetcher</span><span class="token punctuation">.</span>java
+
+<span class="token keyword">private</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Node</span><span class="token punctuation">,</span> <span class="token class-name">FetchRequest<span class="token punctuation">.</span>Builder</span><span class="token punctuation">&gt;</span></span> <span class="token function">createFetchRequests</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 获得kafka集群的信息</span>
+        <span class="token class-name">Cluster</span> cluster <span class="token operator">=</span> metadata<span class="token punctuation">.</span><span class="token function">fetch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Node</span><span class="token punctuation">,</span> <span class="token class-name">LinkedHashMap</span><span class="token punctuation">&lt;</span><span class="token class-name">TopicPartition</span><span class="token punctuation">,</span> <span class="token class-name">FetchRequest<span class="token punctuation">.</span>PartitionData</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> fetchable <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LinkedHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">TopicPartition</span> partition <span class="token operator">:</span> <span class="token function">fetchablePartitions</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//找到leader，因为只有leader副本支持读写</span>
+            <span class="token class-name">Node</span> node <span class="token operator">=</span> cluster<span class="token punctuation">.</span><span class="token function">leaderFor</span><span class="token punctuation">(</span>partition<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>node <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                metadata<span class="token punctuation">.</span><span class="token function">requestUpdate</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>client<span class="token punctuation">.</span><span class="token function">pendingRequestCount</span><span class="token punctuation">(</span>node<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// if there is a leader and no in-flight requests, issue a new fetch</span>
+                <span class="token class-name">LinkedHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">TopicPartition</span><span class="token punctuation">,</span> <span class="token class-name">FetchRequest<span class="token punctuation">.</span>PartitionData</span><span class="token punctuation">&gt;</span></span> fetch <span class="token operator">=</span> fetchable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>node<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>fetch <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    fetch <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LinkedHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    fetchable<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>node<span class="token punctuation">,</span> fetch<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">//得到该分区上次commit的位置，并将其作为本次fetch的起始offset</span>
+                <span class="token comment">//fetchSize就是max.partition.fetch.bytes,</span>
+                <span class="token comment">//表示每次fetch的最大字节数</span>
+                <span class="token keyword">long</span> position <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>subscriptions<span class="token punctuation">.</span><span class="token function">position</span><span class="token punctuation">(</span>partition<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                fetch<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>partition<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">FetchRequest<span class="token punctuation">.</span>PartitionData</span><span class="token punctuation">(</span>position<span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">.</span>fetchSize<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3>
+<a id="sessiontimeoutmsmaxpollintervalms_316"></a>session.timeout.ms和max.poll.interval.ms</h3> 
+<p>两者的差异stackoverflow上有<a href="https://stackoverflow.com/questions/39730126/difference-between-session-timeout-ms-and-max-poll-interval-ms-for-kafka-0-10-0">帖子</a>解释，总结下来有几点：</p> 
+<ul>
+<li>kafka consumer有两种超时检查，一是心跳监测、二是连续poll调用间隔监测，前者预防consumer挂掉（包括网络断链），后者预防consumer处理的太慢。</li>
+<li>kafka 0.10.1版本之前，这两种监测是用一个参数session.timeout.ms表示的，0.10.1之后则分别用session.timeout.ms（心跳监测超时）和max.poll.interval.ms（连续poll调用间隔超时）表示。这样修改的原因是，保证尽快检测到consumer挂掉的同时允许更长的消息处理耗时。修改的方法则是为心跳监测单独起一个线程，跟消息处理线程隔离开。</li>
+</ul> 
+<p>为何要有两种超时监测机制？我估计还是kafka的ConsumerGroup支持组内负载均衡的缘故，上述两种超时间隔一旦达到，服务端就认为该consumer会拖慢整体性能（无论挂掉还是消息处理慢都会拖整个ConsumerGroup的后腿），就会从ConsumerGroup中移除该consumer，并启动consumer rebalance(注意，rebalance由服务端触发，且视情况，有必要才触发)，但如果仅仅是消息处理太慢，而非网络连接问题，我们不排除rebalance后重新选择旧的consumer的可能。<br> 下面是在0.10.2下触发"poll调用间隔超时"的代码，我们设置poll查询间隔超时为10s:</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">KafkaConsumer</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> <span class="token function">getConsumer</span><span class="token punctuation">(</span><span class="token keyword">boolean</span> fromBeginning<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+        <span class="token class-name">Properties</span> props <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Properties</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        props<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"bootstrap.servers"</span><span class="token punctuation">,</span> ip <span class="token operator">+</span> <span class="token string">":9092"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        props<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"group.id"</span><span class="token punctuation">,</span> <span class="token string">"uniquelip1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        props<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"enable.auto.commit"</span><span class="token punctuation">,</span> <span class="token string">"false"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        props<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"session.timeout.ms"</span><span class="token punctuation">,</span> <span class="token number">10000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        props<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"max.poll.interval.ms"</span><span class="token punctuation">,</span> <span class="token number">10000</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//设置poll查询间隔超时为10s</span>
+        props<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"key.deserializer"</span><span class="token punctuation">,</span> <span class="token string">"org.apache.kafka.common.serialization.StringDeserializer"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        props<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"value.deserializer"</span><span class="token punctuation">,</span> <span class="token string">"org.apache.kafka.common.serialization.StringDeserializer"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">KafkaConsumer</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> consumer <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">KafkaConsumer</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>props<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> consumer<span class="token punctuation">;</span>
+
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>然后强行在poll和commit间sleep 20s，从而触发“poll调用间隔超时”:</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">consume</span><span class="token punctuation">(</span><span class="token class-name">String</span> topic<span class="token punctuation">,</span> <span class="token keyword">int</span> expectNum<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">boolean</span> hasPrinted <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">(</span><span class="token class-name">KafkaConsumer</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> consumer <span class="token operator">=</span> <span class="token function">getConsumer</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">int</span> total <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            consumer<span class="token punctuation">.</span><span class="token function">subscribe</span><span class="token punctuation">(</span><span class="token class-name">Arrays</span><span class="token punctuation">.</span><span class="token function">asList</span><span class="token punctuation">(</span>topic<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">ConsumerRebalanceListener</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onPartitionsRevoked</span><span class="token punctuation">(</span><span class="token class-name">Collection</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">TopicPartition</span><span class="token punctuation">&gt;</span></span> partitions<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token constant">LOGGER</span><span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"before rebalance,after consumer poll, topic:{}"</span><span class="token punctuation">,</span>
+                            partitions<span class="token punctuation">.</span><span class="token function">stream</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">map</span><span class="token punctuation">(</span>x <span class="token operator">-&gt;</span> x<span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">collect</span><span class="token punctuation">(</span><span class="token class-name">Collectors</span><span class="token punctuation">.</span><span class="token function">joining</span><span class="token punctuation">(</span><span class="token string">";"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onPartitionsAssigned</span><span class="token punctuation">(</span><span class="token class-name">Collection</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">TopicPartition</span><span class="token punctuation">&gt;</span></span> partitions<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token constant">LOGGER</span><span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"after rebalance,before consumer poll, topic:{}"</span><span class="token punctuation">,</span>
+                            partitions<span class="token punctuation">.</span><span class="token function">stream</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">map</span><span class="token punctuation">(</span>x <span class="token operator">-&gt;</span> x<span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">collect</span><span class="token punctuation">(</span><span class="token class-name">Collectors</span><span class="token punctuation">.</span><span class="token function">joining</span><span class="token punctuation">(</span><span class="token string">";"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">while</span> <span class="token punctuation">(</span>total <span class="token operator">&lt;</span> expectNum<span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">ConsumerRecords</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> records <span class="token operator">=</span> consumer<span class="token punctuation">.</span><span class="token function">poll</span><span class="token punctuation">(</span><span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                total <span class="token operator">+=</span> records<span class="token punctuation">.</span><span class="token function">count</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token constant">LOGGER</span><span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"consume {} msgs now"</span><span class="token punctuation">,</span> total<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>hasPrinted <span class="token operator">&amp;&amp;</span> records<span class="token punctuation">.</span><span class="token function">count</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span>records<span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">value</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    hasPrinted <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token class-name">Util</span><span class="token punctuation">.</span><span class="token function">safeSleep</span><span class="token punctuation">(</span><span class="token number">20000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token constant">LOGGER</span><span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"sleep 20s"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token keyword">try</span><span class="token punctuation">{<!-- --></span>
+                    consumer<span class="token punctuation">.</span><span class="token function">commitSync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token keyword">catch</span><span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    e<span class="token punctuation">.</span><span class="token function">printStackTrace</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">LogPrintWriter</span><span class="token punctuation">(</span><span class="token constant">LOGGER</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"total "</span> <span class="token operator">+</span> total <span class="token operator">+</span> <span class="token string">" msgs consumed"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>打印错误如下：</p> 
+<pre><code>org.apache.kafka.clients.consumer.CommitFailedException: Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time
+ between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing the session timeo
+ut or by reducing the maximum size of batches returned in poll() with max.poll.records.
+</code></pre> 
+<p>kafka 0.9版本下报的错则是：</p> 
+<pre><code>commit offsets exception:
+org.apache.kafka.clients.consumer.CommitFailedException: Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time between subsequent calls to poll() was longer than the configured session.timeout.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing the session timeout or by reducing the maximum size of batches returned in poll() with max.poll.records.
+</code></pre> 
+<p>我们看到这两段信息就是一字之差，从0.9的“This means that the time between subsequent calls to poll() was longer than the configured session.timeout.ms”改为0.10的“This means that the time<br> between subsequent calls to poll() was longer than the configured max.poll.interval.ms”。从侧面也印证了前面的说法。</p> 
+<p>注意，我们的测试代码为consumer增加了ConsumerRebalanceListener，可以侦测到服务端的consumer rebalance，日志中会反复打印如下信息：</p> 
+<pre><code> before rebalance,after consumer poll, topic:test1-0;test1-5;test1-2;test1-1;test1-4;test1-3
+ after rebalance,before consumer poll, topic:test1-0;test1-5;test1-2;test1-1;test1-4;test1-3
+</code></pre> 
+<p>而且我们的consumer在commit失败后，下一次poll仍能查出数据（仍是老的数据，因commit失败了），说明旧的consumer依然被服务端rebalance到了，只要随后的消息处理不超时，consumer仍能正常的消费后续消息。</p> 
+<p>还有一个疑问，既然是“poll调用间隔超时”，那为何会在commit时抛出异常而不是下次poll之时呢？我们注意到rebalance动作其实是发生在commit之前的（其实是在consumer的poll函数里），这点从日志可以看出：</p> 
+<pre><code>2017-12-25 14:31:13  [ main ] - [ INFO ]  Revoking previously assigned partitions [test1-0, test1-5, test1-2, test1-1, test1-4, test1-3] for group uniquelip1
+2017-12-25 14:31:13  [ main ] - [ INFO ]  before rebalance,after consumer poll, topic:test1-0;test1-5;test1-2;test1-1;test1-4;test1-3
+2017-12-25 14:31:13  [ main ] - [ INFO ]  (Re-)joining group uniquelip1
+2017-12-25 14:31:13  [ main ] - [ INFO ]  Successfully joined group uniquelip1 with generation 21
+2017-12-25 14:31:13  [ main ] - [ INFO ]  Setting newly assigned partitions [test1-0, test1-5, test1-2, test1-1, test1-4, test1-3] for group uniquelip1
+2017-12-25 14:31:13  [ main ] - [ INFO ]  after rebalance,before consumer poll, topic:test1-0;test1-5;test1-2;test1-1;test1-4;test1-3
+2017-12-25 14:31:13  [ main ] - [ INFO ]  consume 2500 msgs now
+2017-12-25 14:31:33  [ main ] - [ INFO ]  sleep 20s
+2017-12-25 14:31:33  [ main ] - [ ERROR ]  org.apache.kafka.clients.consumer.CommitFailedException: Commit cannot be completed since the group has already rebalanced and assigned the partitions to another member. This means that the time
+ between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time message processing. You can address this either by increasing the session timeo
+ut or by reducing the maximum size of batches returned in poll() with max.poll.records.
+2017-12-25 14:31:33  [ main ] - [ ERROR ]       at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.sendOffsetCommitRequest(ConsumerCoordinator.java:698)
+2017-12-25 14:31:33  [ main ] - [ ERROR ]       at org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.commitOffsetsSync(ConsumerCoordinator.java:577)
+2017-12-25 14:31:33  [ main ] - [ ERROR ]       at org.apache.kafka.clients.consumer.KafkaConsumer.commitSync(KafkaConsumer.java:1091)
+2017-12-25 14:31:33  [ main ] - [ ERROR ]       at KafkaTest.consume(KafkaTest.java:229)
+2017-12-25 14:31:33  [ main ] - [ ERROR ]       at KafkaTest.main(KafkaTest.java:70)
+</code></pre> 
+<p>也就是说commit时，server的rebalance已经发生了，此时consumer和server的状态已经不一致了，在server看来，你这个consumer干的太慢，我早就把你的活分给其他consumer，这部分活就不让你干了，如果你继续commit offset，有可能导致多个consumer同时操作同一个分区，这是kafka的基本原则所不允许的，所以server端只能在commit时报错，而不会容忍你的错误到下一次的poll。从最终的结果看，commit失败，意味着我这个consumer所做的一切消息处理都白做了。</p> 
+<p>如果我们已经合理的设置了"连续poll调用间隔超时"的值，接下来只能通过：<br> 1、控制consume速度（通过调小max.poll.records）；<br> 2、优化消息处理效率<br> 这两种方法来保证消息处理耗时在"连续poll调用间隔超时"之内了。</p> 
+<p>但，如果这样做还不能完全避免“连续poll调用超时”，又该如何应对？<br> 首先，由于"连续poll调用间隔超时"必然导致服务端rebalance，原本由consumer A处理的partition很可能被分配给其他的consumer，这会导致consumerA commit失败（一个分区同一时间只能被ConsumerGroup中的一个consumer消费），则consumer A已经处理尚未commit的那部分消息也会被其他consumer重复处理。如果我们没法将“消息处理”+“offset commit”放在一个事务中，通过事务回滚来回退消息，就只能依赖业务侧来提供去重机制（例如全局唯一主键）或者干脆允许消息重复。<br> 同时，我们也要考虑最极端的情况，即消息处理出现大量积压，导致反复出现“连续poll调用超时”，此时建议调用consumer.unsubscribe让consumer退订，停止从kafka拿消息,直到消息积压的情况有所改善，再重新订阅拿消息。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

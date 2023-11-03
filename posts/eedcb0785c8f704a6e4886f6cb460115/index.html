@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Spark列级血缘(字段级别血缘)开发与实现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Spark列级血缘(字段级别血缘)开发与实现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_1"></a>介绍</h2> 
+<ul><li> <h3>
+<a id="_2"></a>背景</h3> 由于一直苦于尝试追踪spark的列级血缘，所以出于个人目的对spark源代码进行了修改，并且在github上独立了一个项目(Ushas)。<br> 传统数据治理中针对spark的表级别血缘判断虽然能一定程度上解决数据的依赖关系，但是对于精确到字段之间的关系识别则显得捉襟见肘。开发此项目的用意是为了能够加强spark在列级血缘上的追踪优势。</li></ul> 
+<h2>
+<a id="_6"></a>知识铺垫</h2> 
+<ul>
+<li> <h3>
+<a id="dataset_7"></a>dataset中的逻辑计划实现</h3> <p>Ushas 主要在spark-sql-catalyst和spark-sql-hive模块进行了修改，catalyst主要是负责spark在数据处理中的关系依赖管理，其中对于普通的dataset会通过如下代码，将逻辑计划处理嵌入对象内：</p> <pre><code>Dataset.ofRows(sparkSession, logicalPlan)
+</code></pre> </li>
+<li> <h3>
+<a id="sqlParser_12"></a>sql中逻辑计划实现（Parser分析）</h3> <p>而spark2.0版本以上对于spark-sql的支持则是通过Antlr4进行语法解析，生成语法树，然后通过深度遍历的方式将Unresolved的语法信息处理为resolved信息。<br> 每条spark的sql，都会预先通过SparkSqlParser执行parse，parse添加了antlr4需要的词法以及处理器，然后生成逻辑计划：<br> https://github.com/frankyu8/ushas/blob/ee36eac54b758e39689c7e2c51ea6f3aa5c27555/sql/core/src/main/scala/org/apache/spark/sql/SparkSession.scala#L641-L646</p> <p>parsePlan的内部会执行sql转化logicalplan的操作<br> https://github.com/frankyu8/ushas/blob/ee36eac54b758e39689c7e2c51ea6f3aa5c27555/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/parser/ParseDriver.scala#L69-L76</p> </li>
+<li> <h3>
+<a id="Analyzer_20"></a>Analyzer分析</h3> <p>ofRows中会触发Analyzer对于逻辑计划的解析，会调用Analyzer里面的batches进行UnresolveLogicalplan 到ResolveLogicalplan的转化（有则转化，无则跳过）<br> https://github.com/frankyu8/ushas/blob/ee36eac54b758e39689c7e2c51ea6f3aa5c27555/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/rules/RuleExecutor.scala#L72-L80</p> <p>Analyzer的具体识别规则如下:<br> https://github.com/frankyu8/ushas/blob/a7066a67ed9c1ad9db6078d68cfff8d28cce6bd4/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Analyzer.scala#L152-L214</p> <p>Analyzer中的一个batch具体的解析方式为采取后序遍历或者前序遍历，对每个嵌套逻辑计划进行解析</p> <pre><code>def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperatorsUp 
+</code></pre> <p>https://github.com/frankyu8/ushas/blob/a7066a67ed9c1ad9db6078d68cfff8d28cce6bd4/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/AnalysisHelper.scala#L85-L104</p> </li>
+</ul> 
+<h2>
+<a id="_33"></a>我们做的事</h2> 
+<ul>
+<li> <h3>
+<a id="logicalplan_34"></a>让logicalplan具备列级解析的能力</h3> <p>我们为了让logicplan能够有列级血缘的识别能力，首先对逻辑计划的抽象类进行了修改（这里为了不影响logicplan的其他功能，所以进行了额外trait的添加），这样在Analyzer中新添列级血缘解析规则，所有影响因素都控制在额外的trait内，不会影响spark本身的正常逻辑计划解析<br> https://github.com/frankyu8/ushas/blob/a7066a67ed9c1ad9db6078d68cfff8d28cce6bd4/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/LogicalPlan.scala#L30-L36</p> </li>
+<li> <h3>
+<a id="trait_37"></a>trait怎么进行工作的</h3> <p>这里[trait]LineageHelper中携带的属性包括_lineageResolved(是否被Rule解析)，childrenLineageResolved用于递归判断所有的子逻辑计划是否已经被Rule解析过，markLineageResolved用来标注当前逻辑计划解析成功<br> https://github.com/frankyu8/ushas/blob/a46317df9396161a257a2388938289926ff7a46a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/plans/logical/lineageCollect/LineageHelper.scala#L24-L45</p> <p>所有的列级对象都会被lineageChildren 容器进行接手。</p> </li>
+<li> <h3>
+<a id="_43"></a>列级对象存在的合理性</h3> <p>逻辑计划，其实是针对算子进行操作的，并没有对算子里面的涉及成员进行操作，比如select a,b,c from table 那么这里只会生成一个RelationLogicplan 和 ProjectLogicplan, 其中 ProjectLogicplan里面对应的projectList（即所有的字段expression）才是我们关心的列级血缘对象，为了不在projectList里面直接对expression进行操作，所以我们预先定义了列级对象（和expression一一对应），简单的记录了每个expression里面我们所关心的属性[extend treeNode]，然后放入lineageChildren中。只要确保Analyzer工作时，每次深度遍历，在不参与计算的节点将lineageChildren进行复制，携带到上层节点，在对应需要操作的节点进行关系的判断，即可保证列级字段的正确解析。</p> <p>列级对象的子类包括ExpressionColumn,RelationColumn以及UnionColumn，ExpressionColumn主要记录的是Project逻辑计划里面的expression，RelationColumn主要记录的是LeafNode里面的从属关系,UnionColumn主要是记录了特殊的列字段关系，因为需要识别到相应的right lineageChildren信息。<br> https://github.com/frankyu8/ushas/tree/main/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/lineage</p> </li>
+<li> <h3>
+<a id="rule_49"></a>rule是怎么进行工作的</h3> <p>因为logicplan是封装在所有的df对象内的，所以每次的df对象进行方法的操作，都会force 逻辑计划进行Analyzer的解析。我们在Analyzer的规则里面加上了自己的列级血缘判断规则<br> https://github.com/frankyu8/ushas/blob/a46317df9396161a257a2388938289926ff7a46a/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Analyzer.scala#L211-L212</p> <p>我们新增了两个解析规则，一个是针对Relation的解析规则（即字段血缘的叶子节点判断），一个是针对Expression的解析规则（即字段血缘的所有中间关系判断）</p> <p>Relation的解析规则：<br> https://github.com/frankyu8/ushas/blob/796fc00b72ed64b6e1f5b3b0544b6b765eadc327/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/ResolveLineage.scala#L120</p> <p>这里的Relation为简单的从属关系判断，只是记录了每个字段的attribute，并没有去逻辑计划中寻找catalog</p> <p>Expression的解析规则：<br> https://github.com/frankyu8/ushas/blob/796fc00b72ed64b6e1f5b3b0544b6b765eadc327/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/ResolveLineage.scala#L29</p> <p>这里的Expression的解析用的是最为基础的map寻址，即上层字段的exprid和下层字段的exprid进行匹配，若匹配中则进行绑定（借用exprid唯一的特性）</p> </li>
+<li> <h3>
+<a id="hive_relation_65"></a>hive relation的识别</h3> <p>针对于hive，目前的开发是拿取了所有的hive信息。sparksession若是启动了enablehive，默认为重写Analyzer，所以我们为了添加对于hive数据源的支持，在Analyzer基类里面新添了tailResolutionRules，并且在继承的analyzer里面对其进行重写</p> <p>基类的Analyzer为</p> <p>https://github.com/frankyu8/ushas/blob/30faef47cbab44293314faf6638d2594cd8af62b/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/analysis/Analyzer.scala#L149-L150</p> <p>在 hive 的 sessionStatebuilder 里面重写 Analyzer</p> <p>https://github.com/frankyu8/ushas/blob/30faef47cbab44293314faf6638d2594cd8af62b/sql/hive/src/main/scala/org/apache/spark/sql/hive/HiveSessionStateBuilder.scala#L69-L94</p> </li>
+</ul> 
+<h2>
+<a id="_76"></a>软件架构</h2> 
+<ul>
+<li> <h3>
+<a id="moduleassembly_77"></a>[module]assembly</h3> assembly模块是为了能够更加方便的获取打包内容，这里移植了spark的原生代码，可以一键自动化打包，在target/scala目录下获取所有jar包</li>
+<li> <h3>
+<a id="moduledev_79"></a>[module]dev</h3> dev模块是为了配置checkstyle的代码规范检测，spark有内置的scala代码规范要求，我们这里也沿用了他的所有要求，输出目录为target/checkstyle-output.xml</li>
+<li> <h3>
+<a id="moduleexamples_81"></a>[module]examples</h3> example模块是为了提供列级血缘的应用范例</li>
+<li> <h3>
+<a id="directorysql_83"></a>[directory]sql</h3> sql里面包含所有的spark catalyst解析，列级血缘的主要工作都集中在sql包含的三个模块上</li>
+</ul> 
+<h2>
+<a id="_87"></a>安装教程</h2> 
+<ol>
+<li> <p>idea maven 对spark-catalyst module 进行Gnerated Source Code 生成sqlbase.g4的语法树文件</p> </li>
+<li> <p>在跑样例文件时，先设置参数 -DLocal ，再设置 Include with provided scope，用默认本地形式和本地包运行spark</p> </li>
+<li> <p>样例文件位置 examples/src/main/scala/org/apache/spark/examples/lineage/SparkLineageExample.scala</p> </li>
+<li> <p>打包时，如果需要添加hive的插件支持，需要在spark profile中勾选hive</p> </li>
+<li> <p>因为本身就是spark的项目中进行的分离，所以只需要将 spark-hive_2.12-3.1.2.jar，spark-catalyst_2.12-3.1.2.jar 进行替换，即可完成列级血缘的快速部署</p> </li>
+</ol> 
+<h2>
+<a id="_101"></a>效果展示</h2> 
+<ol>
+<li> <p>准备样例sql ： select * from (select substr(a+1,0,1) as c,a+3 as d from (select 1 as a,2 as b))</p> </li>
+<li> <p>样例输出：</p> </li>
+</ol> 
+<pre><code>c#2
++- c#2
+   +- Alias ( substring(cast((a#0 + 1) as string), 0, 1) AS c#2 )
+      +- a#0
+         +- Alias ( 1 AS a#0 )
+</code></pre> 
+<ol start="3">
+<li> <p>在spark-shell中如何查看列级血缘（API方法）</p> <p>df.queryExecution.analyzed.lineageChildren(0).treeString</p> </li>
+<li> <p>在pyspark中如何查看列级血缘（API方法）</p> <p>df._jdf.queryExecution().analyzed().lineageChildren().apply(0).treeString()</p> </li>
+</ol> 
+<h2>
+<a id="star_125"></a>项目（有用的话可以star一下哦！）</h2> 
+<p>https://github.com/frankyu8/ushas</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>PgSQL-并行查询系列-介绍[译] - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">PgSQL-并行查询系列-介绍[译]</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p style="text-align:center">PgSQL-并行查询系列-介绍</p> 
+ <p>现代CPU模型拥有大量的CPU核心。多年来，数据库应用程序都是并发向数据库发送查询的。查询处理多个表的行时，若可以使用多核，则可以客观地提升性能。PgSQL 9.6引入了并行查询的新特性，开启并行查询后可以大幅提升性能。</p> 
+ <h2>
+<strong>1、局限性</strong><strong></strong>
+</h2> 
+ <p>1）若所有CPU核心已经饱和，则不要启动并行查询。并行执行会从其他查询中窃取CPU时间，并增加响应时间</p> 
+ <p>2）进一步需要注意：并行处理会显著增加内存使用（需要注意work_mem的值）。因为，每个hash join或者排序操作都会使用work_mem大小的内存。</p> 
+ <p>3）低延迟的OLTP查询并不能通过并行显著提升性能。特别是仅返回1行的查询，若启用并行，性能会变得特烂。</p> 
+ <p>4）并行执行仅支持没有锁谓词的SELECT查询</p> 
+ <p>5）不支持cursor和会挂起的查询</p> 
+ <p>6）windowed 函数和ordered-set聚合函数都不是并行的</p> 
+ <p>7）对于负载已达IO瓶颈的，并没有啥好处</p> 
+ <p>8）没有并行排序算法。然而，排序查询在某些方面仍然可以并行</p> 
+ <p>9）将CTE（WITH...）替换为sub-select以支持并行执行</p> 
+ <p>10）FDW还不支持并行（后面版本可以，注意哪个版本支持）</p> 
+ <p>11）full outer join不支持</p> 
+ <p>12）客户端设置了max_rows，禁止并行执行</p> 
+ <p>13）如果查询中使用了没有标记为PARALLEL SAFE的函数，那他就是单线程执行</p> 
+ <p>14）SERIALIZABLE事务隔离级别禁用并行执行</p> 
+ <h2>
+<strong>2、并行顺序扫描</strong><strong></strong>
+</h2> 
+ <p>并行顺序扫描很快，原因可能不是并行读，而是将数据访问分散到多个CPU上。现代操作系统给PgSQL的数据文件提供了很好的缓冲机制。预取允许从存储中获取一个块，而不仅是PgSQL请求的块。因此查询性能限制往往不在IO上，它消耗CPU周期：从表数据页中逐行读取；比较行值和WHERE条件</p> 
+ <p>我们执行一个简单查询：</p> 
+ <pre class="has"><code class="language-properties">tpch=# explain analyze select l_quantity as sum_qty from lineitem where l_shipdate &lt;= date '1998-12-01' - interval '105' day;
+QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------
+Seq Scan on lineitem (cost=0.00..1964772.00 rows=58856235 width=5) (actual time=0.014..16951.669 rows=58839715 loops=1)
+Filter: (l_shipdate &lt;= '1998-08-18 00:00:00'::timestamp without time zone)
+Rows Removed by Filter: 1146337
+Planning Time: 0.203 ms
+Execution Time: 19035.100 ms</code></pre> 
+ <p>一个顺序扫描，没有聚合，需要产生大量行。因此该查询被一个CPU核心执行。添加聚合SUM()后，可以清晰的看到有2个进程帮助查询：</p> 
+ <pre class="has"><code class="language-perl">explain analyze select sum(l_quantity) as sum_qty from lineitem where l_shipdate &amp;lt;= date '1998-12-01' - interval '105' day;
+QUERY PLAN 
+----------------------------------------------------------------------------------------------------------------------------------------------------
+Finalize Aggregate (cost=1589702.14..1589702.15 rows=1 width=32) (actual time=8553.365..8553.365 rows=1 loops=1)
+-&amp;gt; Gather (cost=1589701.91..1589702.12 rows=2 width=32) (actual time=8553.241..8555.067 rows=3 loops=1)
+Workers Planned: 2
+Workers Launched: 2
+-&amp;gt; Partial Aggregate (cost=1588701.91..1588701.92 rows=1 width=32) (actual time=8547.546..8547.546 rows=1 loops=3)
+-&amp;gt; Parallel Seq Scan on lineitem (cost=0.00..1527393.33 rows=24523431 width=5) (actual time=0.038..5998.417 rows=19613238 loops=3)
+Filter: (l_shipdate &amp;lt;= '1998-08-18 00:00:00'::timestamp without time zone)
+Rows Removed by Filter: 382112
+Planning Time: 0.241 ms
+Execution Time: 8555.131 ms</code></pre> 
+ <p>性能提升2.2倍。</p> 
+ <h2>
+<strong>3、并行聚合</strong><strong></strong>
+</h2> 
+ <p>“Parallel Seq Scan”节点为partial aggregation提供行。“Partial Aggregate”节点先对SUM()进行一次操作。最后“Gather”节点汇总每个进程的SUM值。“Finalize Aggregate”节点进行最后计算。如果你使用了聚合函数，不要忘记标记他们为“<strong>parallel safe</strong>”。</p> 
+ <h2>
+<strong>4、进程个数</strong><strong></strong>
+</h2> 
+ <p>可以不重启服务，增加并行进程个数：</p> 
+ <pre class="has"><code class="language-sql">alter system set max_parallel_workers_per_gather=4;
+select * from pg_reload_conf();
+Now, there are 4 workers in explain output:
+tpch=# explain analyze select sum(l_quantity) as sum_qty from lineitem where l_shipdate &amp;lt;= date '1998-12-01' - interval '105' day;
+QUERY PLAN 
+----------------------------------------------------------------------------------------------------------------------------------------------------
+Finalize Aggregate (cost=1440213.58..1440213.59 rows=1 width=32) (actual time=5152.072..5152.072 rows=1 loops=1)
+-&amp;gt; Gather (cost=1440213.15..1440213.56 rows=4 width=32) (actual time=5151.807..5153.900 rows=5 loops=1)
+Workers Planned: 4
+Workers Launched: 4
+-&amp;gt; Partial Aggregate (cost=1439213.15..1439213.16 rows=1 width=32) (actual time=5147.238..5147.239 rows=1 loops=5)
+-&amp;gt; Parallel Seq Scan on lineitem (cost=0.00..1402428.00 rows=14714059 width=5) (actual time=0.037..3601.882 rows=11767943 loops=5)
+Filter: (l_shipdate &amp;lt;= '1998-08-18 00:00:00'::timestamp without time zone)
+Rows Removed by Filter: 229267
+Planning Time: 0.218 ms
+Execution Time: 5153.967 ms</code></pre> 
+ <p>我们将并发进程由2改成了4，但是查询仅快1.6599倍。实际上，我们有<strong>2个进程+一个leader</strong>，配置改好成为4+1。并行最大提升可以：5/3=1.66倍。</p> 
+ <h2>
+<strong>5、如何工作？</strong><strong></strong>
+</h2> 
+ <p>查询执行总是从“leader”进程开始。Leader进程执行所有非并行动作。其他进程执行相同查询，称为“worker”进程。并行利用Dynamic Backgroud workers基础架构（9.4引入）执行。因此创建3个工作进程的查询可能比传统执行快4倍。</p> 
+ <p>Worker进程使用消息队列（基于共享内存）和leader进行通信。每个进程有2个队列：一个为errors，另一个是tuples。</p> 
+ <h2>
+<strong>5、进程使用个数</strong><strong></strong>
+</h2> 
+ <p>1）max_parallel_workers_per_gather是workers进程数的最小限制</p> 
+ <p>2）查询执行使用的workers限制为max_parallel_workes</p> 
+ <p>3）最上层的限制是max_worker_processes：后台进程的总数</p> 
+ <p>分配进程失败，会导致使用单进程执行。查询规划器会根据表或索引大小来增加worker个数。min_parallel_table_scan_size和min_parallel_index_scan_size控制该行为。</p> 
+ <pre class="has"><code class="language-perl">set min_parallel_table_scan_size='8MB'
+8MB table =&amp;gt; 1 worker
+24MB table =&amp;gt; 2 workers
+72MB table =&amp;gt; 3 workers
+x =&amp;gt; log(x / min_parallel_table_scan_size) / log(3) + 1 worker</code></pre> 
+ <p><strong>表比min_parallel_(index|table)_scan_size值每大3倍，PG增加一个worker进程</strong>。Workers进程个数不是基于成本的。循环依赖使得复杂的实现变得困难。相反,规划者使用简单的规则。</p> 
+ <p>可以通过ALTER TABLE … SET (parallel_workers = N)来对某个表指定并行进程数。</p> 
+ <h2>
+<strong>6、为什么不使用并行</strong><strong></strong>
+</h2> 
+ <p>除了并行限制外，PG还会检查代价：</p> 
+ <p>parallel_setup_cost:避免短查询的并行执行。模拟用于内存设置、流程启动和初始通信的时间</p> 
+ <p>parallel_tuple_cost:leader和worker之间通信可能花费很长时间。时间和worker发送的记录数成正比。参数对通信成本进行建模。</p> 
+ <h2>
+<strong>7、Nested Loop Join</strong><strong></strong>
+</h2> 
+ <p>PgSQL9.6+可以以并行形式执行“Nested loop”。</p> 
+ <pre class="has"><code class="language-sql">explain (costs off) select c_custkey, count(o_orderkey)
+                from    customer left outer join orders on
+                                c_custkey = o_custkey and o_comment not like '%special%deposits%'
+                group by c_custkey;
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Finalize GroupAggregate
+   Group Key: customer.c_custkey
+   -&amp;gt;  Gather Merge
+         Workers Planned: 4
+         -&amp;gt;  Partial GroupAggregate
+               Group Key: customer.c_custkey
+               -&amp;gt;  Nested Loop Left Join
+                     -&amp;gt;  Parallel Index Only Scan using customer_pkey on customer
+                     -&amp;gt;  Index Scan using idx_orders_custkey on orders
+                           Index Cond: (customer.c_custkey = o_custkey)
+                           Filter: ((o_comment)::text !~~ '%special%deposits%'::text)</code></pre> 
+ <p>Gather发生在最后阶段，因此“Nested Loop Left Join”是并行操作。“Parallel Index Only Scan”在版本10才可以使用，和并行顺序扫描类似。c_custkey = o_custkey条件读取每个customer行的order列，因此不是并行。</p> 
+ <h2>
+<strong>8、Hash Join</strong><strong></strong>
+</h2> 
+ <p>PgSQL11中每个worker构建自己的hash table。因此，4+ workers不能提升性能。新的实现方式：使用一个共享hash table。每个worker可以利用WORK_MEM来构建hash table&gt;</p> 
+ <pre class="has"><code class="language-perl">select
+        l_shipmode,
+        sum(case
+                when o_orderpriority = '1-URGENT'
+                        or o_orderpriority = '2-HIGH'
+                        then 1
+                else 0
+        end) as high_line_count,
+        sum(case
+                when o_orderpriority &amp;lt;&amp;gt; '1-URGENT'
+                        and o_orderpriority &amp;lt;&amp;gt; '2-HIGH'
+                        then 1
+                else 0
+        end) as low_line_count
+from
+        orders,
+        lineitem
+where
+        o_orderkey = l_orderkey
+        and l_shipmode in ('MAIL', 'AIR')
+        and l_commitdate &amp;lt; l_receiptdate
+        and l_shipdate &amp;lt; l_commitdate
+        and l_receiptdate &amp;gt;= date '1996-01-01'
+        and l_receiptdate &amp;lt; date '1996-01-01' + interval '1' year
+group by
+        l_shipmode
+order by
+        l_shipmode
+LIMIT 1;
+
+
+                                                                                                                                    QUERY PLAN                                                                     
+                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1964755.66..1964961.44 rows=1 width=27) (actual time=7579.592..7922.997 rows=1 loops=1)
+   -&amp;gt;  Finalize GroupAggregate  (cost=1964755.66..1966196.11 rows=7 width=27) (actual time=7579.590..7579.591 rows=1 loops=1)
+         Group Key: lineitem.l_shipmode
+         -&amp;gt;  Gather Merge  (cost=1964755.66..1966195.83 rows=28 width=27) (actual time=7559.593..7922.319 rows=6 loops=1)
+               Workers Planned: 4
+               Workers Launched: 4
+               -&amp;gt;  Partial GroupAggregate  (cost=1963755.61..1965192.44 rows=7 width=27) (actual time=7548.103..7564.592 rows=2 loops=5)
+                     Group Key: lineitem.l_shipmode
+                     -&amp;gt;  Sort  (cost=1963755.61..1963935.20 rows=71838 width=27) (actual time=7530.280..7539.688 rows=62519 loops=5)
+                           Sort Key: lineitem.l_shipmode
+                           Sort Method: external merge  Disk: 2304kB
+                           Worker 0:  Sort Method: external merge  Disk: 2064kB
+                           Worker 1:  Sort Method: external merge  Disk: 2384kB
+                           Worker 2:  Sort Method: external merge  Disk: 2264kB
+                           Worker 3:  Sort Method: external merge  Disk: 2336kB
+                           -&amp;gt;  Parallel Hash Join  (cost=382571.01..1957960.99 rows=71838 width=27) (actual time=7036.917..7499.692 rows=62519 loops=5)
+                                 Hash Cond: (lineitem.l_orderkey = orders.o_orderkey)
+                                 -&amp;gt;  Parallel Seq Scan on lineitem  (cost=0.00..1552386.40 rows=71838 width=19) (actual time=0.583..4901.063 rows=62519 loops=5)
+                                       Filter: ((l_shipmode = ANY ('{MAIL,AIR}'::bpchar[])) AND (l_commitdate &amp;lt; l_receiptdate) AND (l_shipdate &amp;lt; l_commitdate) AND (l_receiptdate &amp;gt;= '1996-01-01'::date) AND (l_receiptdate &amp;lt; '1997-01-01 00:00:00'::timestamp without time zone))
+                                       Rows Removed by Filter: 11934691
+                                 -&amp;gt;  Parallel Hash  (cost=313722.45..313722.45 rows=3750045 width=20) (actual time=2011.518..2011.518 rows=3000000 loops=5)
+                                       Buckets: 65536  Batches: 256  Memory Usage: 3840kB
+                                       -&amp;gt;  Parallel Seq Scan on orders  (cost=0.00..313722.45 rows=3750045 width=20) (actual time=0.029..995.948 rows=3000000 loops=5)
+ Planning Time: 0.977 ms
+ Execution Time: 7923.770 ms</code></pre> 
+ <p>TPC-H中的SQL12是并行hash join的一个很好的哪里，每个进程都帮助构建共享hash table。</p> 
+ <h2>
+<strong>9、Merge Join</strong><strong></strong>
+</h2> 
+ <p>由于merge join的特性，使得不能并行。如果merge join是查询执行的最后阶段，那么不用担心，仍可以使用并行。</p> 
+ <pre class="has"><code class="language-properties">-- Query 2 from TPC-H
+explain (costs off) select s_acctbal, s_name, n_name, p_partkey, p_mfgr, s_address, s_phone, s_comment
+from    part, supplier, partsupp, nation, region
+where
+        p_partkey = ps_partkey
+        and s_suppkey = ps_suppkey
+        and p_size = 36
+        and p_type like '%BRASS'
+        and s_nationkey = n_nationkey
+        and n_regionkey = r_regionkey
+        and r_name = 'AMERICA'
+        and ps_supplycost = (
+                select
+                        min(ps_supplycost)
+                from    partsupp, supplier, nation, region
+                where
+                        p_partkey = ps_partkey
+                        and s_suppkey = ps_suppkey
+                        and s_nationkey = n_nationkey
+                        and n_regionkey = r_regionkey
+                        and r_name = 'AMERICA'
+        )
+order by s_acctbal desc, n_name, s_name, p_partkey
+LIMIT 100;
+                                                QUERY PLAN                                                
+----------------------------------------------------------------------------------------------------------
+ Limit
+   -&amp;gt;  Sort
+         Sort Key: supplier.s_acctbal DESC, nation.n_name, supplier.s_name, part.p_partkey
+         -&amp;gt;  Merge Join
+               Merge Cond: (part.p_partkey = partsupp.ps_partkey)
+               Join Filter: (partsupp.ps_supplycost = (SubPlan 1))
+               -&amp;gt;  Gather Merge
+                     Workers Planned: 4
+                     -&amp;gt;  Parallel Index Scan using &lt;strong&gt;part_pkey&lt;/strong&gt; on part
+                           Filter: (((p_type)::text ~~ '%BRASS'::text) AND (p_size = 36))
+               -&amp;gt;  Materialize
+                     -&amp;gt;  Sort
+                           Sort Key: partsupp.ps_partkey
+                           -&amp;gt;  Nested Loop
+                                 -&amp;gt;  Nested Loop
+                                       Join Filter: (nation.n_regionkey = region.r_regionkey)
+                                       -&amp;gt;  Seq Scan on region
+                                             Filter: (r_name = 'AMERICA'::bpchar)
+                                       -&amp;gt;  Hash Join
+                                             Hash Cond: (supplier.s_nationkey = nation.n_nationkey)
+                                             -&amp;gt;  Seq Scan on supplier
+                                             -&amp;gt;  Hash
+                                                   -&amp;gt;  Seq Scan on nation
+                                 -&amp;gt;  Index Scan using idx_partsupp_suppkey on partsupp
+                                       Index Cond: (ps_suppkey = supplier.s_suppkey)
+               SubPlan 1
+                 -&amp;gt;  Aggregate
+                       -&amp;gt;  Nested Loop
+                             Join Filter: (nation_1.n_regionkey = region_1.r_regionkey)
+                             -&amp;gt;  Seq Scan on region region_1
+                                   Filter: (r_name = 'AMERICA'::bpchar)
+                             -&amp;gt;  Nested Loop
+                                   -&amp;gt;  Nested Loop
+                                         -&amp;gt;  Index Scan using idx_partsupp_partkey on partsupp partsupp_1
+                                               Index Cond: (part.p_partkey = ps_partkey)
+                                         -&amp;gt;  Index Scan using supplier_pkey on supplier supplier_1
+                                               Index Cond: (s_suppkey = partsupp_1.ps_suppkey)
+                                   -&amp;gt;  Index Scan using nation_pkey on nation nation_1
+                                         Index Cond: (n_nationkey = supplier_1.s_nationkey)</code></pre> 
+ <p>“Merge Join”节点在“Gather Merge”上。因此merge不使用并行。但是“Parallel Index Scan”仍旧有助于part_pkey。</p> 
+ <h2>
+<strong>10、</strong><strong>Partition-wise join</strong><strong></strong>
+</h2> 
+ <p>PgSQL11默认禁止partition-wise join特性。它有一个很高的规划代价。分区表可以一个分区一个分区的进行join。允许使用更小的hash table。每个per-partition join操作可以并行：</p> 
+ <pre class="has"><code class="language-perl">tpch=# set enable_partitionwise_join=t;
+tpch=# explain (costs off) select * from prt1 t1, prt2 t2
+where t1.a = t2.b and t1.b = 0 and t2.b between 0 and 10000;
+                    QUERY PLAN                     
+---------------------------------------------------
+ Append
+   -&amp;gt;  Hash Join
+         Hash Cond: (t2.b = t1.a)
+         -&amp;gt;  Seq Scan on prt2_p1 t2
+               Filter: ((b &amp;gt;= 0) AND (b &amp;lt;= 10000))
+         -&amp;gt;  Hash
+               -&amp;gt;  Seq Scan on prt1_p1 t1
+                     Filter: (b = 0)
+   -&amp;gt;  Hash Join
+         Hash Cond: (t2_1.b = t1_1.a)
+         -&amp;gt;  Seq Scan on prt2_p2 t2_1
+               Filter: ((b &amp;gt;= 0) AND (b &amp;lt;= 10000))
+         -&amp;gt;  Hash
+               -&amp;gt;  Seq Scan on prt1_p2 t1_1
+                     Filter: (b = 0)
+tpch=# set parallel_setup_cost = 1;
+tpch=# set parallel_tuple_cost = 0.01;
+tpch=# explain (costs off) select * from prt1 t1, prt2 t2
+where t1.a = t2.b and t1.b = 0 and t2.b between 0 and 10000;
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ Gather
+   Workers Planned: 4
+   -&amp;gt;  Parallel Append
+         -&amp;gt;  Parallel Hash Join
+               Hash Cond: (t2_1.b = t1_1.a)
+               -&amp;gt;  Parallel Seq Scan on prt2_p2 t2_1
+                     Filter: ((b &amp;gt;= 0) AND (b &amp;lt;= 10000))
+               -&amp;gt;  Parallel Hash
+                     -&amp;gt;  Parallel Seq Scan on prt1_p2 t1_1
+                           Filter: (b = 0)
+         -&amp;gt;  Parallel Hash Join
+               Hash Cond: (t2.b = t1.a)
+               -&amp;gt;  Parallel Seq Scan on prt2_p1 t2
+                     Filter: ((b &amp;gt;= 0) AND (b &amp;lt;= 10000))
+               -&amp;gt;  Parallel Hash
+                     -&amp;gt;  Parallel Seq Scan on prt1_p1 t1
+                           Filter: (b = 0)</code></pre> 
+ <p>分区连接只有在分区足够大的情况下才能使用并行执行</p> 
+ <h2>
+<strong>11、Parallel Append</strong><strong></strong>
+</h2> 
+ <p>Parallel Append通常在UNION ALL中。缺点：较小的并行度，因为每个worker进程最终都为一个查询服务。即使启用了4个进程，也会仍旧发起2个：</p> 
+ <pre class="has"><code class="language-perl">tpch=# explain (costs off) select sum(l_quantity) as sum_qty from lineitem where l_shipdate &amp;lt;= date '1998-12-01' - interval '105' day union all select sum(l_quantity) as sum_qty from lineitem where l_shipdate &amp;lt;= date '2000-12-01' - interval '105' day;
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   -&amp;gt;  Parallel Append
+         -&amp;gt;  Aggregate
+               -&amp;gt;  Seq Scan on lineitem
+                     Filter: (l_shipdate &amp;lt;= '2000-08-18 00:00:00'::timestamp without time zone)
+         -&amp;gt;  Aggregate
+               -&amp;gt;  Seq Scan on lineitem lineitem_1
+                     Filter: (l_shipdate &amp;lt;= '1998-08-18 00:00:00'::timestamp without time zone)</code></pre> 
+ <h2>
+<strong>12、更重要的变量</strong><strong></strong>
+</h2> 
+ <p>WORKER_MEM：限制每个进程的使用内存。每个查询：work_mem*processes*joins--&gt;会导致内存使用很大</p> 
+ <p>max_parallel_workers_per_gather:执行器使用多少进程并发执行该节点</p> 
+ <p>max_worker_processes：根据服务器上CPU核数调整进程数</p> 
+ <p>max_parallel_workers:和并发进程数一样</p> 
+ <h2>
+<strong>13、总结</strong><strong></strong>
+</h2> 
+ <p>从9.6并行查询执行开始,可以显著提高扫描许多行或索引记录的复杂查询的性能。不要忘记在高oltp工作负载的服务器上禁止并行执行。顺序扫描或索引扫描仍然耗费大量资源。如果您没有针对整个数据集运行报表,那么只需添加缺失的索引或使用适当的分区就可以提高查询性能。</p> 
+ <h2>
+<strong>原文</strong><strong></strong>
+</h2> 
+ <p>https://www.percona.com/blog/parallel-queries-in-postgresql/</p> 
+</div>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

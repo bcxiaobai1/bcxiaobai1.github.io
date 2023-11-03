@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>GRUB引导程序之第一阶段stage1.S分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">GRUB引导程序之第一阶段stage1.S分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h1>初识BIOS</h1> 
+<p>    BIOS是最基础的输入、输出系统，是固化在计算机主板上ROM芯片中的程序，可以这么理解，当计算机主板加电之后，CPU先加电，然后加载到CPU中运行的第一个计算机程序就是BIOS。  BIOS会执行POST（Power-on Self Test）硬件自检功能，自检完成之后，就会检索启动设备，并将启动设备的第一个柱面，第一个磁道的第一个扇区，共计512字节的内容读取到物理地址0x7c00处。</p> 
+<p>    被读取的512字节就是MBR，在GRUB引导程序中，就是stage1，对应了一段汇编代码stage1.S。该代码编译之后的大小为446字节，随后是64字节的分区表，最后是两个字节的MBR标识0x55AA，一共是512字节。</p> 
+<p>    现在的计算机一般使用的是UEFI代替传统的BIOS来引导系统启动，相应的分区方式也经常搭配使用了GPT而非传统的MBR分区。GPT分区的主分区里面，也就是第一部分依然会有一个PMBR分区，对于linux等系统，一般不管使用了MBR分区还是GPT分区，都可以以传统的BIOS来引导启动系统，在这个过程都会用到GRUB第一阶段的代码。本文的分析的也主要根据传统的BIOS启动来的。</p> 
+<h1>GRUB第一阶段</h1> 
+<p>    参考的代码为GRUB legacy (0.97)版本的代码，其中第一阶段的文件为stage1.S，该文件为汇编文件，其详细注释标注在了源码中。</p> 
+<pre><code>#include &lt;stage1.h&gt;
+
+//代码开始部分放入物理地址0x7c00处
+#define ABS(x) (x-_start+0x7c00)
+
+//将X在物理内存中的地址赋值给si寄存器
+#define MSG(x)	movw $ABS(x), %si; call message
+
+#define	MOV_MEM_TO_AL(x)	.byte 0xa0;  .word x
+	
+	.file	"stage1.S"
+
+	.text
+	.code16
+
+//_start标号处的地址，也就是grub启动第一阶段加载在内存中的地址0x7c00
+.globl _start; _start:
+//跳转指令, 跳转到after_BPB标号的位置
+	jmp	after_BPB
+//空指令，一般占位用
+	nop
+
+//占位填充的长度，_start+4距离_start起始位置的长度是4字节，
+//既一共需要填充0满之4字节。前面的指令占用了3个字节，再填充1个字节的0即可。
+	. = _start + 4
+	
+mode:
+	.byte	0
+disk_address_packet:	
+sectors:
+	.long	0
+heads:
+	.long	0
+cylinders:
+	.word	0
+sector_start:
+	.byte	0
+head_start:
+	.byte	0
+cylinder_start:
+	.word	0
+
+	. = _start + STAGE1_BPBEND
+
+stage1_version:	
+	.byte	COMPAT_VERSION_MAJOR, COMPAT_VERSION_MINOR
+boot_drive:	
+	.byte	GRUB_INVALID_DRIVE
+force_lba:
+	.byte	0
+stage2_address:
+	.word	0x8000
+stage2_sector:
+	.long	1
+stage2_segment:
+	.word	0x800
+
+//start之后跳转到的位置
+after_BPB:
+
+//现在的地址环境没有经过检测，因此需要先关闭bios中断确保安全后再开启
+	cli
+boot_drive_check:
+//jmp为跳转执行，跳转到下面的1标号的地方。
+//在BIOS加载完成启动代码之后，会将启动盘号设置到DL寄存器中，也就是说此时DL寄存器存储的值为0x80
+//软盘号的取值范围为：0x00~0x7F  磁盘号的取值范围为：0x80~0xFF。 
+//这里的代码直接跳转到下面的1标号位置了
+//数字标号具有局部性，f表示forward向前的，既执行地址之后的标号，b为backward向后的，既执行地址之前的标号。
+	jmp	1f
+	testb	$0x80, %dl
+	jnz	1f
+	movb	$0x80, %dl
+	
+//上述1标号的地方
+1:	
+
+	/*
+	 * ljmp to the next instruction because some bogus BIOSes
+	 * jump to 07C0:0000 instead of 0000:7C00.
+	 */
+//长跳转指令,"ljmp 段选择子 段内偏移", 此处内存就一个段，所以段选择子为0
+//此处就是跳转到了(real_start - start) + 0x7c00物理地址处(也就是接着real_start执行)，有矫正地址的作用
+//部分伪造的BIOS程序会跳转到0x07C0:0x0000地址处，而正确的地址应该是0x0000:0x7C00
+	ljmp	$0, $ABS(real_start)
+
+real_start:	
+//AX寄存器通过异或清零
+	xorw	%ax, %ax
+//将DS寄存器和SS寄存器的值清零
+	movw	%ax, %ds
+	movw	%ax, %ss
+//将0x2000立即数赋值给SP寄存器,既当前的内存堆栈栈顶为0x2000，此时就开辟出了一个堆栈可以进行压栈出栈操作
+	movw	$STAGE1_STACKSEG, %sp
+//地址设置完成，开启bios中断
+	sti
+
+//直接寻址，将boot_drive标号处的物理地址指向的值0xFF赋值给AX寄存器的低8位
+	MOV_MEM_TO_AL(ABS(boot_drive))
+//比较指令，值相等的话ZF零标志位寄存器为1，此处两个值相等，ZF=1
+//cmp指令可以理解为源操作数与目的操作数做算术减法运算，结果为0则设置ZF为1
+	cmpb	$GRUB_INVALID_DRIVE, %al
+//条件转移指令,ZF为1时向前跳转到标号1的位置，也就是下面的标号1的位置。
+	je	1f
+	movb	%al, %dl
+1:
+//将DX寄存器的值压入堆栈，DX中存储的是启动盘号，也就是0x80或者0x81......0xFF
+	pushw	%dx
+
+//在屏幕上打印GRUB字样
+	MSG(notification_string)
+
+//判断DL寄存器的值与0x80逻辑与操作是否为0，为0的话说明不是硬盘，则ZF=1
+//test指令为逻辑与操作，操作结果为0则设置ZF寄存器为1
+	testb	$STAGE1_BIOS_HD_FLAG, %dl
+//条件转移指令，等同于je，可理解为如果ZF设置为1了(不是硬盘，也就不支持LBA模式)则跳转到chs_mode搞事情
+//非硬盘，或者硬盘但是不具有LBA扩展功能的，均要进入CHS模式进行寻址读取内容。
+	jz	chs_mode
+			
+//如果是硬盘的话，通过BIOS的0x13号中断，0x41号的功能来判断是否执行LBA模式。
+//AH功能集：
+//检查扩展是否存在： AH=0x41 BX=0x55AA DL=磁盘号
+//扩展读：AH=0x42
+//扩展写：AH=0x43
+//校验扇区：AH=0x44
+//扩展定位：AH=0x47
+//取得驱动器参数：AH=0x48
+	movb	$0x41, %ah
+	movw	$0x55aa, %bx
+	int	$0x13
+//在上述的0x13中断返回时，会对CF进行赋值，CF=0表示硬盘支持扩展访问，CF=1表示不支持扩展访问。
+//当支持硬盘扩展访问时，BX的值为被赋值为0xAA55。
+
+//在BIOS1.04等版本中，经过0x13中断的0x41号功能检查了扩展之后，DX寄存器会被污染。
+//所以要出栈获取到之前的压栈保留的磁盘号，然后再压栈，保证SP寄存器数值一致，既堆栈平衡。
+	popw	%dx
+	pushw	%dx
+	
+//jc是条件转移指令，CF为1时，表示不支持LBA，则跳转到CHS模式处理中。
+//然后还需要比较BX寄存器中的值是不是0xAA55，如果不一致说明也不支持LBA模式，则跳转到CHS模式。
+	jc	chs_mode
+	cmpw	$0xaa55, %bx
+	jne	chs_mode
+
+//这里的force_lba标号地址对应的值为0，将0复制到AL寄存器中
+//testb为比较指令，与AL寄存器的值做与运算，也就是两个0值逻辑与运算之后等于0，则ZF=1。
+//jnz为条件转移指令，当ZF没有设置时，跳转到lba_mode标号处，直接进入LBA模式处理。
+//此处由于force_lba为0，既继续进行判断。force_lba可以理解为强制进入LBA模式，配置之后可以减少一些LBA的判断。
+	MOV_MEM_TO_AL(ABS(force_lba))
+	testb	%al, %al
+	jnz	lba_mode
+	
+//继续进行CX寄存器的判断，CX寄存器的值与立即数1进行与操作，支持LBA时，CX的第0位被设置位1，与1进行与操作结果是1，则ZF=0。
+//CX寄存器表示位描述符，其中每位的表示：
+//0位: 磁盘扩展访问功能
+//1位: 支持可移动驱动控制器功能
+//2位: 增强的磁盘驱动控制器功能
+	andw	$1, %cx
+//ZF=1时，既表示不支持LBA，则跳转到CHS模式
+	jz	chs_mode
+	
+//接下来进行LBA模式处理函数
+lba_mode:
+	movl	0x10(%si), %ecx
+
+//将disk_address_packet处的地址赋值到SI寄存器中
+	movw	$ABS(disk_address_packet), %si
+
+//将disk_address_packet地址减1处的值赋值为1，既将此处的mode设置为1，表示进行LBA扩展模式。mode取值描述：
+//1：表示执行LBA扩展模式
+//0：表示执行CHS寻址模式
+	movb	$1, -1(%si)
+	
+//直接寻址将stage2_sector代表的地址，赋值给EBX寄存器，该地址的值为1
+	movl	ABS(stage2_sector), %ebx
+
+/*
+disk_address_packet地址处的数据与磁盘参数的对应关系：
+	struct dap {
+	u8 len; 一般长度取值为0x10，表示dap结构长度为16字节
+	u8 zero; 默认必须为0
+	u16 nsector: 实际上是8位有效，表示读取的扇区数，一般取值从1~127
+	u16 addr: 内存地址addr
+	u16 segment: 段选择子的值
+	u32 sectorLo： 表示LBA扇区号的低4字节
+	u32 sectorHi：表示LBA扇区号的高4字节 
+}
+*/
+//将0x0010值赋值到disk_address_packet地址处，既si[0]=0x10，si[1]=0x00。
+//表示要传输的dap大小为0x10，
+	movw	$0x0010, (%si)
+
+//将立即数1赋值到disk_address_packet地址，既si[2]=0x1
+//表示要传输的扇区数为1个扇区
+	movw	$1, 2(%si)
+	
+//将EBX寄存器指向的地址处的值，也就是1赋值给si[8]=0x1。
+//既要读取的起始扇区号为1，其实就是从第二个扇区开始读取，一共读取1个扇区。
+//该编号就是LBA的扇区编号。
+	movl	%ebx, 8(%si)
+
+//将0x7000的值赋值给si[6]和si[7]，既si[6]=0x00，si[7]=0x70
+	movw	$STAGE1_BUFFERSEG, 6(%si)
+
+//将EAX寄存器清零，然后设置si[4]=0，si[5]=0
+//既数据缓存地址为0x7000:0x0000
+//后续通过BIOS中断读取的1个扇区的内容，就读取到0x7000:0x0000地址对应的内存中。
+	xorl	%eax, %eax
+	movw	%ax, 4(%si)
+//设置si[12]~si[15] = 0x0
+	movl	%eax, 12(%si)
+
+ //AH寄存器设置位0x42，调用BIOS0x13号中断，进行扩展读操作。
+	movb	$0x42, %ah
+	int	$0x13
+
+//进位标志位寄存器CF=0时，表示读取成功，意味着支持扩展读。
+//中断执行失败，将CF设置为1，表示不支持扩展读。
+//jc为有条件转移执行，当CF设置位1时，重新进入CHS模式进行操作。
+	jc	chs_mode
+
+//将立即数0x7000赋值给BX寄存器，该值会在copy_buffer中使用。
+//在copy_buffer中会将0x7000:0x0000出的内容拷贝到0x0800:0x0000处
+//经过地址换算，最后第二扇区的代码会拷贝到0x8000地址处(0x0800*16+0x0000)
+	movw	$STAGE1_BUFFERSEG, %bx
+//跳转到copy_buffer标号处进行拷贝。
+	jmp	copy_buffer
+	
+//进入CHS模式
+chs_mode:	
+//CHS模式下，0x13中断，0x08功能可以做磁盘参数检测
+//DL：软盘驱动器的个数
+//DH：磁头数，取值范围为0~255
+//CH：磁道柱面数的一部分，总共用10位表示，CH全部8位加上CL的高2位，柱面数取值范围0~1023。
+//CL： 低6位表示每个磁道柱面的扇区数，取值范围为0~63。
+	movb	$8, %ah
+	int	$0x13
+//上述参数检测执行成功的话，CF会设置位0，否则位会设置位1
+//当CF=0（执行成功时）会跳转到final_init标号处执行具体的CHS寻址读取操作。
+	jnc	final_init
+
+//再次检查一下是否是磁盘，如果是不是磁盘的话跳转到floppy_probe标号处，进行软盘处理
+	testb	$STAGE1_BIOS_HD_FLAG, %dl
+	jz	floppy_probe
+
+//确定是磁盘的话，而且前面做磁盘参数检测也失败了
+//只能跳转到hd_probe_error标号处，打印“Hard Disk”，然后陷入死循环，game over ^_^。
+	jmp	hd_probe_error
+
+//检查完磁盘参数之后继续执行具体的CHS寻址读取操作
+final_init:
+//将sectors处的地址值赋值给SI寄存器
+	movw	$ABS(sectors), %si
+//sectors地址减1的位置赋值为0，既将mode赋值为0，采用CHS寻址模式
+	movb	$0, -1(%si)
+
+//填充Disk Address Packet(DAP)结构，该结构在LBA扩展模式下有说明
+//清空EAX寄存器,将DH寄存器（参数检查时获得的磁头数）赋值给AL寄存器
+//将AX寄存器加1，变为磁头数的数量
+//将EAX寄存器的值（磁头数）赋值给si[4]，si[5]，si[6]和si[7]
+	xorl	%eax, %eax
+	movb	%dh, %al
+	incw	%ax
+	movl	%eax, 4(%si)
+
+//清空DX寄存器
+//将CL寄存器的值（保存着之前获取的扇区数）赋值给DL寄存器
+//将DX的值左移两位，将原有的DL高2位代表的柱面数放到DH的低两位中，此时DL中的扇区数扩大了4倍
+//将CH寄存器中的柱面数的值赋值给AL中
+//将DH寄存器中的柱面数的值放入到AH中。此时AX寄存器中存储的就是柱面数。
+	xorw	%dx, %dx
+	movb	%cl, %dl
+	shlw	$2, %dx
+	movb	%ch, %al
+	movb	%dh, %ah
+
+//AX寄存器的值加1，此时可得到真实的柱面数量
+//将柱面数赋值给si[8]，si[9]
+	incw	%ax
+	movw	%ax, 8(%si)
+
+//清空AX寄存器
+//将DL赋值给AL寄存器，同时让AL右移两位之后得到原来的扇区数
+	xorw	%ax, %ax
+	movb	%dl, %al
+	shrb	$2, %al
+
+//将扇区数赋值给si[0]，si[1]，si[2]和si[3]
+	movl	%eax, (%si)
+
+setup_sectors:
+//将stage2_sector标号代表的地址指向的值1赋值给EAX寄存器，该值为1，代表stage2开始的扇区号
+	movl	ABS(stage2_sector), %eax
+
+//清空EDX寄存器
+	xorl	%edx, %edx
+//16位被除数放在AX寄存器，8位除数为源操作数，8位的商，存储在AL中，8位余数存储在AH中
+//32位被除数放在DX，AX中。其中DX为高位，16位除数为源操作数，16位的商，存储在AX中，16位余数在DX中
+//64位被除数在EDX，EAX中，其中EDX为高位，32位除数为源操作数，32位的商，存储在EAX中，32位余数在EDX中
+//此处的被除数位1，除数位为扇区数，用stage2开始的扇区号除以每个磁道包含的扇区数
+	divl	(%si)
+
+//将DL寄存器中存放的余数赋值给si[10]，余数既stage2开始的扇区号，除数为磁道号
+	movb	%dl, 10(%si)
+
+//清空EDX寄存器
+//然后用被除数AX中的值（上一步的商），除以si[4]对应地址存放的单柱面最大磁头数
+//其中商为stage2所在的柱面号，余数为stage2开始的磁道号。
+	xorl	%edx, %edx
+	divl	4(%si)
+
+//将DL寄存器中的值（stage2开始的磁道号）赋值给si[11]
+	movb	%dl, 11(%si)
+
+//将AX寄存器中的值（stage2所在的柱面号）赋值给si[12]
+	movw	%ax, 12(%si)
+
+//比较si[8]所代表地址指向的数与AX寄存器的值
+//其中si[8]指向的值为柱面数，而ax代表上面div操作的商。
+//当柱面号超过了最大值时跳转到geometry_error，打印“Geom Error”并死循环，然后 Game Over ^_^
+//stage2所在柱面数合法，则继续向下执行
+	cmpw	8(%si), %ax
+	jge	geometry_error
+
+//将si[13]指向的柱面号的高位的值赋值给DL寄存器
+	movb	13(%si), %dl
+
+//将DL寄存器的值左移6位，然后将si[10]指向的stage2的扇区号赋值给CL寄存器
+	shlb	$6, %dl	
+	movb	10(%si), %cl
+
+//CL寄存器加1，得到stage2的真实的扇区号表示
+//然后通过orb或运算命令，将CL寄存器的高两位存储着柱面号，低6位存储着扇区号
+	incb	%cl
+	orb	%dl, %cl
+//将si[12]指向的值（既柱面号）赋值给CH寄存器。
+	movb	12(%si), %ch
+
+//将DX寄存器出栈，原栈中存储的DX寄存器的低8位为磁盘号。
+	popw	%dx
+	
+//将si[11]指向的磁道号赋值给DH寄存器中。
+	movb	11(%si), %dh
+
+ //将0x7000赋值给BX寄存器，将BX寄存器的值赋值给ES寄存器
+	movw	$STAGE1_BUFFERSEG, %bx
+	movw	%bx, %es	/* load %es segment with disk buffer */
+
+//清空BX寄存器，将0x0201赋值给AX寄存器，既AH=0x02 AL=0x01
+	xorw	%bx, %bx	/* %bx = 0, put it at 0 in the segment */
+	movw	$0x0201, %ax	/* function 2 */
+	int	$0x13
+//以上设置的参数对照功能：
+//AH：0x02
+//AL：需要读取的扇区数
+//CH：起始的柱面号的值
+//CL：低6位为需要的扇区号，高2位为起始的柱面号的值
+//DH：起始的磁头号的值
+//DL：对应的磁盘号
+//ES:BX   segment:offset，读取的缓存地址
+
+//中断执行失败，CF=1，执行成功，CF=0。当执行失败是打印“Read Error”，然后执行死循环
+	jc	read_error
+//读取数据成功，将ES寄存器中的0x7000赋值给BX寄存器，然后执行后续的copy_buffer
+	movw	%es, %bx
+	
+copy_buffer:
+//将0x800赋值给ES寄存器
+	movw	ABS(stage2_segment), %es
+
+//将通用寄存器全部压入堆栈
+//将DS寄存器的值压入堆栈，后续会将该寄存器污染
+	pusha
+	pushw	%ds
+	
+//将0x100赋值给CX寄存器，CX为计数器寄存器，该值表示后续双字节拷贝的具体次数
+//将BX寄存器的值0x7000赋值给DS寄存器
+//清空SI寄存器和DI寄存器
+//使用cld将方向标志位DF复位，既设置DF=0，其相反的指令为std
+//DF=0表示向高地址增加，DF=1表示向低地址减少。cld复位DF之后，将向高地址增加。
+	movw	$0x100, %cx
+	movw	%bx, %ds
+	xorw	%si, %si
+	xorw	%di, %di
+	cld
+	
+//rep重复执行后面的movsw，rep受ECX寄存器控制，每执行依次，ECX寄存器依次减1，当ECX寄存器为0时不再执行。
+	rep
+//movsw每次传输一个word（双字）宽度的数据。
+//movsw或者movsb用来将DS:SI指向的存储单元中的数据装入ES:DI指向的存储单元中。
+//此处也就是将（0x7000:0x0000，从磁盘中读取的第二扇区的数据）装入到（0x0800:0x0000）地址处，依次装入双字节
+//由于CX寄存器中的值为0x100，则将拷贝0x100次，每次2个字节，一共拷贝了512字节，也就是刚好一个扇区的数量。
+	movsw
+
+//将DS寄存器的值出栈
+//然后将所有通用寄存器的值出栈
+	popw	%ds
+	popa
+
+//跳转到0x8000地址处，执行下一阶段命令，此时就开启了GRUB引导的后续阶段
+//实模式下的地址转换：address = es * 16 + di =&gt; (0x0800:0x0000 转化为 0x800* 16 + 0x0000 = 0x8000)
+	jmp	*(stage2_address)
+//这里就是大结局了
+
+geometry_error:
+	MSG(geometry_error_string)
+	jmp	general_error
+
+hd_probe_error:
+	MSG(hd_probe_error_string)
+	jmp	general_error
+
+read_error:
+	MSG(read_error_string)
+
+general_error:
+	MSG(general_error_string)
+
+stop:	jmp	stop
+
+notification_string:	.string "GRUB "
+geometry_error_string:	.string "Geom"
+hd_probe_error_string:	.string "Hard Disk"
+read_error_string:	.string "Read"
+general_error_string:	.string " Error"
+
+//在1标号的位置，将0x0001赋值给BX寄存器
+//将xe赋值给AX寄存器的高8位。
+//然后执行中断,中断号为16,既屏幕显示I/O
+//功能OE为在Teletype模式下显示字符，AL=字符 BH=页码 BL=模型模式下的前景色
+//我们可以发现这次每次取出来一个字节同时调用bios中断显示出来。
+1:
+	movw	$0x0001, %bx
+	movb	$0xe, %ah
+	int	$0x10		/* display a byte */
+//是通过call message来调用的
+//在MSG(x)中，将x对应的物理地址赋值到si寄存器
+message:
+//lodsb取si寄存器地址对应的一个字节byte到AX寄存器的低8位中。
+	lodsb
+//cmpb是比较指令,比较AL寄存器中的值是否是立即数0。
+//不相等的话，零标志位ZF寄存器为0,相等的话ZF的值为1。
+//当字符串到达尾部时，取出的字节才会是0值。
+	cmpb	$0, %al
+//条件转移指令,jne是用来比较ZF寄存器是否为0，为0的话跳转到后面的标号处。
+//此处为1b，既向后(也就是之前的代码)到标号1出，也就是上面的1标号位置。
+	jne	1b	/* if not end of string, jmp to display */
+//通过lodsb依次提取byte至AL中，当到字符串末尾时,执行ret返回
+	ret
+
+	. = _start + STAGE1_WINDOWS_NT_MAGIC
+nt_magic:	
+	.long 0
+	.word 0
+
+part_start:	
+	. = _start + STAGE1_PARTSTART
+
+probe_values:
+	.byte	36, 18, 15, 9, 0
+
+floppy_probe:
+//将probe_values标号对应地址前一个地址赋值给SI寄存器
+	movw	$ABS(probe_values-1), %si
+
+//此处会有一个循环，分别对软盘的扇区进行尝试
+probe_loop:
+//将AH设置位0，通过BIOS的13号中断，可以重置软盘驱动器。
+	xorw	%ax, %ax
+	int	$0x13
+
+//将SI寄存器加1，既SI寄存器其实指向了存储36整数处的地址，既probe_values后面一个字节位置。
+//寄存器寻址，将SI寄存器指向的地址处的数据赋值给CX寄存器的低8位。
+//36、18、15、9、0等数字代表扇区数。
+	incw	%si
+	movb	(%si), %cl
+
+//判断扇区数是否位0，不为0的话，ZF=0，跳转到下面的标号1位置，进行扇区有效性检测
+//为0的话，也就是扇区可用值已经都尝试过一遍了，没有合适的，于是ZF设置为1，打印"Floppy Error", Game Over ^_^。
+	cmpb	$0, %cl
+	jne	1f
+
+	MSG(fd_probe_error_string)
+	jmp	general_error
+
+fd_probe_error_string:	.string "Floppy"
+
+//进行扇区有效性检测
+1:
+//将0x7000赋值给BX寄存器，将0x201赋值给AX寄存器，将CH设置为0，DH设置为0
+//调用BIOS的0x13号中断
+//其中各项寄存器的参数说明：
+//AL：要读取的扇区数
+//AH：功能号
+//CH：起始的柱面数
+//CL：起始的柱面数，用到了高两位。低6位表示扇区号
+//DL：磁盘号
+//ES:BX： 内存位置，segment:offset
+//此处AX赋值为0x201，既AH=0x02执行0x02号读功能，AL=0x01表示读取一个扇区
+//起始柱面号为0x0，磁盘号为0x00，表示第一块软盘。
+//CL表示扇区号依次从36、18、15、9中取值。
+	movw	$STAGE1_BUFFERSEG, %bx
+	movw	$0x201, %ax
+	movb	$0, %ch
+	movb	$0, %dh
+	int	$0x13
+
+//当读取成功时，进位标志位寄存器CF=0，表示该扇区有效。
+//当读取失败时，进位标志位寄存器CF=1，跳转到probe_loop选择其他扇区数再做尝试。
+	jc	probe_loop
+
+//将DH寄存器设置1，磁头取值为0~1，1就说明有两个磁头
+//将CH寄存器设置为79，柱面取值范围为0~79，79表示一共有80个柱面
+	movb	$1, %dh
+	movb	$79, %ch
+
+//然后跳转到final_init设置磁头、柱面和扇区的对应值，使用CHS传统的寻址方式来读取grub的后续阶段
+//从这里可以看出，针对CHS模式，软盘其实多做了一步扇区检测，而硬盘却不需要，因为后续阶段就是从第二个扇区开始的。
+//始于floppy_probe，终于final_init
+	jmp	final_init
+
+	. = _start + STAGE1_PARTEND
+
+	.word	STAGE1_SIGNATURE
+</code></pre> 
+<p></p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

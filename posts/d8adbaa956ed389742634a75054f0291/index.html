@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>如何使用互联网技术来设计和制作支付交易系统和抢红包 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">如何使用互联网技术来设计和制作支付交易系统和抢红包</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h1>业务幂等带来的性能上的损耗</h1> 
+<p>交易系统讲究的是：业务幂等，不能多扣不能少扣。</p> 
+<p>比如说有一个用户他的帐户余额就10,000元，无论它进行了上万、上千次交易，每一笔交易成功的流水的状态、和金额必须要对的起来。说了简单点假设该帐户交易了100次，共计9万元的交易流水，但帐户余额就10,000，你不能给他记成负8万余额吧？那么我们来看这个100次交易流水。其中有30次交易成功，总额是10,000元扣款成功。其余70次都是交易失败。如果30次交易成功，总额是10,000元，然后如果出现了第31次也是交易成功，那么这第31次的交易成功怎么来的？这就是业务不幂等。</p> 
+<h1>演示根据交易额扣款动作</h1> 
+<h2>根据业务需求与设计</h2> 
+<p>我们下面可以来演示，不幂等时发生的代码问题</p> 
+<p>数据库表结构如下：</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px"><tbody>
+<tr>
+<td>uid</td>
+<td> Balance</td>
+</tr>
+<tr>
+<td>2</td>
+<td>1000</td>
+</tr>
+</tbody></table>
+<p>我们做一个spring boot的controller、service、dao，然后使用多个并发对这一个帐户里的余额进行操作。</p> 
+<p>每次操作，我们带着一个“扣除100元”的动作来访问这个帐号，根据传入的扣款来对帐户进行操作的业务代码如下：</p> 
+<p>AccountService.java</p> 
+<pre><code class="language-java">    @Transactional(rollbackFor = Exception.class)
+    public ResponseBean updateBalance(AccountVO accountVO) throws Exception {
+        AccountVO resultAccount = new AccountVO();
+        try {
+            resultAccount = accountDao.selectBalance(accountVO);
+            if (resultAccount.getBalance() &gt; 0) {// 如果余额为0，直接return出102
+                if (accountVO.getTransfMoney() &lt;= resultAccount.getBalance()) {// 如果扣款&gt;余额直接return 101,扣款失败
+                    AccountVO updatedAccount = new AccountVO();
+                    int balance = resultAccount.getBalance() - accountVO.getTransfMoney();
+                    updatedAccount.setBalance(balance);
+                    updatedAccount.setUid(accountVO.getUid());
+                    accountDao.updateBalance(updatedAccount);
+                    AccountVO returnAccount = accountDao.selectBalance(accountVO);
+                    returnAccount.setTransfMoney(accountVO.getTransfMoney());
+                    return new ResponseBean(0, "扣款成功", returnAccount);
+                } else {
+                    return new ResponseBean(101, "扣款&gt;余额");
+                }
+            } else {
+                return new ResponseBean(101, "余额为0");
+            }
+        } catch (Exception e) {
+            logger.error("&gt;&gt;&gt;&gt;&gt;&gt;updateBalance error: " + e.getMessage(), e);
+            throw new Exception("&gt;&gt;&gt;&gt;&gt;&gt;updateBalance error: " + e.getMessage(), e);
+        }
+    }</code></pre> 
+<p>相应的mybatis的dao层代码如下</p> 
+<p>DemoAccountDao.xml</p> 
+<pre><code class="language-XML">	&lt;select id="selectBalance"
+		parameterType="org.mk.demo.db.vo.AccountVO"
+		resultMap="accountResultMap"&gt;
+		SELECT uid,
+		balance
+		FROM account WHERE uid=#{uid}
+	&lt;/select&gt;
+
+	&lt;update id="updateBalance"
+		parameterType="org.mk.demo.db.vo.AccountVO"&gt;
+		UPDATE account
+		set balance=#{balance}
+		WHERE uid=#{uid}
+	&lt;/update&gt;</code></pre> 
+<p>相应的controller如下</p> 
+<pre><code class="language-java">    private Logger logger = LoggerFactory.getLogger(this.getClass());
+    @Resource
+    private AccountService accountService;
+
+    @PostMapping(value = "/account/transfer", produces = "application/json")
+    @ResponseBody
+    public ResponseBean transfer(@RequestBody AccountVO account) {
+        logger.info("&gt;&gt;&gt;&gt;&gt;&gt;uid-&gt;" + account.getUid() + " transfMoney-&gt;" + account.getTransfMoney());
+        try {
+            return accountService.updateBalance(account);
+
+        } catch (Exception e) {
+            logger.error("&gt;&gt;&gt;&gt;&gt;&gt;transf error: " + e.getMessage(), e);
+            return new ResponseBean(-1, "system error");
+        }
+    }
+</code></pre> 
+<h2>看运行起来后使用30个并发来访问的效果</h2> 
+<p><img alt="" height="838" src="https://images2.imgbox.com/6e/78/SKkr8VyJ_o.png" width="1200"></p> 
+<p></p> 
+<p>使用30个线程</p> 
+<p><img alt="" height="790" src="https://images2.imgbox.com/1f/9a/gYdFWWF3_o.png" width="1200"></p> 
+<p>运行后竟然有12次扣款成功，每次扣100元，帐户余额为1,000元。</p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/ed/58/rRIOoUE0_o.png" width="1200"></p> 
+<p> 由于我们的数据库层做了如下超额、余额不能&lt;0的基本逻辑判断，因此数据库里的值倒是对了。可是交易流水以及此时在前端用户端如：小程序或者是APP上的显示是错的。</p> 
+<pre><code class="language-java">
+            if (resultAccount.getBalance() &gt; 0) {// 如果余额为0，直接return出102
+                if (accountVO.getTransfMoney() &lt;= resultAccount.getBalance()) {// 如果扣款&gt;余额直接return 101,扣款失败</code></pre> 
+<p>此时客户一定会产生“客诉”，<span style="color:#fe2c24">我明明交易成功了，可是你后台告诉我其实是不成功？</span></p> 
+<p>你怎么去和你的客户解释呢？这就是业务不幂等！</p> 
+<h1>为了交易流水、过程以及帐户余额幂等使用传统的“悲观”锁的下场</h1> 
+<p>我们为了实现业务幂等会这么干</p> 
+<ol>
+<li>把jdbc设成setAutoCommit(false);</li>
+<li>然后每次进入交易都去select 余额for update，如果在select x for update出错了认为没有抢到“锁”;</li>
+<li>没有抢到“锁”的返回-请求排队中，抢到”锁“的返回-处理成功</li>
+<li>finally块中把setAutoCommit设回true；</li>
+</ol>
+<p>对不对？<span style="color:#fe2c24"><strong>99%的IT开发、传统软件觉得这么干，他们认为理所当然也事实上还都这么干了</strong></span>，然后它造成的后果是什么呢？</p> 
+<p>我把线程数改成了“并发线程”去跑这个加了锁的代码。</p> 
+<p>显示结果和数据库里的余额倒是幂等了，3分钟不到，应用已经卡死了。它的平均响应时间越来越慢，最后曾卡死不动状态。</p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/13/72/Kxc3rRwK_o.png" width="1200"></p> 
+<h1>如何又做到幂等又做到性能好呢-CAS及乐观锁的方案出现了</h1> 
+<p>让我们来想一下需求：</p> 
+<p>在大并发的的互联网场景下需要保证进入支付通道的请求正常扣款，显示和流水以及余额要一致。未进入支付通道的请求直接返回”亲，排队中“。如果帐户余额已经用完了或者单笔交易额&gt;余额，此时对于还在往系统内进入的支付请求直接返回”余额为0“。还要保证系统不卡死，不要保证系统的高并发。</p> 
+<p>于是我们使用如下的手法。</p> 
+<h1>CAS及乐观锁设计手法</h1> 
+<p>我们对这个原帐户表增加一个字段，叫version_no。version_no一开始全部为0.</p> 
+<p><img alt="" height="362" src="https://images2.imgbox.com/45/ee/IT95V4lt_o.png" width="344"></p> 
+<p></p> 
+<p>交易时：</p> 
+<ol>
+<li>每次select时把for update语句去掉改成直接把version_no取出来带到交易业务方法内；</li>
+<li>在update时，带入前面select出来的version_no，此时你的update sql会变成这样UPDATE account  set  balance=balance-#{transfMoney},version_no=version_no+1 WHERE uid=#{uid} and version_no=#{versionNo}。只要前一个version_no和本次带入的version_no不一致就代表产生了“竞争”，竞争就要“排除掉”，这相当于利用了数据库的特殊强制把并发的请求在DB内部改成了“串行”方式以保证业务的幂等；</li>
+<li>根据update的useAffectedRows的返回即mysql的连接必须加上useAffectedRows=true的参数。如果update语句返回=1，代表进入支付通道并扣款成功。如果update语句返回=0，代表进入支付通道失败，返回：亲，排队中；</li>
+</ol>
+<p>来看演示代码</p> 
+<p>AccountService</p> 
+<pre><code class="language-java">    /**
+     * 0代表购物成功 101-代表购买的款项&gt;帐户余额，不能购买 102-代表帐户余额为0，不能购买,103-代表动作太快了
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public ResponseBean updateBalanceWithOptimiLock(AccountVO accountVO) throws Exception {
+        AccountVO resultAccount = new AccountVO();
+        try {
+            resultAccount = accountDao.selectBalance(accountVO);
+            if (resultAccount.getBalance() &gt; 0) {// 如果余额为0，直接return出102
+                if (accountVO.getTransfMoney() &lt;= resultAccount.getBalance()) {// 如果扣款&gt;余额直接return 101,扣款失败
+                    // int balance = resultAccount.getBalance() - accountVO.getTransfMoney();
+                    resultAccount.setTransfMoney(accountVO.getTransfMoney());
+                    int affectedRows = accountDao.updateBalanceWithOptimiLock(resultAccount);
+                    if (affectedRows &gt; 0) {
+                        logger.info(
+                            "&gt;&gt;&gt;&gt;&gt;&gt;uid-&gt;" + resultAccount.getUid() + " transfMoney-&gt;" + resultAccount.getTransfMoney()
+                                + " versionNo-&gt;" + resultAccount.getVersionNo() + " affectedRows-&gt;" + affectedRows);
+                        AccountVO returnAccount = accountDao.selectBalance(accountVO);
+                        returnAccount.setTransfMoney(accountVO.getTransfMoney());
+                        return new ResponseBean(0, "扣款成功", returnAccount);
+                    } else {
+                        return new ResponseBean(103, "你的动作太快了,请稍侯");
+                    }
+                } else {
+                    return new ResponseBean(101, "扣款&gt;余额");
+                }
+            } else {
+                return new ResponseBean(101, "余额为0");
+            }
+        } catch (Exception e) {
+            logger.error("&gt;&gt;&gt;&gt;&gt;&gt;updateBalance error: " + e.getMessage(), e);
+            throw new Exception("&gt;&gt;&gt;&gt;&gt;&gt;updateBalance error: " + e.getMessage(), e);
+        }
+    }</code></pre> 
+<p>此处的“你的动作太快了,请稍侯“就是=“亲，排队中”。</p> 
+<p>然后对应的dao改造如下</p> 
+<p></p> 
+<pre><code class="language-XML">
+	&lt;select id="selectBalance"
+		parameterType="org.mk.demo.db.vo.AccountVO"
+		resultMap="accountResultMap"&gt;
+		SELECT uid,
+		balance,
+		version_no
+		FROM account WHERE uid=#{uid}
+	&lt;/select&gt;
+	&lt;update id="updateBalanceWithOptimiLock"
+		parameterType="org.mk.demo.db.vo.AccountVO"&gt;
+		UPDATE account
+		set
+		balance=balance-#{transfMoney},version_no=version_no+1
+		WHERE uid=#{uid}
+		and
+		version_no=#{versionNo}
+	&lt;/update&gt;
+</code></pre> 
+<p>然后我们来看一下这个操作在并发的情况下效果如何。</p> 
+<h2>30个并发下的效果演示</h2> 
+<p><img alt="" height="856" src="https://images2.imgbox.com/66/15/Z2x98S8R_o.png" width="1200"></p> 
+<p> 设30个线程</p> 
+<p><img alt="" height="842" src="https://images2.imgbox.com/f5/f0/64WYb5nN_o.png" width="1200"></p> 
+<p>运行后效果如下</p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/c9/15/sdOiPoZn_o.png" width="1200"></p> 
+<p>看，只有2条请求进入了正常扣款，其它都显示为</p> 
+<p><img alt="" height="754" src="https://images2.imgbox.com/25/ed/SMIZFdq1_o.png" width="1200"></p> 
+<p>去数据库里看一下几户余额</p> 
+<p><img alt="" height="374" src="https://images2.imgbox.com/24/bd/xtM2l0Qd_o.png" width="404"></p> 
+<p>看，业务幂等了。</p> 
+<p>此时我们拿同样的上面的“并发线程”运行3分钟去测试它</p> 
+<p>客户端返回10条扣款请求成功，其余不是“的动作太快了,请稍侯“就是”余额为0或者是扣款&gt;余额“，整个并发的过程共产生了9,300个请求。全测试过程顺利完成。</p> 
+<p><img alt="" height="514" src="https://images2.imgbox.com/15/de/uJY5hl2t_o.png" width="520"></p> 
+<p> 再来看这个系统的性能</p> 
+<p><img alt="" height="164" src="https://images2.imgbox.com/5b/47/WOSi1Dkk_o.png" width="224"></p> 
+<p><img alt="" height="178" src="https://images2.imgbox.com/ea/2d/L3lQlexE_o.png" width="1006"></p> 
+<p>请注意以上第一个截图的”吞吐量“和后面的average response指标。这个系统的性能是完全可以适合互联网级别应用的。</p> 
+<h1>对比使用Redis锁我们该怎么做呢</h1> 
+<p>我们使用redission组件提供的“锁”。其实我们这把锁叫：分布式自动超时、自动续约锁，这把锁的好处在于：</p> 
+<ol>
+<li>永远是一把正向锁，每次要锁时会先探一下前面有没有锁了？如果有锁了我就不来锁你（新进程新指令就不会运行）；</li>
+<li> 如果前面没有锁（进程在运行）我再来锁你然后运行我的进程或者是指令；</li>
+<li>前面一把锁如果碰到任何意外（包括了暴力挂机、杀进程），该锁也不会死在内存里而是在30秒后自动释放；</li>
+<li>如果被锁住的数据处理时间假设需要60分钟已经远超了锁的时间30秒，那么该锁会在超时前10秒启动一个watchdog进程自动去向后台锁服务器申请+30秒时间以不断贴合着数据处理完的所用时间；</li>
+</ol>
+<p>先来看pom.xml文件</p> 
+<pre><code class="language-XML">	&lt;dependencies&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.aspectj&lt;/groupId&gt;
+			&lt;artifactId&gt;aspectjweaver&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-boot-starter-jdbc&lt;/artifactId&gt;
+			&lt;exclusions&gt;
+				&lt;exclusion&gt;
+					&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+					&lt;artifactId&gt;spring-boot-starter-logging&lt;/artifactId&gt;
+				&lt;/exclusion&gt;
+			&lt;/exclusions&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;mysql&lt;/groupId&gt;
+			&lt;artifactId&gt;mysql-connector-java&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;com.alibaba&lt;/groupId&gt;
+			&lt;artifactId&gt;druid&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-boot-starter-test&lt;/artifactId&gt;
+			&lt;scope&gt;test&lt;/scope&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-boot-configuration-processor&lt;/artifactId&gt;
+			&lt;optional&gt;true&lt;/optional&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-boot-starter-log4j2&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.apache.commons&lt;/groupId&gt;
+			&lt;artifactId&gt;commons-lang3&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-boot-starter-web&lt;/artifactId&gt;
+			&lt;exclusions&gt;
+				&lt;exclusion&gt;
+					&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+					&lt;artifactId&gt;spring-boot-starter-logging&lt;/artifactId&gt;
+				&lt;/exclusion&gt;
+				&lt;exclusion&gt;
+					&lt;groupId&gt;org.slf4j&lt;/groupId&gt;
+					&lt;artifactId&gt;slf4j-log4j12&lt;/artifactId&gt;
+				&lt;/exclusion&gt;
+			&lt;/exclusions&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.mybatis.spring.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;mybatis-spring-boot-starter&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;com.alibaba.cloud&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-cloud-starter-alibaba-nacos-config&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+
+		&lt;dependency&gt;
+			&lt;groupId&gt;com.alibaba.cloud&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-cloud-starter-alibaba-nacos-discovery
+				&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+
+		&lt;!-- redis must --&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-boot-starter-data-redis&lt;/artifactId&gt;
+			&lt;exclusions&gt;
+				&lt;exclusion&gt;
+					&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+					&lt;artifactId&gt;spring-boot-starter-logging&lt;/artifactId&gt;
+				&lt;/exclusion&gt;
+				&lt;exclusion&gt;
+					&lt;groupId&gt;org.slf4j&lt;/groupId&gt;
+					&lt;artifactId&gt;slf4j-log4j12&lt;/artifactId&gt;
+				&lt;/exclusion&gt;
+			&lt;/exclusions&gt;
+		&lt;/dependency&gt;
+		&lt;!-- jedis must --&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;redis.clients&lt;/groupId&gt;
+			&lt;artifactId&gt;jedis&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+		&lt;!-- redission must --&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.redisson&lt;/groupId&gt;
+			&lt;artifactId&gt;redisson-spring-boot-starter&lt;/artifactId&gt;
+			&lt;version&gt;${redission.version}&lt;/version&gt;
+			&lt;!-- &lt;exclusions&gt; &lt;exclusion&gt; &lt;groupId&gt;org.redisson&lt;/groupId&gt; &lt;artifactId&gt;redisson-spring-data-23&lt;/artifactId&gt; 
+				&lt;/exclusion&gt; &lt;/exclusions&gt; --&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.redisson&lt;/groupId&gt;
+			&lt;artifactId&gt;redisson-spring-data-21&lt;/artifactId&gt;
+			&lt;version&gt;${redission.version}&lt;/version&gt;
+		&lt;/dependency&gt;
+	&lt;/dependencies&gt;</code></pre> 
+<p> 这边的redission.version我们用的版本号如下（切记），这个版本不会有redission在spring boot 工程启动时，时不时抛一个redission连接错误的bug。</p> 
+<pre><code class="language-XML">		&lt;redission.version&gt;3.16.1&lt;/redission.version&gt;</code></pre> 
+<p> 而我们的spring boot的version如下</p> 
+<pre><code class="language-XML">		&lt;spring-boot.version&gt;2.3.1.RELEASE&lt;/spring-boot.version&gt;</code></pre> 
+<p> <span style="color:#fe2c24"><strong>redission与spring boot的版本(version)必须完全对应，否则项目都启动不起来或者启动报错</strong></span></p> 
+<h3>RedissonProperties.java</h3> 
+<pre><code class="language-java">package org.mk.demo.db.config;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.stereotype.Component;
+
+/**
+ * 
+ * RedissonProperties
+ * 
+ * 
+ * Feb 20, 2021 1:56:09 PM
+ * 
+ * @version 1.0.0
+ * 
+ */
+@Configuration
+@Component
+public class RedissonProperties {
+
+    @Value("${spring.redis.timeout}")
+    private int timeout;
+    @Value("${spring.redis.password}")
+    private String password;
+    @Value("${spring.redis.database:0}")
+    private int database = 0;
+    @Value("${spring.redis.lettuce.pool.max-active:8}")
+    private int connectionPoolSize = 64;
+    @Value("${spring.redis.lettuce.pool.min-idle:0}")
+    private int connectionMinimumIdleSize = 10;
+    @Value("${spring.redis.lettuce.pool.max-active:8}")
+    private int slaveConnectionPoolSize = 250;
+    @Value("${spring.redis.lettuce.pool.max-active:8}")
+    private int masterConnectionPoolSize = 250;
+    @Value("${spring.redis.redisson.nodes}")
+    private String[] sentinelAddresses;
+    @Value("${spring.redis.sentinel.master}")
+    private String masterName;
+
+    public int getTimeout() {
+        return timeout;
+    }
+
+    public void setTimeout(int timeout) {
+        this.timeout = timeout;
+    }
+
+    public int getSlaveConnectionPoolSize() {
+        return slaveConnectionPoolSize;
+    }
+
+    public void setSlaveConnectionPoolSize(int slaveConnectionPoolSize) {
+        this.slaveConnectionPoolSize = slaveConnectionPoolSize;
+    }
+
+    public int getMasterConnectionPoolSize() {
+        return masterConnectionPoolSize;
+    }
+
+    public void setMasterConnectionPoolSize(int masterConnectionPoolSize) {
+        this.masterConnectionPoolSize = masterConnectionPoolSize;
+    }
+
+    public String[] getSentinelAddresses() {
+        return sentinelAddresses;
+    }
+
+    public void setSentinelAddresses(String sentinelAddresses) {
+        this.sentinelAddresses = sentinelAddresses.split(",");
+    }
+
+    public String getMasterName() {
+        return masterName;
+    }
+
+    public void setMasterName(String masterName) {
+        this.masterName = masterName;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+
+    public int getConnectionPoolSize() {
+        return connectionPoolSize;
+    }
+
+    public void setConnectionPoolSize(int connectionPoolSize) {
+        this.connectionPoolSize = connectionPoolSize;
+    }
+
+    public int getConnectionMinimumIdleSize() {
+        return connectionMinimumIdleSize;
+    }
+
+    public void setConnectionMinimumIdleSize(int connectionMinimumIdleSize) {
+        this.connectionMinimumIdleSize = connectionMinimumIdleSize;
+    }
+
+    public int getDatabase() {
+        return database;
+    }
+
+    public void setDatabase(int database) {
+        this.database = database;
+    }
+
+    public void setSentinelAddresses(String[] sentinelAddresses) {
+        this.sentinelAddresses = sentinelAddresses;
+    }
+}
+</code></pre> 
+<h3> RedisSentinelConfig.java文件-自动装配类</h3> 
+<pre><code class="language-java">import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import redis.clients.jedis.HostAndPort;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
+import org.redisson.Redisson;
+import org.redisson.api.RedissonClient;
+import org.redisson.config.Config;
+import org.redisson.config.SentinelServersConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.cache.annotation.EnableCaching;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.*;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.data.redis.connection.lettuce.LettucePoolingClientConfiguration;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.listener.PatternTopic;
+import org.springframework.data.redis.listener.RedisMessageListenerContainer;
+import org.springframework.data.redis.listener.adapter.MessageListenerAdapter;
+import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
+import org.springframework.stereotype.Component;
+
+import java.time.Duration;
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+import javax.annotation.Resource;
+
+@Configuration
+@EnableCaching
+@Component
+public class RedisSentinelConfig {
+    private Logger logger = LoggerFactory.getLogger(this.getClass());
+
+    @Resource
+    private RedissonProperties redssionProperties;
+
+    @Value("${spring.redis.nodes:localhost:7001}")
+    private String nodes;
+    @Value("${spring.redis.max-redirects:3}")
+    private Integer maxRedirects;
+    @Value("${spring.redis.password}")
+    private String password;
+    @Value("${spring.redis.database:0}")
+    private Integer database;
+    @Value("${spring.redis.timeout}")
+    private int timeout;
+
+    @Value("${spring.redis.sentinel.nodes}")
+    private String sentinel;
+
+    @Value("${spring.redis.lettuce.pool.max-active:8}")
+    private Integer maxActive;
+    @Value("${spring.redis.lettuce.pool.max-idle:8}")
+    private Integer maxIdle;
+    @Value("${spring.redis.lettuce.pool.max-wait:-1}")
+    private Long maxWait;
+    @Value("${spring.redis.lettuce.pool.min-idle:0}")
+    private Integer minIdle;
+    @Value("${spring.redis.sentinel.master}")
+    private String master;
+    @Value("${spring.redis.switchFlag}")
+    private String switchFlag;
+    @Value("${spring.redis.lettuce.pool.shutdown-timeout}")
+    private Integer shutdown;
+
+    @Value("${spring.redis.lettuce.pool.timeBetweenEvictionRunsMillis}")
+    private long timeBetweenEvictionRunsMillis;
+
+    public String getSwitchFlag() {
+        return switchFlag;
+    }
+
+    /**
+     * 连接池配置信息
+     * 
+     * @return
+     */
+    @Bean
+    public LettucePoolingClientConfiguration getPoolConfig() {
+        GenericObjectPoolConfig config = new GenericObjectPoolConfig();
+        config.setMaxTotal(maxActive);
+        config.setMaxWaitMillis(maxWait);
+        config.setMaxIdle(maxIdle);
+        config.setMinIdle(minIdle);
+        config.setTimeBetweenEvictionRunsMillis(timeBetweenEvictionRunsMillis);
+        LettucePoolingClientConfiguration pool = LettucePoolingClientConfiguration.builder().poolConfig(config)
+            .commandTimeout(Duration.ofMillis(timeout)).shutdownTimeout(Duration.ofMillis(shutdown)).build();
+        return pool;
+    }
+
+    /**
+     * 配置 Redis Cluster 信息
+     */
+
+    @Bean
+    @ConditionalOnMissingBean
+    public LettuceConnectionFactory lettuceConnectionFactory() {
+        LettuceConnectionFactory factory = null;
+
+        String[] split = nodes.split(",");
+        Set&lt;HostAndPort&gt; nodes = new LinkedHashSet&lt;&gt;();
+        for (int i = 0; i &lt; split.length; i++) {
+            try {
+                String[] split1 = split[i].split(":");
+                nodes.add(new HostAndPort(split1[0], Integer.parseInt(split1[1])));
+            } catch (Exception e) {
+                logger.error("&gt;&gt;&gt;&gt;&gt;&gt;出现配置错误!请确认: " + e.getMessage(), e);
+                throw new RuntimeException(String.format("出现配置错误!请确认node=[%s]是否正确", nodes));
+            }
+        }
+
+        // 如果是哨兵的模式
+        if (!StringUtils.isEmpty(sentinel)) {
+            logger.info("&gt;&gt;&gt;&gt;&gt;&gt;Redis use SentinelConfiguration");
+            RedisSentinelConfiguration redisSentinelConfiguration = new RedisSentinelConfiguration();
+            String[] sentinelArray = sentinel.split(",");
+            for (String s : sentinelArray) {
+                try {
+                    String[] split1 = s.split(":");
+                    redisSentinelConfiguration.addSentinel(new RedisNode(split1[0], Integer.parseInt(split1[1])));
+                } catch (Exception e) {
+                    logger.error("&gt;&gt;&gt;&gt;&gt;&gt;出现配置错误!请确认: " + e.getMessage(), e);
+                    throw new RuntimeException(String.format("出现配置错误!请确认node=[%s]是否正确", sentinelArray));
+                }
+            }
+            redisSentinelConfiguration.setMaster(master);
+            redisSentinelConfiguration.setPassword(password);
+            factory = new LettuceConnectionFactory(redisSentinelConfiguration, getPoolConfig());
+        }
+        // 如果是单个节点 用Standalone模式
+        else {
+            if (nodes.size() &lt; 2) {
+                logger.info("&gt;&gt;&gt;&gt;&gt;&gt;Redis use RedisStandaloneConfiguration");
+                for (HostAndPort n : nodes) {
+                    RedisStandaloneConfiguration redisStandaloneConfiguration = new RedisStandaloneConfiguration();
+                    if (!StringUtils.isEmpty(password)) {
+                        redisStandaloneConfiguration.setPassword(RedisPassword.of(password));
+                    }
+                    redisStandaloneConfiguration.setPort(n.getPort());
+                    redisStandaloneConfiguration.setHostName(n.getHost());
+                    factory = new LettuceConnectionFactory(redisStandaloneConfiguration, getPoolConfig());
+                }
+            } else {
+                logger.info("&gt;&gt;&gt;&gt;&gt;&gt;Redis use RedisClusterConfiguration");
+                RedisClusterConfiguration redisClusterConfiguration = new RedisClusterConfiguration();
+                nodes.forEach(n -&gt; {
+                    redisClusterConfiguration.addClusterNode(new RedisNode(n.getHost(), n.getPort()));
+                });
+                if (!StringUtils.isEmpty(password)) {
+                    redisClusterConfiguration.setPassword(RedisPassword.of(password));
+                }
+                redisClusterConfiguration.setMaxRedirects(maxRedirects);
+                factory = new LettuceConnectionFactory(redisClusterConfiguration, getPoolConfig());
+            }
+        }
+
+        return factory;
+    }
+
+    @Bean
+    public RedisTemplate&lt;String, Object&gt; redisTemplate(LettuceConnectionFactory lettuceConnectionFactory) {
+        RedisTemplate&lt;String, Object&gt; template = new RedisTemplate&lt;&gt;();
+        template.setConnectionFactory(lettuceConnectionFactory);
+        Jackson2JsonRedisSerializer jacksonSerial = new Jackson2JsonRedisSerializer&lt;&gt;(Object.class);
+        ObjectMapper om = new ObjectMapper();
+        // 指定要序列化的域，field,get和set,以及修饰符范围，ANY是都有包括private和public
+        om.setVisibility(PropertyAccessor.ALL, JsonAutoDetect.Visibility.ANY);
+        jacksonSerial.setObjectMapper(om);
+
+        StringRedisSerializer stringSerial = new StringRedisSerializer();
+        template.setKeySerializer(stringSerial);
+        // template.setValueSerializer(stringSerial);
+        template.setValueSerializer(jacksonSerial);
+        template.setHashKeySerializer(stringSerial);
+        template.setHashValueSerializer(jacksonSerial);
+
+        template.afterPropertiesSet();
+
+        return template;
+    }
+
+    @Bean
+    RedissonClient redissonSentinel() {
+        logger.info("&gt;&gt;&gt;&gt;&gt;&gt;redisson address size-&gt;" + redssionProperties.getSentinelAddresses().length);
+
+        Config config = new Config();
+        SentinelServersConfig serverConfig =
+            config.useSentinelServers().addSentinelAddress(redssionProperties.getSentinelAddresses())
+                .setMasterName(redssionProperties.getMasterName()).setTimeout(redssionProperties.getTimeout())
+                .setMasterConnectionPoolSize(redssionProperties.getMasterConnectionPoolSize())
+                .setSlaveConnectionPoolSize(redssionProperties.getSlaveConnectionPoolSize());
+        if (StringUtils.isNotBlank(redssionProperties.getPassword())) {
+            serverConfig.setPassword(redssionProperties.getPassword());
+        }
+        return Redisson.create(config);
+    }
+
+}</code></pre> 
+<h3>相应的yml文件内的配置</h3> 
+<pre><code>mysql:
+   datasource:
+      common:
+         type: com.alibaba.druid.pool.DruidDataSource
+         driverClassName: com.mysql.jdbc.Driver
+         minIdle: 25
+         initialSize: 5
+         maxActive: 25
+         maxWait: 5000
+         testOnBorrow: false
+         testOnReturn: false
+         testWhileIdle: true
+         validationQuery: select 1
+         timeBetweenEvictionRunsMillis: 300000
+         ConnectionErrorRetryAttempts: 3
+         NotFullTimeoutRetryCount: 3
+         minEvictableIdleTimeMillis: 60000
+         maxEvictableIdleTimeMillis: 300000
+         keepAliveBetweenTimeMillis: 480000
+         keepalive: true
+      master: #master db
+         url: jdbc:mysql://localhost:3306/demo_pay?useUnicode=true&amp;characterEncoding=utf-8&amp;useSSL=false&amp;useAffectedRows=true&amp;autoReconnect=true
+         username: root
+         password: 111111
+      slaver: #slaver db
+         url: jdbc:mysql://localhost:3307/demo_pay?useUnicode=true&amp;characterEncoding=utf-8&amp;useSSL=false&amp;useAffectedRows=true&amp;autoReconnect=true
+         username: root
+         password: 111111
+server:
+   port: 9084
+tomcat:
+  max-http-post-size: -1
+#最小线程数
+  min-spare-threads: 150
+#最大线程数
+  max-threads: 500
+#最大链接数
+  max-connections: 1000
+#最大等待队列长度
+  accept-count: 500
+logging:
+   config: classpath:log4j2.xml
+spring:
+   application:
+      name: db-demo
+   servlet:
+      multipart:
+         max-file-size: 10MB
+         max-request-size: 10MB
+   redis:
+      password: 111111
+      nodes: localhost:7001
+      redisson:
+#nodes: redis://192.168.2.106:27001,redis://192.168.2.106:27002,redis://192.168.2.106:27003
+         nodes: redis://localhost:27001,redis://localhost:27002,redis://localhost:27003
+      sentinel:
+#nodes:
+#master:
+#nodes: 192.168.2.106:27001,192.168.2.106:27002,192.168.2.106:27003
+         nodes: localhost:27001,localhost:27002,localhost:27003
+         master: master1
+      database: 0
+      switchFlag: 1
+      lettuce:
+         pool:
+            max-active: 50
+            max-wait: 10000
+            max-idle: 10
+            min-idl: 5
+            shutdown-timeout: 2000
+            timeBetweenEvictionRunsMillis: 5000
+      timeout: 5000</code></pre> 
+<h3>业务代码内的使用AccountService类</h3> 
+<pre><code class="language-java">
+    @Transactional(rollbackFor = Exception.class)
+    public ResponseBean updateBalanceWithRedissonLock(AccountVO accountVO) throws Exception {
+        AccountVO resultAccount = new AccountVO();
+        RLock lock = redissonSentinel.getLock(Constants.TRANSF_MONEY_LOCK);
+        try {
+            boolean islock = lock.tryLock(0, TimeUnit.SECONDS);
+            if (!islock) {
+                return new ResponseBean(103, "你的动作太快了,请稍侯");
+            } else {
+                resultAccount = accountDao.selectBalance(accountVO);
+                if (resultAccount.getBalance() &gt; 0) {// 如果余额为0，直接return出102
+                    if (accountVO.getTransfMoney() &lt;= resultAccount.getBalance()) {// 如果扣款&gt;余额直接return 101,扣款失败
+                        int balance = resultAccount.getBalance() - accountVO.getTransfMoney();
+                        resultAccount.setTransfMoney(accountVO.getTransfMoney());
+                        // resultAccount.setBalance(balance);
+                        int affectedRows = accountDao.updateBalanceWithRedissonLock(resultAccount);
+
+                        AccountVO returnAccount = accountDao.selectBalance(accountVO);
+                        logger.info("&gt;&gt;&gt;&gt;&gt;&gt;uid-&gt;" + resultAccount.getUid() + " transfMoney-&gt;"
+                            + resultAccount.getTransfMoney() + " current balance-&gt;" + returnAccount.getBalance()
+                            + " versionNo-&gt;" + returnAccount.getVersionNo() + " affectedRows-&gt;" + affectedRows);
+                        returnAccount.setTransfMoney(accountVO.getTransfMoney());
+                        return new ResponseBean(0, "扣款成功", returnAccount);
+                    } else {
+                        return new ResponseBean(101, "扣款&gt;余额");
+                    }
+                } else {
+                    return new ResponseBean(102, "余额为0");
+                }
+            }
+        } catch (Exception e) {
+            logger.error("&gt;&gt;&gt;&gt;&gt;&gt;updateBalance error: " + e.getMessage(), e);
+            throw new Exception("&gt;&gt;&gt;&gt;&gt;&gt;updateBalance error: " + e.getMessage(), e);
+        } finally {
+            try {
+                lock.unlock();
+            } catch (Exception e) {
+            }
+        }
+    }</code></pre> 
+<p><strong>此处重要的信息为：</strong>boolean islock = lock.tryLock(0, TimeUnit.SECONDS); 一定要这样写redission锁才会变成“自动续约锁”机制，即tryLock()方法中的第一个参数为0，即你的事务没有运行完毕，redis里的锁会在你的事务还没有结束时每次自动加10秒、加10秒，直到你的事务做完。即使你的redis或者是应用服务挂了，它也会过10-30秒左右自动释放，永不会锁死。</p> 
+<h2>来看运行起来的效果</h2> 
+<p><img alt="" height="752" src="https://images2.imgbox.com/6a/5a/iWoBhdkj_o.png" width="1200"></p> 
+<p></p> 
+<p>同样我们使用“并发线程”，3分钟压测 ，它将产生9,300个请求。</p> 
+<p><img alt="" height="688" src="https://images2.imgbox.com/6b/d5/TIAP2g8V_o.png" width="1200"></p> 
+<p></p> 
+<p>运行后效果如下</p> 
+<p><img alt="" height="514" src="https://images2.imgbox.com/06/d3/4pqHEhxj_o.png" width="526"></p> 
+<p> 客户端返回10条扣款请求成功，其余不是“的动作太快了,请稍侯“就是”余额为0或者是扣款&gt;余额“，整个并发的过程共产生了9,300个请求。全测试过程顺利完成。</p> 
+<p><strong>这边需要多说一下，<span style="color:#fe2c24">由于本人的开发用电脑用的硬盘的IOPS有24,000转，因此在本人开发电脑上redis自动续约锁和使用数据的cas-乐观锁性能上相差比较不大（没错，我自己用的开发电脑确实高于大多企业的服务器性能）。实际在真实的生产服务器上这两个方案的区别是使用redis自动续约锁的性能比使用数据库乐观锁要高出百分之10几</span></strong>。</p> 
+<p><img alt="" height="188" src="https://images2.imgbox.com/1d/67/JMDPfgEd_o.png" width="1022"></p> 
+<p></p> 
+<h1>总结一下几种做法的区别和使用场景</h1> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:700px"><tbody>
+<tr>
+<td style="text-align:center;width:198px">业务场景</td>
+<td style="text-align:center;width:73px">性能</td>
+<td style="text-align:center;width:79px">业务幂等</td>
+<td style="text-align:center;width:137px">会不会卡死服务器</td>
+<td style="text-align:center;width:209px">选择方案时的考虑因素</td>
+</tr>
+<tr>
+<td style="width:198px">不用锁做并发抢券、扣款类</td>
+<td style="text-align:center;width:73px">高</td>
+<td style="text-align:center;width:79px">无</td>
+<td style="text-align:center;width:137px">不会</td>
+<td style="text-align:center;width:209px">考虑都不会考虑</td>
+</tr>
+<tr>
+<td style="width:198px">用悲观锁</td>
+<td style="text-align:center;width:73px">极低</td>
+<td style="text-align:center;width:79px">有</td>
+<td style="text-align:center;width:137px">极易卡死系统</td>
+<td style="width:209px">只有线下柜面POS机或者是银行的高柜业务使用的黑屏POS机使用这种方案</td>
+</tr>
+<tr>
+<td style="width:198px">用CAS-乐观锁</td>
+<td style="text-align:center;width:73px">高</td>
+<td style="text-align:center;width:79px">有</td>
+<td style="text-align:center;width:137px">不会</td>
+<td style="width:209px">如果系统无法引入redis和redission组件，且改造业务方法太复杂那么可以考虑使用CAS-乐观锁方案，它造成的系统改动不大</td>
+</tr>
+<tr>
+<td style="width:198px">用Redis自动续约锁</td>
+<td style="text-align:center;width:73px">高</td>
+<td style="text-align:center;width:79px">有</td>
+<td style="text-align:center;width:137px">不会</td>
+<td style="width:209px"><span style="color:#fe2c24"><strong>如果系统是天然的spring boot2.X且改造成本不高，强烈推荐使用此方案</strong></span></td>
+</tr>
+</tbody></table>
+<p><img alt="" height="1164" src="https://images2.imgbox.com/33/33/LH4dpOVx_o.png" width="1200"></p> 
+<p> </p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

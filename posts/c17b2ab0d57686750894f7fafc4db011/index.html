@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【docker系列】使用非root用户安装及启动docker(rootless模式运行) - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【docker系列】使用非root用户安装及启动docker(rootless模式运行)</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-dracula">
+                    
+                        
+                    
+                    <p>通过我之前的文章已经可以验证，在root用户下安装启动的容器存在安全问题。究其原因是因为：</p> 
+<p><img src="https://images2.imgbox.com/a4/18/nWer48s3_o.png" alt=""></p> 
+<ul>
+<li>容器内的root用户就是宿主机的root用户，容器内uid=1000的用户就是宿主机uid=1000的用户</li>
+<li>docker的守护进程是root权限的</li>
+</ul> 
+<p>既然我们知道了原因，那么我们就来解决一下这两个问题。</p> 
+<p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul><li>
+<ul>
+<li><a href="#_10">一、容器用户与宿主机用户映射</a></li>
+<li><a href="#rootdocker_26">二、在非root用户下运行docker守护进程</a></li>
+<li>
+<ul>
+<li><a href="#21docker_28">2.1.docker版本要求</a></li>
+<li><a href="#22__33">2.2. 前置条件</a></li>
+<li><a href="#23rootless_48">2.3.开始rootless模式安装</a></li>
+<li><a href="#24_69">2.4.启动守护进程运行容器</a></li>
+</ul>
+   </li>
+<li><a href="#_82">三、存在若干已知的限制。</a></li>
+<li><a href="#Rootless_docker_98">四、卸载Rootless docker</a></li>
+</ul>
+ </li></ul>
+</div>
+<p></p> 
+<h2>
+<a id="_10"></a>一、容器用户与宿主机用户映射</h2> 
+<p>docker是使用<code>--userns-remap</code>容器用户映射宿主机用户的方式来解决问题，具体的方法描述如下：</p> 
+<p>用户和组的映射由两个配置文件来控制，分别是<code>/etc/subuid</code>和<code>/etc/subgid</code>。</p> 
+<pre><code class="prism language-bash"><span class="token builtin class-name">echo</span> <span class="token string">"zimug:100000:65536"</span> <span class="token operator">|</span> <span class="token function">tee</span> /etc/subuid<span class="token punctuation">;</span>
+<span class="token builtin class-name">echo</span> <span class="token string">"zimug:100000:65536"</span> <span class="token operator">|</span> <span class="token function">tee</span> /etc/subgid<span class="token punctuation">;</span>
+</code></pre> 
+<p>subuid(sub子uid用户id)：对于subuid的这一行表示，宿主机用户zimug的用户ip段为[100000,10000+65535]。也就是说，使用zimug这个宿主机启动容器，容器内的用户uid与宿主机内的用户uid存在关系。也就是说<strong>按照上面的配置</strong>：<br> <img src="https://images2.imgbox.com/92/ba/fDoK1Fnk_o.png" alt=""></p> 
+<ul>
+<li>zimug这个用户的容器子用户id(subuid)，只能在[100000-165535]之间进行分配。[0-99999]这个区间范围内的uid仍然保留给宿主机进行使用。</li>
+<li>使用zimug启动的第一个容器，容器用户root(uid=0)对应的宿主机用户应该是uid=100000(不是宿主机root用户)</li>
+<li>使用zimug启动的第二个容器，容器用户root(uid-0)对应的宿主机用户可能是uid=101000(也不是宿主机root用户)</li>
+<li>subgid表示的是用户组id的映射关系，映射原理和uid是一致的。</li>
+</ul> 
+<h2>
+<a id="rootdocker_26"></a>二、在非root用户下运行docker守护进程</h2> 
+<h3>
+<a id="21docker_28"></a>2.1.docker版本要求</h3> 
+<p>既然root用户的提权问题解决了，我们就要解决下一个问题：docker的守护进程是root权限的，即运行docker守护进程的用户仍然是root。我们需要做如下修正：<br> <img src="https://images2.imgbox.com/d5/d1/Si2Ujswd_o.png" alt=""><br> 也就是我们要在非root用户下安装docker，并启动docker守护进程，这种安装及运行模式被称为“RootLess”模式。可以安装但是存在先决条件：“RootLess”模式是在 Docker Engine v19.03 中作为实验性功能引入的，从 Docker Engine v20.10 开始提供正式使用。</p> 
+<h3>
+<a id="22__33"></a>2.2. 前置条件</h3> 
+<p>需要安装<code>newuidmap</code>和<code>newgidmap</code>工具shadow-utils,即配置上文中的<code>/etc/subuid</code>和<code>/etc/subuid</code>需要这两个工具的支持。安装之前使用<code>yum list installed shadow-utils</code>确认下是否已经安装过或者操作系统自带，如果存在就不要安装了,但第三步的配置是需要的。<br> 第一步：添加一个软件包安装源，该源下面包含<code>shadow-utils46-newxidmap</code></p> 
+<pre><code class="prism language-bash"><span class="token function">curl</span> -o /etc/yum.repos.d/vbatts-shadow-utils-newxidmap-epel-7.repo https://copr.fedorainfracloud.org/coprs/vbatts/shadow-utils-newxidmap/repo/epel-7/vbatts-shadow-utils-newxidmap-epel-7.repo
+</code></pre> 
+<p>第二步： <code>yum install -y shadow-utils46-newxidmap</code><br> 第三步：在<code>/etc/sysctl.conf</code>文件中修改系统参数<code>user.max_user_namespaces = 28633</code>，修改完成之后执行<code>sysctl --system</code>命令让参数生效。</p> 
+<pre><code class="prism language-bash"><span class="token builtin class-name">echo</span> user.max_user_namespaces<span class="token operator">=</span><span class="token number">28633</span> <span class="token operator">&gt;&gt;</span> /etc/sysctl.d/userns.conf<span class="token punctuation">;</span>
+<span class="token function">sudo</span> sysctl -p /etc/sysctl.d/userns.conf<span class="token punctuation">;</span>
+</code></pre> 
+<p>该参数默认值是0，即不允许操作系统用户存在subuid空间。上面的操作完成之后使用<code>sysctl --all --pattern user_namespaces</code>命令验证修改的结果。</p> 
+<h3>
+<a id="23rootless_48"></a>2.3.开始rootless模式安装</h3> 
+<p>root用户下确保已经执行下列命令进行用户id关系配置</p> 
+<pre><code class="prism language-bash"><span class="token builtin class-name">echo</span> <span class="token string">"zimug:100000:65536"</span> <span class="token operator">|</span> <span class="token function">tee</span> /etc/subuid<span class="token punctuation">;</span>
+<span class="token builtin class-name">echo</span> <span class="token string">"zimug:100000:65536"</span> <span class="token operator">|</span> <span class="token function">tee</span> /etc/subgid<span class="token punctuation">;</span>
+</code></pre> 
+<p>我已经新建了一个linux用户zimug，使用<code>su - zimug</code>切换到该用户下，执行安装脚本，该安装脚本需要连网。</p> 
+<pre><code class="prism language-bash"><span class="token function">curl</span> -fsSL https://get.docker.com/rootless <span class="token operator">|</span> <span class="token function">sh</span>
+</code></pre> 
+<p>脚本执行完成之后，显示的内容如下：<br> <img src="https://images2.imgbox.com/05/74/VFB5Y4bT_o.png" alt=""></p> 
+<p>将上图中安装过程提示的export内容添加到<code> ~/.bashrc</code> 文件中，添加完使用<code>source ~/.bashrc</code>命令使环境变量生效。注意：<strong>你的环境变量和我的一定不一致，要copy上图中红色部分。</strong></p> 
+<pre><code class="prism language-shell"><span class="token builtin class-name">export</span> <span class="token assign-left variable"><span class="token environment constant">XDG_RUNTIME_DIR</span></span><span class="token operator">=</span>/home/zimug/.docker/run
+<span class="token builtin class-name">export</span> <span class="token assign-left variable"><span class="token environment constant">PATH</span></span><span class="token operator">=</span>/home/zimug/bin:<span class="token environment constant">$PATH</span>
+<span class="token builtin class-name">export</span> <span class="token assign-left variable">DOCKER_HOST</span><span class="token operator">=</span>unix:///home/zimug/.docker/run/docker.sock
+</code></pre> 
+<h3>
+<a id="24_69"></a>2.4.启动守护进程运行容器</h3> 
+<p>在zimug用户下使用下面的脚本启动docker守护进程，该脚本在上文中的环境变量PATH目录下，所以我们不用写全路径。注意：我们这里使用了<code> --experimental --storage-driver vfs</code>参数启动，因为我的linux内核版本比较低所以需要加这个参数，后文我会说明原因。</p> 
+<pre><code class="prism language-bash">dockerd-rootless.sh --experimental --storage-driver vfs
+</code></pre> 
+<p>启动一个容器我们尝试一下，注意宿主机映射的端口不能小于1024，因为linux非root用户不能使用1024以下的端口。</p> 
+<pre><code class="prism language-bash"><span class="token function">docker</span> run -d --name nginx-zimug -p  <span class="token number">8080</span>:80  nginx
+</code></pre> 
+<p>访问nginx服务看到界面就证明nginx服务没有问题，同时注意宿主机防火墙开放8080端口访问，这个我就不说了。</p> 
+<h2>
+<a id="_82"></a>三、存在若干已知的限制。</h2> 
+<p>官方文档说的是<a href="https://docs.docker.com/engine/security/rootless/#known-limitations">known-limitations</a>，也就是已知的受限因素是下面这些，未知的受限因素还不一定有多少呢。<strong>所以笔者针对rootless模式目前也只是研究，还没有在生产上能够正式使用（2022年4月6日）</strong>。虽然它很安全，但是如果坑太多的话，我也受不了啊。</p> 
+<ul>
+<li>目前仅支持以下存储驱动程序： 
+  <ul>
+<li>
+<code>overlay2</code>（仅当使用内核 5.11 或更高版本或 Ubuntu 发行版本的内核运行时，才能够支持这个存储驱动）。上文中我的内核版本是3.10达不到要求。</li>
+<li>
+<code>fuse-overlayfs</code>（仅当使用内核 4.18 或更高版本运行并<code>fuse-overlayfs</code>被安装时）</li>
+<li>
+<code>btrfs</code>（仅当使用内核 4.18 或更高版本运行，或者<code>~/.local/share/docker</code>使用<code>user_subvol_rm_allowed</code>挂载选项挂载时）</li>
+<li>
+<code>vfs</code> 兼容性最好，但这个存储驱动目前仅能用于实验，不能用于生产。</li>
+</ul> </li>
+<li>只有在使用 cgroup v2 和 systemd 运行时才支持 Cgroup。</li>
+<li>不支持以下功能： 
+  <ul>
+<li>AppArmor</li>
+<li>Checkpoint</li>
+<li>Overlay网络模式</li>
+<li>暴漏SCTP 端口</li>
+</ul> </li>
+</ul> 
+<h2>
+<a id="Rootless_docker_98"></a>四、卸载Rootless docker</h2> 
+<p>在非root用户(我用的是zimug用户)下执行下列命令，完成docker rootless卸载<br> 第一步：</p> 
+<pre><code class="prism language-bash">rootlesskit <span class="token function">rm</span> -rf ~/.local/share/docker
+</code></pre> 
+<p>第二步：</p> 
+<pre><code class="prism language-bash">$ <span class="token builtin class-name">cd</span> ~/bin 
+$ <span class="token function">rm</span> -f containerd containerd-shim containerd-shim-runc-v2 ctr <span class="token function">docker</span> docker-init docker-proxy dockerd dockerd-rootless-setuptool.sh dockerd-rootless.sh rootlesskit rootlesskit-docker-proxy runc vpnkit
+</code></pre> 
+<p>第三步： 把上文中在<code> ~/.bashrc</code> 文件中添加的环境变量删掉。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

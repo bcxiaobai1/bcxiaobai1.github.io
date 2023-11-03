@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Spring Cloud Eureka源码分析之心跳续约及自我保护机制 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Spring Cloud Eureka源码分析之心跳续约及自我保护机制</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>Eureka-Server是如何判断一个服务不可用的？</p> 
+<p>Eureka是通过心跳续约的方式来检查各个服务提供者的健康状态。</p> 
+<p>实际上，在判断服务不可用这个部分，会分为两块逻辑。</p> 
+<ol>
+<li>Eureka-Server需要定期检查服务提供者的健康状态。</li>
+<li>Eureka-Client在运行过程中需要定期更新注册信息。</li>
+</ol> 
+<p>Eureka的心跳续约机制如下图所示。</p> 
+<p style="text-align:center"><img alt="" src="https://images2.imgbox.com/57/49/ReYr4Rdq_o.png"></p> 
+<p></p> 
+<ol>
+<li>客户端在启动时， 会开启一个心跳任务，每隔30s向服务单发送一次心跳请求。</li>
+<li>服务端维护了每个实例的最后一次心跳时间，客户端发送心跳包过来后，会更新这个心跳时间。</li>
+<li>服务端在启动时，开启了一个定时任务，该任务每隔60s执行一次，检查每个实例的最后一次心跳时间是否超过90s，如果超过则认为过期，需要剔除。</li>
+</ol> 
+<p>关于上述流程中涉及到的时间，可以通过以下配置来更改.</p> 
+<pre><code>#Server 至上一次收到 Client 的心跳之后，等待下一次心跳的超时时间，在这个时间内若没收到下一次心跳，则将移除该 Instance。
+eureka.instance.lease-expiration-duration-in-seconds=90
+# Server 清理无效节点的时间间隔，默认60000毫秒，即60秒。
+eureka.server.eviction-interval-timer-in-ms=60</code></pre> 
+<h1>客户端心跳发起流程</h1> 
+<p>心跳续约是客户端发起的，每隔30s执行一次。</p> 
+<h1>DiscoveryClient.initScheduledTasks</h1> 
+<p>继续回到<br> DiscoveryClient.initScheduledTasks 方法中，</p> 
+<pre><code>private void initScheduledTasks() {
+    //省略....
+    heartbeatTask = new TimedSupervisorTask(
+        "heartbeat",
+        scheduler,
+        heartbeatExecutor,
+        renewalIntervalInSecs,
+        TimeUnit.SECONDS,
+        expBackOffBound,
+        new HeartbeatThread()
+    );
+    scheduler.schedule(
+        heartbeatTask,
+        renewalIntervalInSecs, TimeUnit.SECONDS);
+    //省略....
+}</code></pre> 
+<p>renewalIntervalInSecs=30s, 默认每隔30s执行一次。</p> 
+<h1>HeartbeatThread</h1> 
+<p>这个线程的实现很简单，调用 renew() 续约，如果续约成功，则更新最后一次心跳续约时间。</p> 
+<pre><code>private class HeartbeatThread implements Runnable {
+
+    public void run() {
+        if (renew()) {
+            lastSuccessfulHeartbeatTimestamp = System.currentTimeMillis();
+        }
+    }
+}</code></pre> 
+<p>在 renew() 方法中，调用EurekaServer的 "apps/" + appName + '/' + id; 这个地址，进行心跳续约。</p> 
+<pre><code>boolean renew() {
+    EurekaHttpResponse&lt;InstanceInfo&gt; httpResponse;
+    try {
+        httpResponse = eurekaTransport.registrationClient.sendHeartBeat(instanceInfo.getAppName(), instanceInfo.getId(), instanceInfo, null);
+        logger.debug(PREFIX + "{} - Heartbeat status: {}", appPathIdentifier, httpResponse.getStatusCode());
+        if (httpResponse.getStatusCode() == Status.NOT_FOUND.getStatusCode()) {
+            REREGISTER_COUNTER.increment();
+            logger.info(PREFIX + "{} - Re-registering apps/{}", appPathIdentifier, instanceInfo.getAppName());
+            long timestamp = instanceInfo.setIsDirtyWithTime();
+            boolean success = register();
+            if (success) {
+                instanceInfo.unsetIsDirty(timestamp);
+            }
+            return success;
+        }
+        return httpResponse.getStatusCode() == Status.OK.getStatusCode();
+    } catch (Throwable e) {
+        logger.error(PREFIX + "{} - was unable to send heartbeat!", appPathIdentifier, e);
+        return false;
+    }
+}</code></pre> 
+<h1>服务端收到心跳处理</h1> 
+<p>服务端具体为调用[<br> com.netflix.eureka.resources]包下的InstanceResource类的renewLease方法进行续约，代码如下</p> 
+<pre><code>@PUT
+public Response renewLease(
+        @HeaderParam(PeerEurekaNode.HEADER_REPLICATION) String isReplication,
+        @QueryParam("overriddenstatus") String overriddenStatus,
+        @QueryParam("status") String status,
+        @QueryParam("lastDirtyTimestamp") String lastDirtyTimestamp) {
+    boolean isFromReplicaNode = "true".equals(isReplication);
+    //调用renew进行续约
+    boolean isSuccess = registry.renew(app.getName(), id, isFromReplicaNode);
+
+    // Not found in the registry, immediately ask for a register
+    if (!isSuccess) { //如果续约失败，返回异常
+        logger.warn("Not Found (Renew): {} - {}", app.getName(), id);
+        return Response.status(Status.NOT_FOUND).build();
+    }
+    // Check if we need to sync based on dirty time stamp, the client
+    // instance might have changed some value
+    Response response;
+    //校验客户端与服务端的时间差异，如果存在问题则需要重新发起注册
+    if (lastDirtyTimestamp != null &amp;&amp; serverConfig.shouldSyncWhenTimestampDiffers()) {
+        response = this.validateDirtyTimestamp(Long.valueOf(lastDirtyTimestamp), isFromReplicaNode);
+        // Store the overridden status since the validation found out the node that replicates wins
+        if (response.getStatus() == Response.Status.NOT_FOUND.getStatusCode()
+                &amp;&amp; (overriddenStatus != null)
+                &amp;&amp; !(InstanceStatus.UNKNOWN.name().equals(overriddenStatus))
+                &amp;&amp; isFromReplicaNode) {
+            registry.storeOverriddenStatusIfRequired(app.getAppName(), id, InstanceStatus.valueOf(overriddenStatus));
+        }
+    } else {
+        response = Response.ok().build(); // 续约成功，返回200
+    }
+    logger.debug("Found (Renew): {} - {}; reply status={}", app.getName(), id, response.getStatus());
+    return response;
+}</code></pre> 
+<h1>InstanceRegistry.renew</h1> 
+<p>renew的实现方法如下，主要有两个流程</p> 
+<ol>
+<li>从服务注册列表中找到匹配当前请求的实例</li>
+<li>发布EurekaInstanceRenewedEvent事件</li>
+</ol> 
+<pre><code>@Override
+public boolean renew(final String appName, final String serverId,
+                     boolean isReplication) {
+    log("renew " + appName + " serverId " + serverId + ", isReplication {}"
+        + isReplication);
+    //获取所有服务注册信息
+    List&lt;Application&gt; applications = getSortedApplications();
+    for (Application input : applications) { //逐一遍历
+        if (input.getName().equals(appName)) { //如果当前续约的客户端和某个服务注册信息节点相同
+            InstanceInfo instance = null;
+            for (InstanceInfo info : input.getInstances()) { //遍历这个服务集群下的所有节点，找到某个匹配的实例instance返回。
+                if (info.getId().equals(serverId)) {
+                    instance = info; //
+                    break;
+                }
+            }
+            //发布EurekaInstanceRenewedEvent事件，这个事件在EurekaServer中并没有处理，我们可以监听这个事件来做一些事情，比如做监控。
+            publishEvent(new EurekaInstanceRenewedEvent(this, appName, serverId,
+                                                        instance, isReplication));
+            break;
+        }
+    }
+    return super.renew(appName, serverId, isReplication);
+}</code></pre> 
+<h1>super.renew</h1> 
+<pre><code>public boolean renew(final String appName, final String id, final boolean isReplication) {
+    if (super.renew(appName, id, isReplication)) { //调用父类的续约方法，如果续约成功
+        replicateToPeers(Action.Heartbeat, appName, id, null, null, isReplication); //同步给集群中的所有节点
+        return true;
+    }
+    return false;
+}</code></pre> 
+<h1>AbstractInstanceRegistry.renew</h1> 
+<p>在这个方法中，会拿到应用对应的实例列表，然后调用Lease.renew()去进行心跳续约。</p> 
+<pre><code>public boolean renew(String appName, String id, boolean isReplication) {
+    RENEW.increment(isReplication);
+    Map&lt;String, Lease&lt;InstanceInfo&gt;&gt; gMap = registry.get(appName); //根据服务名字获取实例信息
+    Lease&lt;InstanceInfo&gt; leaseToRenew = null;
+    if (gMap != null) { 
+        leaseToRenew = gMap.get(id);  //获取需要续约的服务实例，
+    }
+    if (leaseToRenew == null) { //如果为空，说明这个服务实例不存在，直接返回续约失败
+        RENEW_NOT_FOUND.increment(isReplication);
+        logger.warn("DS: Registry: lease doesn't exist, registering resource: {} - {}", appName, id);
+        return false;
+    } else { //表示实例存在
+        InstanceInfo instanceInfo = leaseToRenew.getHolder(); //获取实例的基本信息
+        if (instanceInfo != null) { //实例基本信息不为空
+            // touchASGCache(instanceInfo.getASGName());
+            //获取实例的运行状态
+            InstanceStatus overriddenInstanceStatus = this.getOverriddenInstanceStatus(
+                    instanceInfo, leaseToRenew, isReplication);
+            if (overriddenInstanceStatus == InstanceStatus.UNKNOWN) { //如果运行状态未知，也返回续约失败
+                logger.info("Instance status UNKNOWN possibly due to deleted override for instance {}"
+                        + "; re-register required", instanceInfo.getId());
+                RENEW_NOT_FOUND.increment(isReplication);
+                return false;
+            }
+            //如果当前请求的实例信息
+            if (!instanceInfo.getStatus().equals(overriddenInstanceStatus)) {
+                logger.info(
+                        "The instance status {} is different from overridden instance status {} for instance {}. "
+                                + "Hence setting the status to overridden status", instanceInfo.getStatus().name(),
+                                overriddenInstanceStatus.name(),
+                                instanceInfo.getId());
+                instanceInfo.setStatusWithoutDirty(overriddenInstanceStatus);
+
+            }
+        }
+        //更新上一分钟的续约数量
+        renewsLastMin.increment();
+        leaseToRenew.renew(); //续约
+        return true;
+    }
+}</code></pre> 
+<p>续约的实现，就是更新服务端最后一次收到心跳请求的时间。</p> 
+<pre><code>public void renew() {
+    lastUpdateTimestamp = System.currentTimeMillis() + duration;
+
+}</code></pre> 
+<h1>Eureka的自我保护机制</h1> 
+<p>实际，心跳检测机制有一定的不确定性，比如服务提供者可能是正常的，但是由于网络通信的问题，导致在90s内没有收到心跳请求，那将会导致健康的服务被误杀。</p> 
+<p>为了避免这种问题，Eureka提供了一种叫 自我保护 机制的东西。简单来说，就是开启自我保护机制后，Eureka Server会包这些服务实例保护起来，避免过期导致实例被剔除的问题，从而保证Eurreka集群更加健壮和稳定。</p> 
+<p>进入自我保护状态后，会出现以下几种情况</p> 
+<ul>
+<li>Eureka Server不再从注册列表中移除因为长时间没有收到心跳而应该剔除的过期服务，如果在保护期内如果服务刚好这个服务提供者非正常下线了，此时服务消费者就会拿到一个无效的服务实例，此时会调用失败，对于这个问题需要服务消费者端要有一些容错机制，如重试，断路器等！</li>
+<li>Eureka Server仍然能够接受新服务的注册和查询请求，但是不会被同步到其他节点上，保证当前节点依然可用。</li>
+</ul> 
+<p>Eureka自我保护机制，通过配置<br> eureka.server.enable-self-preservation 来【 true 】打开/【 false 禁用】自我保护机制，默认打开状态，建议生产环境打开此配置。</p> 
+<p>自我保护机制应该如何设计，才能更加精准地控制到 “是网络异常” 导致的通信延迟，而不是服务宕机呢？</p> 
+<p>Eureka是这么做的： 如果低于85%的客户端节点都没有正常的心跳，那么Eureka Server就认为客户端与注册中心出现了网络故障，Eureka Server自动进入自我保护状态 .</p> 
+<p>其中， 85% 这个阈值，可以通过下面这个配置来设置</p> 
+<pre><code># 自我保护续约百分比，默认是0.85
+eureka.server.renewal-percent-threshold=0.85</code></pre> 
+<p>但是还有个问题，超过谁的85%呢？这里有一个预期的续约数量，这个数量计算公式如下:</p> 
+<pre><code>//自我保护阀值 = 服务总数 * 每分钟续约数(60S/客户端续约间隔) * 自我保护续约百分比阀值因子</code></pre> 
+<p>假设如果有 100 个服务，续约间隔是 30S ，自我保护阈值 0.85 ，那么它的预期续约数量为：</p> 
+<pre><code>自我保护阈值 =100 * 60 / 30 * 0.85 = 170。</code></pre> 
+<h1>自动续约的阈值设置</h1> 
+<p>在EurekaServerBootstrap这个类的 contextInitialized 方法中，会调用 initEurekaServerContext 进行初始化</p> 
+<pre><code>public void contextInitialized(ServletContext context) {
+    try {
+        initEurekaEnvironment();
+        initEurekaServerContext();
+
+        context.setAttribute(EurekaServerContext.class.getName(), this.serverContext);
+    }
+    catch (Throwable e) {
+        log.error("Cannot bootstrap eureka server :", e);
+        throw new RuntimeException("Cannot bootstrap eureka server :", e);
+    }
+}</code></pre> 
+<p>继续往下看。</p> 
+<pre><code>protected void initEurekaServerContext() throws Exception {
+        EurekaServerConfig eurekaServerConfig = new DefaultEurekaServerConfig();
+    //...
+    registry.openForTraffic(applicationInfoManager, registryCount);
+}</code></pre> 
+<p>在openForTraffic方法中，会初始化<br> expectedNumberOfClientsSendingRenews 这个值，这个值的含义是： 预期每分钟收到续约的客户端数量，取决于注册到eureka server上的服务数量</p> 
+<pre><code>@Override
+public void openForTraffic(ApplicationInfoManager applicationInfoManager, int count) {
+    // Renewals happen every 30 seconds and for a minute it should be a factor of 2.
+    this.expectedNumberOfClientsSendingRenews = count; //初始值是1.
+    updateRenewsPerMinThreshold();
+    logger.info("Got {} instances from neighboring DS node", count);
+    logger.info("Renew threshold is: {}", numberOfRenewsPerMinThreshold);
+    this.startupTime = System.currentTimeMillis();
+    if (count &gt; 0) {
+        this.peerInstancesTransferEmptyOnStartup = false;
+    }
+    DataCenterInfo.Name selfName = applicationInfoManager.getInfo().getDataCenterInfo().getName();
+    boolean isAws = Name.Amazon == selfName;
+    if (isAws &amp;&amp; serverConfig.shouldPrimeAwsReplicaConnections()) {
+        logger.info("Priming AWS connections for all replicas..");
+        primeAwsReplicas(applicationInfoManager);
+    }
+    logger.info("Changing status to UP");
+    applicationInfoManager.setInstanceStatus(InstanceStatus.UP);
+    super.postInit();
+}</code></pre> 
+<h1>updateRenewsPerMinThreshold</h1> 
+<p>接着调用<br> updateRenewsPerMinThreshold 方法，会更新一个每分钟最小的续约数量，也就是Eureka Server期望每分钟收到客户端实例续约的总数的阈值。如果小于这个阈值，就会触发自我保护机制。</p> 
+<pre><code>protected void updateRenewsPerMinThreshold() {
+    this.numberOfRenewsPerMinThreshold = (int) (this.expectedNumberOfClientsSendingRenews
+            * (60.0 / serverConfig.getExpectedClientRenewalIntervalSeconds())
+            * serverConfig.getRenewalPercentThreshold());
+}
+//自我保护阀值 = 服务总数 * 每分钟续约数(60S/客户端续约间隔) * 自我保护续约百分比阀值因子</code></pre> 
+<ul>
+<li>getExpectedClientRenewalIntervalSeconds，客户端的续约间隔，默认为30s</li>
+<li>getRenewalPercentThreshold，自我保护续约百分比阈值因子，默认0.85。 也就是说每分钟的续约数量要大于85%</li>
+</ul> 
+<h1>预期值的变化触发机制</h1> 
+<p><br> expectedNumberOfClientsSendingRenews 和<br> numberOfRenewsPerMinThreshold 这两个值，会随着新增服务注册以及服务下线的触发而发生变化。</p> 
+<h1>PeerAwareInstanceRegistryImpl.cancel</h1> 
+<p>当服务提供者主动下线时，表示这个时候Eureka-Server要剔除这个服务提供者的地址，同时也代表这这个心跳续约的阈值要发生变化。所以在<br> PeerAwareInstanceRegistryImpl.cancel 中可以看到数据的更新</p> 
+<p>调用路径<br> PeerAwareInstanceRegistryImpl.cancel -&gt; AbstractInstanceRegistry.cancel-&gt;internalCancel</p> 
+<p>服务下线之后，意味着需要发送续约的客户端数量递减了，所以在这里进行修改</p> 
+<pre><code>protected boolean internalCancel(String appName, String id, boolean isReplication) {
+  //....
+    synchronized (lock) {
+        if (this.expectedNumberOfClientsSendingRenews &gt; 0) {
+            // Since the client wants to cancel it, reduce the number of clients to send renews.
+            this.expectedNumberOfClientsSendingRenews = this.expectedNumberOfClientsSendingRenews - 1;
+            updateRenewsPerMinThreshold();
+        }
+    }
+}</code></pre> 
+<h1>PeerAwareInstanceRegistryImpl.register</h1> 
+<p>当有新的服务提供者注册到eureka-server上时，需要增加续约的客户端数量，所以在register方法中会进行处理</p> 
+<pre><code>register -&gt;super.register(AbstractInstanceRegistry)
+</code></pre> 
+<pre><code>public void register(InstanceInfo registrant, int leaseDuration, boolean isReplication) {
+    //....    
+    // The lease does not exist and hence it is a new registration
+    synchronized (lock) {
+        if (this.expectedNumberOfClientsSendingRenews &gt; 0) {
+            // Since the client wants to register it, increase the number of clients sending renews
+            this.expectedNumberOfClientsSendingRenews = this.expectedNumberOfClientsSendingRenews + 1;
+            updateRenewsPerMinThreshold();
+        }
+    }
+}</code></pre> 
+<h1>每隔15分钟刷新自我保护阈值</h1> 
+<pre><code>PeerAwareInstanceRegistryImpl.scheduleRenewalThresholdUpdateTask
+</code></pre> 
+<p>每隔15分钟，更新一次自我保护阈值！</p> 
+<pre><code>private void updateRenewalThreshold() {
+    try {
+        // 1. 计算应用实例数
+        Applications apps = eurekaClient.getApplications();
+        int count = 0;
+        for (Application app : apps.getRegisteredApplications()) {
+            for (InstanceInfo instance : app.getInstances()) {
+                if (this.isRegisterable(instance)) {
+                    ++count;
+                }
+            }
+        }
+        
+        synchronized (lock) {
+            // Update threshold only if the threshold is greater than the
+            // current expected threshold or if self preservation is disabled.
+            //当节点数量count大于最小续约数量时，或者没有开启自我保护机制的情况下，重新计算expectedNumberOfClientsSendingRenews和numberOfRenewsPerMinThreshold
+            if ((count) &gt; (serverConfig.getRenewalPercentThreshold() * expectedNumberOfClientsSendingRenews)
+                || (!this.isSelfPreservationModeEnabled())) {
+                this.expectedNumberOfClientsSendingRenews = count;
+                updateRenewsPerMinThreshold();
+            }
+        }
+        logger.info("Current renewal threshold is : {}", numberOfRenewsPerMinThreshold);
+    } catch (Throwable e) {
+        logger.error("Cannot update renewal threshold", e);
+    }
+}</code></pre> 
+<h1>自我保护机制的触发</h1> 
+<p>在 AbstractInstanceRegistry 的 postInit 方法中，会开启一个 EvictionTask 的任务，这个任务用来检测是否需要开启自我保护机制。</p> 
+<p>这个方法也是在EurekaServerBootstrap方法启动时触发。</p> 
+<pre><code>protected void postInit() {
+    renewsLastMin.start(); //开启一个定时任务，用来实现每分钟的续约数量，每隔60s归0重新计算
+    if (evictionTaskRef.get() != null) {
+        evictionTaskRef.get().cancel();
+    }
+    evictionTaskRef.set(new EvictionTask()); //启动一个定时任务EvictionTask,每隔60s执行一次
+    evictionTimer.schedule(evictionTaskRef.get(),
+                           serverConfig.getEvictionIntervalTimerInMs(),
+                           serverConfig.getEvictionIntervalTimerInMs());
+}</code></pre> 
+<p>其中，EvictionTask的代码如下。</p> 
+<pre><code>private final AtomicLong lastExecutionNanosRef = new AtomicLong(0l);
+
+@Override
+public void run() {
+    try {
+        //获取补偿时间毫秒数
+        long compensationTimeMs = getCompensationTimeMs();
+        logger.info("Running the evict task with compensationTime {}ms", compensationTimeMs);
+        evict(compensationTimeMs);
+    } catch (Throwable e) {
+        logger.error("Could not run the evict task", e);
+    }
+}</code></pre> 
+<h1>evict方法</h1> 
+<pre><code>public void evict(long additionalLeaseMs) {
+    logger.debug("Running the evict task");
+     // 是否需要开启自我保护机制，如果需要，那么直接RETURE， 不需要继续往下执行了
+    if (!isLeaseExpirationEnabled()) {
+        logger.debug("DS: lease expiration is currently disabled.");
+        return;
+    }
+
+    //这下面主要是做服务自动下线的操作的。
+}</code></pre> 
+<h1>isLeaseExpirationEnabled</h1> 
+<pre><code>numberOfRenewsPerMinThreshold
+</code></pre> 
+<pre><code>public boolean isLeaseExpirationEnabled() {
+    if (!isSelfPreservationModeEnabled()) {
+        // The self preservation mode is disabled, hence allowing the instances to expire.
+        return true;
+    }
+    return numberOfRenewsPerMinThreshold &gt; 0 &amp;&amp; getNumOfRenewsInLastMin() &gt; numberOfRenewsPerMinThreshold;
+}</code></pre> 
+<p> </p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

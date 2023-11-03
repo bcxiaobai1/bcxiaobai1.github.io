@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>模型并行 | 大规模语言模型架构 Megatron - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">模型并行 | 大规模语言模型架构 Megatron</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>随着AI模型的规模越来越大，分布式训练技术越来越被广泛使用。现行的分布式训练方法主要包含两个部分：数据并行（Data Parallel）和模型并行（Model Parallel）。数据并行是将模型完整拷贝到多张显卡中，对批次数据进行并行计算，适合规模小而数据多的训练场景；而模型并行适合超大规模参数的模型训练，将模型不同的部分分别加载到不同的显卡中，依次计算得出结果。</p> 
+<p>Megratron是NVIDIA提出的一种分布式训练大规模语言模型的架构，针对Transformer进行了专门的优化，主要采用的是模型并行的方案。这篇文章将描述幻方AI对于NVIDIA Megatron在萤火二号平台上运行的一些实验，以及与我们目前的方法的对比。 ​</p> 
+<p>模型：GPT</p> 
+<p>代码：<a href="https://github.com/NVIDIA/Megatron-LM" title="GitHub - NVIDIA/Megatron-LM: Ongoing research training transformer models at scale">GitHub - NVIDIA/Megatron-LM: Ongoing research training transformer models at scale</a></p> 
+<p>环境：幻方萤火二号，16个节点共128张A100（A100-40GB x128）</p> 
+<hr> 
+<h2 id="megatron简介">Megatron简介</h2> 
+<p>Megatron是NVIDIA提出的一种由于分布式训练大规模语言模型的架构，针对Transformer进行了专门的优化（也就是大矩阵乘法）。</p> 
+<p>第一篇论文发表于2019年9月：<a href="https://arxiv.org/pdf/1909.08053.pdf" title="Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism">Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism</a>，主要提出了通过将矩阵分块提高并行度的方法。</p> 
+<p>第二篇论文发表于2021年4月：<a href="https://arxiv.org/pdf/2104.04473.pdf" title="Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM">Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM</a>，对于分布式中的一些重要的设计，如tensor parallel、pipeline parallel、micro batch size等进行了一些分析与讨论。同时提出了更加精细的pipeline结构与communication模式。</p> 
+<p>Megatron作者提供的性能结果如下：</p> 
+<p><img alt="" height="536" src="https://images2.imgbox.com/54/c0/yTIlXbG7_o.png" width="1200"></p> 
+<p> 这些测试是基于DGX A100-80GB集群完成的。和萤火二号的测试环境相比，硬件环境上主要存在着如下区别：</p> 
+<ul>
+<li>DGX配备了NVLINK、NVSWITCH与IB，使得AllReduce的效率非常高。萤火二号的通讯效率相对更低，尤其是在不使用hfreduce的前提下。</li>
+<li>Megatron使用了A100-80GB而萤火二号使用了A100-40GB。除了显存大小不同之外，二者的内存带宽也不同（2.0T/s vs 1.6T/s）。</li>
+</ul> 
+<p>除此之外，除去实现细节上的差异，Megatron和我们的方法的主要不同在于</p> 
+<ul>
+<li>Megaton支持tensor parallel，并相应地优化了数据传输。</li>
+<li>Megatron对于pipeline机制进行了一些优化（原论文Fig.4）。</li>
+<li>Megatron自行实现了一套DDP框架，而非使用pytorch提供的DDP。</li>
+<li>Megatron自行实现了一些fused kernels，但是为了公平对比被我们disable掉了。</li>
+</ul> 
+<p>我们关心的问题是，在萤火平台上，Megatron的架构能够达到怎样的训练效率。</p> 
+<p>我们用于测试的模型配置为：</p> 
+<ul>
+<li>hidden size = 3072</li>
+<li>layers = 32</li>
+<li>attention heads = 32</li>
+<li>batch size = 512</li>
+<li>context size = 1024</li>
+<li>vocabulary size = 50264</li>
+<li>micro batch size = 4</li>
+</ul> 
+<p>总参数量为 3.8 B，单次迭代计算量为 16.53 PFLOP。</p> 
+<h1 id="tensor-parallel-vs-pipeline-parallel">Tensor Parallel vs. Pipeline Parallel</h1> 
+<p>在Megatron的论文中，作者的建议是在节点内尽量使用tensor-parallel。pipeline-parallel主要在节点间使用，目的在于增大可用显存，而且应当尽量少。这一观点的原因在于pipeline会不可避免地引入bubble而降低效率。然而，另一方面，tensor-parallel需要更多的AllReduce操作，不适合在带宽较低的设备之间进行。</p> 
+<p>在这一节中我们测试不同的tensor parallel与pipeline parallel的训练效率。我们的实验观察到了与论文结论相反的现象：</p> 
+<table>
+<thead><tr>
+<th></th>
+<th>TP = 1, PP = 4</th>
+<th>TP = 2, PP = 2</th>
+<th>TP = 4, PP = 1</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>time (s)</td>
+<td>4.43</td>
+<td>5.41</td>
+<td>9.54</td>
+</tr>
+<tr>
+<td>percentage of peak</td>
+<td>9.4%</td>
+<td>7.6%</td>
+<td>4.3%</td>
+</tr>
+</tbody>
+</table> 
+<p>其中，TP = tensor parallel，PP = pipeline parallel。为了避免跨numa，每个进程使用4块GPU。更细致的log显示，无论是forward还是backward，在使用tensor parallel后的时间开销都显著增加。此外，GPU利用率远远低于论文中的结果（48%）。</p> 
+<p>为了排除数据传输的影响，我们在单卡上跑了一个小模型作为测试，单次迭代需要的计算量约为119.4 TFLOP，时间约为1950ms，那么也只有理论峰值的 19.6%。</p> 
+<h1 id="model-shape">Model Shape</h1> 
+<p>第二个有趣的发现是，在总运算量一定的情况下，不同的（layers，hidden size）组合的计算效率会有较大的差别。</p> 
+<table>
+<thead><tr>
+<th>layer, hidden</th>
+<th>20, 3872</th>
+<th>32, 3072</th>
+<th>52, 2400</th>
+<th>80, 1920</th>
+<th>80, 2048</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>PFLOP</td>
+<td>16.4</td>
+<td>16.5</td>
+<td>16.5</td>
+<td>16.5</td>
+<td>18.6</td>
+</tr>
+<tr>
+<td>Params (B)</td>
+<td>3.99</td>
+<td>3.94</td>
+<td>3.84</td>
+<td>3.74</td>
+<td>4.24</td>
+</tr>
+<tr>
+<td>Megatron (s/iter)</td>
+<td>5.79</td>
+<td>4.34</td>
+<td>7.48</td>
+<td>8.07</td>
+<td>5.90</td>
+</tr>
+<tr>
+<td>Ours (s/iter)</td>
+<td>8.47</td>
+<td>6.31</td>
+<td>8.00</td>
+<td>8.11</td>
+<td>7.76</td>
+</tr>
+<tr>
+<td>Megatron / Ours</td>
+<td>68.4%</td>
+<td>68.8%</td>
+<td>93.5%</td>
+<td>99.5%</td>
+<td>76.0%</td>
+</tr>
+</tbody>
+</table> 
+<p>在一些特殊的形状下，（也就是GPU恰好效率不高的形状下），我们的方法和Megatron还是很接近的…在最优的形状下，差距还是很明显。猜测Megatron的论文里选用这个形状也是因为它的执行效率最高。背后的原因可能是某种尺寸的矩阵的GEMM效率最高。由此进一步推测，tensor parallel也能由于类似的原因实现优化。</p> 
+<h1 id="mixed-precision">Mixed Precision</h1> 
+<p>Megatron默认是使用mixed precision（fp16）进行计算的。而且在前面的图里也能看到A100对于FP16的算力是TF32的两倍。我们做了一个简单的实验对比fp16与tf32在Megatron上的性能差异：</p> 
+<table>
+<thead><tr>
+<th></th>
+<th>FP16</th>
+<th>TF32</th>
+</tr></thead>
+<tbody><tr>
+<td>s/iter</td>
+<td>4.43</td>
+<td>7.53</td>
+</tr></tbody>
+</table> 
+<p>TF32的时间开销增加了约70%，这个结果是符合预期的。</p> 
+<p><strong>但是</strong>：</p> 
+<ol>
+<li>我们在<a href="https://www.high-flyer.cn/blog/model_parallel-1/notes_0128.md" title="过去的测试">过去的测试</a>中，发现开关AMP并没有产生太大的性能差距</li>
+<li>Megatron在TF32下的迭代时间与我们的方法有些接近</li>
+</ol> 
+<p>因此，一个怀疑是，尽管我们在代码中加入了torch.cuda.amp，它并没有真正生效，又或者是使用的方法并不是最恰当的。这可能是我们的方法和Megatron的性能差距的一个来源。当然，也有可能是Megatron完全使用了fp16（而不是mixed precision），这个问题还有待检查。</p> 
+<p>更新2022 Feb 17：经过检查代码，Megatron 的 —fp16 应该是启用了 mixed precision 的。在 <a href="http://git.hfalpha.xyz:10080/yzhou/megatron-hfai/-/blob/master/megatron/optimizer/optimizer.py#L229" title="optimizer.py">optimizer.py</a> 中可以看到对 fp32 参数的维护。</p> 
+<h1 id="pipeline-parallel-vs-ddp">Pipeline Parallel vs DDP</h1> 
+<p><img alt="" height="760" src="https://images2.imgbox.com/38/8e/GKbqw6Dr_o.png" width="1166"></p> 
+<p> 然而，另一个问题在于，当总GPU数量固定为n时，p 越小，data parallel的进程数 d=n/p 就越多。如果节点间的数据交换需要通过一个中心交换机的话，数据传输的效率可能成为一个问题。</p> 
+<p>在Megatron中，tensor parallel与pipeline parallel都是将大模型装进显存的方法。但前面的实验已经验证了，在萤火二号的平台上，需要大量带宽的tensor parallel并不合适。那么，理论上，只需要选取最小的 ppp 使得模型能够装入显存就可以了。</p> 
+<p>接下来是一个关于pipeline的简单实验。为了能够将模型装入单个GPU，我们将hidden size缩小到2048。</p> 
+<table>
+<thead><tr>
+<th>pipeline parallel</th>
+<th>1</th>
+<th>2</th>
+<th>4</th>
+<th>8</th>
+<th>16</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>Megatron (s/iter)</td>
+<td>2.84</td>
+<td>3.25</td>
+<td>3.19</td>
+<td>3.01</td>
+<td>3.40</td>
+</tr>
+<tr>
+<td>Ours (s/iter)</td>
+<td>OOM</td>
+<td>2.80</td>
+<td>4.40</td>
+<td>7.69</td>
+<td>not supported</td>
+</tr>
+<tr>
+<td>Megatron / Ours</td>
+<td></td>
+<td>116%</td>
+<td>72.5%</td>
+<td>39.1%</td>
+<td></td>
+</tr>
+</tbody>
+</table> 
+<p>对于Megatron来说，单卡是最快的，这个符合预期。然而，2卡反而是最慢的，8卡也并没有因为跨numa而显著变慢，16卡也没有因为跨node而显著变慢。作为对比，我们的方法随着pipeline parallel规模的增加，性能下降非常明显。猜测是因为Megatron的pipeline实现更加高效。</p> 
+<p>补充 2022 Feb 17：在上表中，Megatron 的 pipeline parallel 没有因为跨numa/node而显著性能下降是因为其显卡分配方式本来就是优先跨node的。即使当pipeline深度仅仅为2时，两块显卡也分布在不同的节点上。详见<a href="http://git.hfalpha.xyz:10080/yzhou/megatron-hfai/-/blob/master/discussion/pipeline_discussion.md#megatron-%E7%9A%84%E6%98%BE%E5%8D%A1%E5%88%86%E9%85%8D%E6%96%B9%E6%B3%95" title="这份文档">这份文档</a>。</p> 
+<p>此外，我们的方法在单卡下会OOM而Megatron不会，可能是同样是因为我们没有正确地启用fp16，又或者是我们的实现有一些粗糙（考虑到我们只是调用torch，Megatron也是，按理说不该有很大差别）。</p> 
+<p>PyTorch自带的pipeline基于RPC实现，无法支持跨节点的pipeline。Megatron中的pipeline应该是作者自行实现的，还有待确认。</p> 
+<p>另外，上述关于pipeline的分析均基于一个假设：在pipeline的每一步，GPU都能够跑满。然而，实际情况可能并非如此。</p> 
+<p>先放张示意图：</p> 
+<p><img alt="" height="668" src="https://images2.imgbox.com/b3/51/Is01xd4J_o.png" width="852"></p> 
+<p> 为了简单，只画了forward部分，backward本质上是一样的。现在假设每个GPU的算力没有跑满，所以它有两行。最上面的图表示一个常规的做法，分成3个micro batch。中间的图表示，如果GPU没有跑满的话，可以拆成6步流水线，每个GPU处理两步，那么效率会明显高于3步流水线。而最下面的图表示了另一种可能：尽管我们拆成了6步流水线，但是每一步都会把GPU跑满，体现为每个时间点GPU都只在处理一步运算。然而，在这种情况下，也并不会比拆成3步流水线的情况差。</p> 
+<p>由于Megatron的实现已经固定了每个GPU只能承载流水线中的一步，我们用我们自己的实现做个实验。</p> 
+<table>
+<thead><tr>
+<th>pipeline stages</th>
+<th>4</th>
+<th>8</th>
+<th>16</th>
+<th>32</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>forward</td>
+<td>0.63</td>
+<td>0.64</td>
+<td>0.66</td>
+<td>0.70</td>
+</tr>
+<tr>
+<td>backward</td>
+<td>4.53</td>
+<td>4.19</td>
+<td>3.83</td>
+<td>3.59</td>
+</tr>
+<tr>
+<td>total</td>
+<td>5.50</td>
+<td>5.11</td>
+<td>4.74</td>
+<td>4.53</td>
+</tr>
+</tbody>
+</table> 
+<p>可以看到，随着流水线变深，时间开销缩减到了原来的 83%。尽管foward小幅变慢，但是backward时间显著缩短。</p> 
+<p>需要指出的是，类似的提升 <strong>并不</strong> 总是能够在任何模型结构上都会发生。推测这是由于一些特殊的矩阵形状在GPU上的执行效率不高导致GPU没有跑满。上述结果来自于 layers = 54，hidden size = 1920，attention head = 20。这个实验仅仅提示在某些情况下，这样做可能带来加速。</p> 
+<p>在这些分析中，我们并没有考虑到pipeline带来的sync等overhead。但是从实验结果来看，这些开销是可以接受的。</p> 
+<p>实际上，我们真正应该减少的是pipeline所占用的GPU数量，而非总的流水线步骤。当我们观察到GPU并没有跑满的时候，在单个GPU内增加pipeline数量是有可能提高效率的：存在着某一个配置，能够平衡过多的pipeline数量带来的overhead与GPU利用率之间的关系。但是理论计算很难给出这个结果，因为overhead受到大量因素的影响。我们更可能需要经验性的实验去寻找这个平衡。显而易见的是，在节点，或者numa内部去分割pipeline的开销是注定远小于跨节点的pipeline的。</p> 
+<p>一般而言，总的GPU数量是一定的。在这种情况下，pipeline占用更多的GPU，就意味着其它“完美并行”（无bubble）的方式会占用更少的GPU，比如DDP与tensor parallel。二者中，DDP的传输可以和backward并行，但tensor parallel不行，所以会更加显著地受到带宽的限制。一个经验性的建议是，应该尽量减少单个进程占据的GPU的数量，但是可以考虑适当增加每个GPU内的pipeline数量。最后，我们再来解释一下Megatron的pipeline。</p> 
+<p>本质上，pipeline的bubble来自于启动时GPU i 要等待GPU i-1 的计算结果。每个GPU执行的时间越久，等待的时间就越久，bubble也会更大。核心的思路在于，如何减少GPU处理每个stage的时间。一方面，我们可以通过减少micro batch size的大小，这个接下来会有讨论。另一方面，我们可以把stage拆得更细致，让每个stage的执行时间更短。这实际上就是Megatron中提出的pipeline的做法。</p> 
+<p>这里放一张图帮助理解：</p> 
+<p><img alt="" height="242" src="https://images2.imgbox.com/e2/26/nf7rMeoH_o.png" width="1200"></p> 
+<p> 假设三个颜色分别代表3个micro batch，总的forward时间为18个格子，backward时间为24个格子。</p> 
+<p>在默认做法中，我们将计算平均分配到三个GPU上，每个GPU分到6个格子，执行完再传给流水线上的下一个GPU。对应上半个示意图。</p> 
+<p>另一种方式是，我们将计算拆成6份，每个GPU负责 <strong>不连续</strong> 的两份，以”interleaved”的方式进行分配。这样，GPU i只需要三个单位的时间就能够执行完毕传递给 GPU i + 1。本质上就是让启动时间尽量短。</p> 
+<p>这样做带来的额外开销是，数据的传输量增加了。假设每个GPU负责 v 个stage，那么传输量就变为了原来的 v 倍。</p> 
+<p>Megatron论文里的图片把forward和backward拆散了，看起来不那么直观。注意backward和forward是否并行都不会影响pipeline的执行效率，因为GPU已经跑满了（没跑满的话可以参照前面的讨论）。</p> 
+<p>Megatron拆开forward和backward的目的在于节约显存占用。如果等待forward全部完成后再进行backward，那么全部的micro batch都要被存下来留着backward时用。但是如果拆散forward与backward，可以理解为对于每一个单独的micro batch都尽可能早地完成forward+backward（而不是等待所有forward都完成后再一起backward），完成backward后就不需要再保留micro batch的数据了，所以节约了显存。</p> 
+<p>如果等待全部forward完成再进行backward的话，需要保存的数据量正比于micro batch的数量 m；如果拆散了的话，需要保存的数据量正比于pipeline的深度 p。考虑到 m≫p，拆散了更好。</p> 
+<h1 id="micro-batch-size">Micro Batch Size</h1> 
+<p><img alt="" height="337" src="https://images2.imgbox.com/16/93/LyI53BDW_o.png" width="1140"></p> 
+<p> 在Megatron上，一个经验性的实验是：</p> 
+<table>
+<thead><tr>
+<th>micro batch size</th>
+<th>2</th>
+<th>4</th>
+<th>8</th>
+</tr></thead>
+<tbody><tr>
+<td>time (s)</td>
+<td>4.79</td>
+<td>4.43</td>
+<td>5.69</td>
+</tr></tbody>
+</table> 
+<h1 id="checkpoint-layers">Checkpoint Layers</h1> 
+<p><img alt="" height="305" src="https://images2.imgbox.com/5b/94/t5x8meP8_o.png" width="1127"></p> 
+<p> 由于 c的取值理论上并不会影响训练效率，最终不超过显存容量即可。根据Megatron论文中的建议，c取1或2是比较合适的值。</p> 
+<p>在Megatron上的实验验证了checkpoint的粒度并不会对效率产生显著的影响，浮动约为8%：</p> 
+<table>
+<thead><tr>
+<th>checkpoint layers</th>
+<th>1</th>
+<th>2</th>
+<th>4</th>
+<th>8</th>
+</tr></thead>
+<tbody><tr>
+<td>total</td>
+<td>4.39</td>
+<td>4.43</td>
+<td>4.74</td>
+<td>4.55</td>
+</tr></tbody>
+</table> 
+<p>在我们的方法上得到的结果类似，浮动仅为4%：</p> 
+<table>
+<thead><tr>
+<th>checkpoint layers</th>
+<th>1</th>
+<th>2</th>
+<th>4</th>
+<th>8</th>
+<th>16</th>
+<th>32</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>forward</td>
+<td>0.60</td>
+<td>0.59</td>
+<td>0.60</td>
+<td>0.60</td>
+<td>0.60</td>
+<td>0.59</td>
+</tr>
+<tr>
+<td>backward</td>
+<td>5.64</td>
+<td>5.62</td>
+<td>5.38</td>
+<td>5.38</td>
+<td>5.40</td>
+<td>5.42</td>
+</tr>
+<tr>
+<td>total</td>
+<td>6.41</td>
+<td>6.37</td>
+<td>6.15</td>
+<td>6.14</td>
+<td>6.16</td>
+<td>6.18</td>
+</tr>
+</tbody>
+</table> 
+<h1 id="fused-kernels">Fused Kernels</h1> 
+<p>Megatron的作者提供了一些fused kernels来提高计算效率。通过将bias-gelu和masked-softmax两个fusion，模型能获得约8.5%的提升，单次迭代时间从4.43s提高到4.08s。</p> 
+<h1 id="总结">总结</h1> 
+<ol>
+<li> <p>pipeline优化。pytorch自带的pipeline还是有比较大的改进空间的，尤其是在发生跨numa的时候，与Megatron的实现产生了非常大的差距（而且pytoch的pipe不支持跨节点）。好的pipeline实现是训练大模型必不可少的一部分，可以考虑像hfreduce一样实现一个hfpipe。</p> </li>
+<li> <p>关注硬件特性。不同的 (layers, hidden size) 的组合，即使具有相同的理论计算量，实际执行起来的效率差异可以高达85+%。背后的原因应该是矩阵形状的不同。尽管在设计一个模型的时候，训练效率并不是第一考量，但是我们可以通过轻微的调整来追求更高的训练效率。与此同时，另一个可行的做法是通过tensor parallel将矩阵变为最合适的形状。</p> </li>
+<li> <p>当硬件架构、带宽已经确定后，tensor parallel能否被高效执行是存疑的。但是依旧可能存在某种专门的实现，使tensor parallel的传输开销能够小于pipeline parallel的bubble开销，来达到Megatron中所宣称的执行效率。</p> </li>
+</ol>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

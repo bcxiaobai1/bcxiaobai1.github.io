@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>一文解决ethtool 原理介绍和解决网卡丢包排查思路 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">一文解决ethtool 原理介绍和解决网卡丢包排查思路</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h2><strong>前言</strong></h2> 
+<p>之前记录过处理因为 LVS 网卡流量负载过高导致软中断发生丢包的问题，<strong>RPS 和 RFS 网卡多队列性能调优实践</strong>[1]，对一般人来说压力不大的情况下其实碰见的概率并不高。这次想分享的话题是比较常见服务器网卡丢包现象排查思路，如果你是想了解点对点的丢包解决思路涉及面可能就比较广，不妨先参考之前的文章<strong>如何使用 MTR 诊断网络问题</strong>[2]，对于 Linux 常用的网卡丢包分析工具自然是 ethtool。</p> 
+<p>ethtool 用于查看和修改网络设备（尤其是有线以太网设备）的驱动参数和硬件设置。你可以根据需要更改以太网卡的参数，包括自动协商、速度、双工和局域网唤醒等参数。通过对以太网卡的配置，你的计算机可以通过网络有效地进行通信。该工具提供了许多关于接驳到你的 Linux 系统的以太网设备的信息。</p> 
+<h2><strong>1. 了解接收数据包的流程</strong></h2> 
+<p>接收数据包是一个复杂的过程，涉及很多底层的技术细节，但大致需要以下几个步骤：</p> 
+<ol>
+<li>网卡收到数据包。</li>
+<li>将数据包从网卡硬件缓存转移到服务器内存中。</li>
+<li>通知内核处理。</li>
+<li>经过 TCP/IP 协议逐层处理。</li>
+<li>应用程序通过 read() 从 socket buffer 读取数据。</li>
+</ol>
+<div class="img-center">
+ <img alt="" src="https://images2.imgbox.com/a0/0c/AUZpRA60_o.png">
+</div> 
+<h3><strong>将网卡收到的数据包转移到主机内存（NIC 与驱动交互）</strong></h3> 
+<p>NIC 在接收到数据包之后，首先需要将数据同步到内核中，这中间的桥梁是 rx ring buffer。它是由 NIC 和驱动程序共享的一片区域，事实上，rx ring buffer 存储的并不是实际的 packet 数据，而是一个描述符，这个描述符指向了它真正的存储地址，具体流程如下：</p> 
+<ol>
+<li>驱动在内存中分配一片缓冲区用来接收数据包，叫做 sk_buffer；</li>
+<li>将上述缓冲区的地址和大小（即接收描述符），加入到 rx ring buffer。描述符中的缓冲区地址是 DMA 使用的物理地址；</li>
+<li>驱动通知网卡有一个新的描述符；</li>
+<li>网卡从 rx ring buffer 中取出描述符，从而获知缓冲区的地址和大小；</li>
+<li>网卡收到新的数据包；</li>
+<li>网卡将新数据包通过 DMA 直接写到 sk_buffer 中。</li>
+</ol>
+<div class="img-center">
+ <img alt="" src="https://images2.imgbox.com/80/25/czfpul1h_o.png">
+</div> 
+<p>当驱动处理速度跟不上网卡收包速度时，驱动来不及分配缓冲区，NIC 接收到的数据包无法及时写到 sk_buffer，就会产生堆积，当 NIC 内部缓冲区写满后，就会丢弃部分数据，引起丢包。这部分丢包为 rx_fifo_errors，在 /proc/net/dev 中体现为 fifo 字段增长，在 ifconfig 中体现为 overruns 指标增长。</p> 
+<h3><strong>通知系统内核处理（驱动与 Linux 内核交互）</strong></h3> 
+<p>这个时候，数据包已经被转移到了 sk_buffer 中。前文提到，这是驱动程序在内存中分配的一片缓冲区，并且是通过 DMA 写入的，这种方式不依赖 CPU 直接将数据写到了内存中，意味着对内核来说，其实并不知道已经有新数据到了内存中。那么如何让内核知道有新数据进来了呢？答案就是中断，通过中断告诉内核有新数据进来了，并需要进行后续处理。</p> 
+<p>提到中断，就涉及到硬中断和软中断，首先需要简单了解一下它们的区别：</p> 
+<ul>
+<li>硬中断：由硬件自己生成，具有随机性，硬中断被 CPU 接收后，触发执行中断处理程序。中断处理程序只会处理关键性的、短时间内可以处理完的工作，剩余耗时较长工作，会放到中断之后，由软中断来完成。硬中断也被称为上半部分。</li>
+<li>软中断：由硬中断对应的中断处理程序生成，往往是预先在代码里实现好的，不具有随机性。（除此之外，也有应用程序触发的软中断，与本文讨论的网卡收包无关。）也被称为下半部分。</li>
+</ul>
+<p>当 NIC 把数据包通过 DMA 复制到内核缓冲区 sk_buffer 后，NIC 立即发起一个硬件中断。CPU 接收后，首先进入上半部分，网卡中断对应的中断处理程序是网卡驱动程序的一部分，之后由它发起软中断，进入下半部分，开始消费 sk_buffer 中的数据，交给内核协议栈处理。</p> 
+<div class="img-center">
+ <img alt="" src="https://images2.imgbox.com/49/c5/isWKtdEu_o.png">
+</div> 
+<p>通过中断，能够快速及时地响应网卡数据请求，但如果数据量大，那么会产生大量中断请求，CPU 大部分时间都忙于处理中断，效率很低。为了解决这个问题，现在的内核及驱动都采用一种叫 NAPI（new API）的方式进行数据处理，其原理可以简单理解为 中断 + 轮询，在数据量大时，一次中断后通过轮询接收一定数量包再返回，避免产生多次中断。</p> 
+<p></p> 
+<blockquote> 
+ <p> 资料直通车：<a href="https://docs.qq.com/doc/DYXJzcENMd21uTk56" title="Linux内核源码技术学习路线+视频教程内核源码">Linux内核源码技术学习路线+视频教程内核源码</a></p> 
+ <p>学习直通车：<a href="https://ke.qq.com/course/4032547?flowToken=1042639" title="Linux内核源码内存调优文件系统进程管理设备驱动/网络协议栈">Linux内核源码内存调优文件系统进程管理设备驱动/网络协议栈</a></p> 
+</blockquote> 
+<p></p> 
+<h2><strong>2. ifconfig 解释</strong></h2> 
+<pre><code>[root@localhost ~]
+eth0: flags=4163&lt;UP,BROADCAST,RUNNING,MULTICAST&gt; mtu 1500
+inet 192.168.1.135 netmask 255.255.255.0 broadcast 192.168.1.255
+inet6 fe80::20c:29ff:fe9b:52d3 prefixlen 64 scopeid 0x20&lt;link&gt;
+ether 00:0c:29:9b:52:d3 txqueuelen 1000 (Ethernet)
+RX packets 833 bytes 61846 (60.3 KiB)
+RX errors 0 dropped 0 overruns 0 frame 0
+TX packets 122 bytes 9028 (8.8 KiB)
+TX errors 0 dropped 0 overruns 0 carrier 0 collisions 0
+</code></pre> 
+<ul><li>RX errors</li></ul>
+<p>表示总的收包的错误数量，这包括 too-long-frames 错误，Ring Buffer 溢出错误，crc 校验错误，帧同步错误，fifo overruns 以及 missed pkg 等等。</p> 
+<ul><li>RX dropped</li></ul>
+<p>表示数据包已经进入了 Ring Buffer，但是由于内存不够等系统原因，导致在拷贝到内存的过程中被丢弃。</p> 
+<ul><li>RX overruns</li></ul>
+<p>表示了 fifo 的 overruns，这是由于 Ring Buffer(aka Driver Queue) 传输的 IO 大于 kernel 能够处理的 IO 导致的，而 Ring Buffer 则是指在发起 IRQ 请求之前的那块 buffer。很明显，overruns 的增大意味着数据包没到 Ring Buffer 就被网卡物理层给丢弃了，而 CPU 无法即使的处理中断是造成 Ring Buffer 满的原因之一，上面那台有问题的机器就是因为 interruprs 分布的不均匀 (都压在 core0)，没有做 affinity 而造成的丢包。</p> 
+<ul><li>RX frame</li></ul>
+<p>表示 misaligned 的 frames。</p> 
+<h2><strong>3. 网卡工作原理</strong></h2> 
+<h3><strong>网卡发包</strong></h3> 
+<p>网卡驱动程序将 IP 包添加 14 字节的 MAC 头，构成 frame（暂无 CRC）。Frame（暂无 CRC）中含有发送端和接收端的 MAC 地址，由于是驱动程序创建 MAC 头，所以可以随便输入地址，也可以进行主机伪装。</p> 
+<p>驱动程序将 frame（暂无 CRC）拷贝到网卡芯片内部的缓冲区，由网卡处理。</p> 
+<p>网卡芯片将未完全完成的 frame（缺 CRC）再次封装为可以发送的 packet，也就是添加头部同步信息和 CRC 校验，然后丢到网线上，就完成一个 IP 报的发送了，所有接到网线上的网卡都可以看到该 packet。</p> 
+<h3><strong>网卡收包</strong></h3> 
+<p>网线上的 packet 首先被网卡获取，网卡会检查 packet 的 CRC 校验，保证完整性，然后将 packet 头去掉，得到 frame。网卡会检查 MAC 包内的目的 MAC 地址，如果和本网卡的 MAC 地址不一样则丢弃 (混杂模式除外)。</p> 
+<p>网卡将 frame 拷贝到网卡内部的 FIFO 缓冲区，触发硬件中断。（如有 ring buffer 的网卡，好像 frame 可以先存在 ring buffer 里再触发软件中断（下篇文章将详细解释 Linux 中 frame 的走向），ring buffer 是网卡和驱动程序共享，是设备里的内存，但是对操作系统是可见的，因为看到 linux 内核源码里网卡驱动程序是使用 kcalloc 来分配的空间，所以 ring buffer 一般都有上限，另外这个 ring buffer size，表示的应该是能存储的 frame 的个数，而不是字节大小。另外有些系统的 ethtool 命令 并不能改变 ring parameters 来设置 ring buffer 的大小，暂时不知道为什么，可能是驱动不支持。）</p> 
+<p>网卡驱动程序通过硬中断处理函数，构建 sk_buff，把 frame 从网卡 FIFO 拷贝到内存 skb 中，接下来交给内核处理。（支持 napi 的网卡应该是直接放在 ring buffer，不触发硬中断，直接使用软中断，拷贝 ring buffer 里的数据，直接输送给上层处理，每个网卡在一次软中断处理过程能处理 weight 个 frame）</p> 
+<p>过程中，网卡芯片对 frame 进行了 MAC 过滤，以减小系统负荷。（除了混杂模式）</p> 
+<h3><strong>网卡中断处理函数</strong></h3> 
+<p>产生中断的每个设备都有一个相应的中断处理程序，是设备驱动程序的一部分。每个网卡都有一个中断处理程序，用于通知网卡该中断已经被接收了，以及把网卡缓冲区的数据包拷贝到内存中。</p> 
+<p>当网卡接收来自网络的数据包时，需要通知内核数据包到了。网卡立即发出中断。内核通过执行网卡已注册的中断处理函数来做出应答。中断处理程序开始执行，通知硬件，拷贝最新的网络数据包到内存，然后读取网卡更多的数据包。</p> 
+<p>这些都是重要、紧迫而又与硬件相关的工作。内核通常需要快速的拷贝网络数据包到系统内存，因为网卡上接收网络数据包的缓存大小固定，而且相比系统内存也要小得多。所以上述拷贝动作一旦被延迟，必然造成网卡 FIFO 缓存溢出 - 进入的数据包占满了网卡的缓存，后续的包只能被丢弃，这也应该就是 ifconfig 里的 overrun 的来源。</p> 
+<p>当网络数据包被拷贝到系统内存后，中断的任务算是完成了，这时它把控制权交还给被系统中断前运行的程序。</p> 
+<h3><strong>缓冲区访问</strong></h3> 
+<p>网卡的内核缓冲区，是在 PC 内存中，由内核控制，而网卡会有 FIFO 缓冲区，或者 ring buffer，这应该将两者区分开。FIFO 比较小，里面有数据便会尽量将数据存在内核缓冲中。</p> 
+<p>网卡中的缓冲区既不属于内核空间，也不属于用户空间。它属于硬件缓冲，允许网卡与操作系统之间有个缓冲；</p> 
+<p>内核缓冲区在内核空间，在内存中，用于内核程序，做为读自或写往硬件的数据缓冲区；</p> 
+<p>用户缓冲区在用户空间，在内存中，用于用户程序，做为读自或写往硬件的数据缓冲区；</p> 
+<p>另外，为了加快数据的交互，可以将内核缓冲区映射到用户空间，这样，内核程序和用户程序就可以同时访问这一区间了。</p> 
+<p>对于有 ring buffer 的网卡，ring buffer 是由驱动与网卡共享的，所以内核可以直接访问 ring buffer，一般拷贝 frames 的副本到自己的内核空间进行处理（deliver 到上层协议，之后的一个个 skb 就是按 skb 的指针传递方式传递，直到用户获得数据，所以，对于 ring buffer 网卡，大量拷贝发生在 frame 从 ring buffer 传递到内核控制的计算机内存里）。</p> 
+<h2><strong>4. 丢包排查思路</strong></h2> 
+<p>网卡工作在数据链路层，数据量链路层，会做一些校验，封装成帧。我们可以查看校验是否出错，确定传输是否存在问题。然后从软件层面，是否因为缓冲区太小丢包。</p> 
+<h3><strong>先查看硬件情况</strong></h3> 
+<p>一台机器经常收到丢包的报警，先看看最底层的有没有问题:</p> 
+<ol><li>查看工作模式是否正常</li></ol>
+<pre><code>[root@localhost ~]# ethtool eth0 | egrep 'Speed|Duplex'
+Speed: 1000Mb/s
+Duplex: Full
+</code></pre> 
+<ol><li>查看检验是否正常</li></ol>
+<pre><code>[root@localhost ~]# ethtool -S eth0 | grep crc
+rx_crc_errors: 0
+</code></pre> 
+<p>Speed，Duplex，CRC 之类的都没问题，基本可以排除物理层面的干扰。</p> 
+<h3><strong>overruns 和 buffer size</strong></h3> 
+<pre><code>for i in `seq 1 100`; do ifconfig eth2 | grep RX | grep overruns; sleep 1; done
+
+RX packets:346547657 errors:0 dropped:0 overruns:35345 frame:0
+
+-g   –show-ringQueries the specified ethernet device for rx/tx ring parameter information.
+-G   –set-ringChanges the rx/tx ring parameters of the specified ethernet device.
+
+ethtool -g eth0
+
+[root@localhost ~]
+Ring parameters for eth0:
+Pre-set maximums:
+RX: 4096
+RX Mini: 0
+RX Jumbo: 0
+TX: 4096
+Current hardware settings:
+RX: 256
+RX Mini: 0
+RX Jumbo: 0
+TX: 256
+
+ethtool -G eth0 rx 2048
+ethtool -G eth0 tx 2048
+
+[root@localhost ~]
+[root@localhost ~]
+[root@localhost ~]
+Ring parameters for eth0:
+Pre-set maximums:
+RX: 4096
+RX Mini: 0
+RX Jumbo: 0
+TX: 4096
+Current hardware settings:
+RX: 2048
+RX Mini: 0
+RX Jumbo: 0
+TX: 2048
+</code></pre> 
+<h3><strong>Red Hat 官方解决思路</strong></h3> 
+<blockquote>
+ Issue
+</blockquote> 
+<p>Why rx_crc_errors incrementing in the receive counter of ethtool -S output?</p> 
+<pre><code>$ ethtool -S &lt;Interface_name&gt; | grep -i error
+     rx_error_bytes: 0
+     tx_error_bytes: 0
+     tx_mac_errors: 0
+     tx_carrier_errors: 0
+     rx_crc_errors: 9244
+     rx_align_errors: 0
+</code></pre> 
+<blockquote>
+ Resolution
+</blockquote> 
+<ol>
+<li>Change the cable.</li>
+<li>Check switch configuration.</li>
+<li>Change the network interface card.</li>
+</ol>
+<blockquote>
+ Root Cause
+</blockquote> 
+<ol>
+<li>Most of the time incrementing the value of rx_crc_errors means the problem is in Layer-1 of the networking model.</li>
+<li>When a packet is received at the interface, it goes through a data integrity check which is called cyclic redundancy check. If the packet fails in that check, it is marked as rx_crc_errors.</li>
+<li>The switch was forcing the NIC to operate in half-duplex mode. Fixing the switch to tell the NIC to operate in full-duplex mode have resolved the issue.</li>
+</ol>
+<blockquote>
+ Diagnostic Steps
+</blockquote> 
+<p>Check ethtool -S output and find where are the drops and errors.</p> 
+<pre><code>$ ethtool -S &lt;Interface_name&gt; | grep -i error
+     rx_error_bytes: 0
+     tx_error_bytes: 0
+     tx_mac_errors: 0
+     tx_carrier_errors: 0
+     rx_crc_errors: 9244  &gt;&gt;&gt;&gt;&gt;&gt;
+     rx_align_errors: 0
+</code></pre> 
+<p>Check the numbers corresponding to rx_crc_errors.</p> 
+<pre><code>ethtool p1p1
+
+Settings for p1p1:
+ Supported ports: [ FIBRE ]
+ Supported link modes:   10000baseT/Full
+ Supported pause frame use: Symmetric
+ Supports auto-negotiation: No
+ Supported FEC modes: Not reported
+ Advertised link modes:  10000baseT/Full
+ Advertised pause frame use: Symmetric
+ Advertised auto-negotiation: No
+ Advertised FEC modes: Not reported
+ Speed: 10000Mb/s
+ Duplex: Full
+ Port: FIBRE
+ PHYAD: 0
+ Transceiver: internal
+ Auto-negotiation: off
+ Supports Wake-on: d
+ Wake-on: d
+ Current message level: 0x00000007 (7)
+          drv probe link
+ Link detected: yes
+</code></pre> 
+<p>显示了 p1p1 的接口类型，连接模式，速率等等信息，以及当前是否连接了网线（如果是网线 Supported ports 就是 TP，如果是光纤则显示 Fiber），这里例举下 3 个重要关键词:</p> 
+<blockquote>
+ Supported ports: [FIBRE]
+ <br> Speed: 10000Mb/s
+ <br> Link detected: yes
+</blockquote> 
+<pre><code>ethtool -S p1p1 | grep -i error
+     rx_errors: 0
+     tx_errors: 0
+     rx_over_errors: 0
+     rx_crc_errors: 0
+     rx_frame_errors: 0
+     rx_fifo_errors: 0
+     rx_missed_errors: 0
+     tx_aborted_errors: 0
+     tx_carrier_errors: 0
+     tx_fifo_errors: 0
+     tx_heartbeat_errors: 0
+     rx_length_errors: 0
+     rx_long_length_errors: 0
+     rx_short_length_errors: 0
+     rx_csum_offload_errors: 0
+
+ethtool -p &lt;Interface_name&gt;
+ethtool -p eth0
+
+ethtool -i p1p1
+
+driver: ixgbe
+version: 5.1.0-k-rh7.6
+firmware-version: 0x80000960, 18.3.6
+expansion-rom-version:
+bus-info: 0000:04:00.0
+supports-statistics: yes
+supports-test: yes
+supports-eeprom-access: yes
+supports-register-dump: yes
+supports-priv-flags: yes
+
+ethtool -s eth0 speed 100</code></pre> 
+<p></p> 
+<p style="text-align:center"><img alt="" src="https://images2.imgbox.com/91/36/brwf1uRx_o.gif"></p> 
+<p> </p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

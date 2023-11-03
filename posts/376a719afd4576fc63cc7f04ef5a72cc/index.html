@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>花费7元训练自己的GPT 2模型 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">花费7元训练自己的GPT 2模型</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>在上一篇博客中，我介绍了用Tensorflow来重现GPT 1的模型和训练的过程。这次我打算用Pytorch来重现GPT 2的模型并从头进行训练。</p> 
+<p>GPT 2的模型相比GPT 1的改进并不多，主要在以下方面：</p> 
+<p>1. GPT 2把layer normalization放在每个decoder block的前面。</p> 
+<p>2. 最终的decoder block之后额外添加了一个layer normalization。</p> 
+<p>3. 残差层的参数初始化根据网络深度进行调节</p> 
+<p>4. 训练集采用了webtext(45GB)，而不是之前采用的bookcorpus(5GB)</p> 
+<p>5. 更深的网络结构，最大的模型拥有15亿的参数，对比GPT 1是1.2亿的参数</p> 
+<p>GPT 2有以下四种不同深度的模型架构，如图：</p> 
+<p style="text-align:center"><img alt="" src="https://images2.imgbox.com/dd/f9/2Bgn42u0_o.png"></p> 
+<p>以下我将用pytorch代码来搭建一个GPT 2的模型，以最小的GPT 2为例，采用bookcorpus的数据，在AutoDL平台的一个40G显存的A100显卡上进行训练，看看效果如何。</p> 
+<h2>模型结构</h2> 
+<p>整个模型的结构和GPT 1是基本一致的。</p> 
+<p>定义一个多头注意力模块，如以下代码：</p> 
+<pre><code class="language-python">class MHA(nn.Module):
+    def __init__(self, d_model, num_heads, attn_pdrop, resid_pdrop):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.attn_pdrop = attn_pdrop
+        self.resid_dropout = nn.Dropout(resid_pdrop)
+        self.ln = nn.Linear(d_model, d_model*3)
+        self.c_proj = nn.Linear(d_model, d_model)
+
+    def forward(self, x):
+        B, T, C = x.size()
+        x_qkv = self.ln(x)
+        q, k, v = x_qkv.split(self.d_model, dim=2)
+        q = q.view(B, T, self.num_heads, C//self.num_heads).transpose(1, 2)
+        k = k.view(B, T, self.num_heads, C//self.num_heads).transpose(1, 2)
+        v = v.view(B, T, self.num_heads, C//self.num_heads).transpose(1, 2)
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.attn_pdrop if self.training else 0, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.c_proj(y)
+        y = self.resid_dropout(y)
+        return y</code></pre> 
+<p>这个模块接收一个输入数据，大小为(batch_size, seq_len, dimension)，然后进行一个线性变换层，把数据映射为(batch_size, seq_len, dimension*3)的维度，这里的dimension*3表示的是qkv这三个值的拼接。接着就把这个数据切分为q,k,v三份，然后每份都把维度调整为(batch_size, seq_len, num_head, dimension/num_head)，num_head表示这个自注意力模块包含多少个head。最后就可以调用scaled_dot_product_attention进行qk的相似度计算，进行缩放之后与v值相乘。Pytorch的这个函数提供了最新的flash attention的实现，可以大幅提升计算性能。最后就是对qkv的结果进行一个线性变换，映射为一个(batch_size, seq_len, dimension)的向量。</p> 
+<p>自注意力模块的输出结果，将通过一个Feed forward层进行计算，代码如下：</p> 
+<pre><code class="language-python">class FeedForward(nn.Module):
+    def __init__(self, d_model, dff, dropout):
+        super().__init__()
+        self.ln1 = nn.Linear(d_model, dff)
+        self.ln2 = nn.Linear(dff, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.layernorm = nn.LayerNorm(d_model)
+        self.gelu = nn.GELU()
+
+    def forward(self, x):
+        x = self.ln1(x)
+        x = self.gelu(x)
+        x = self.ln2(x)
+        x = self.dropout(x)
+        return x</code></pre> 
+<p>代码很简单，就是做了两次线性变换，第一次把维度扩充到dimension*4，第二次把维度恢复为dimension。</p> 
+<p>最后定义一个decoder block模块，把多头注意力模块和feed forward模块组合起来，代码如下：</p> 
+<pre><code class="language-python">class Block(nn.Module):
+    def __init__(self, d_model, num_heads, dff, attn_pdrop, resid_pdrop, dropout):
+        super().__init__()
+        self.layernorm1 = nn.LayerNorm(d_model)
+        self.attn = MHA(d_model, num_heads, attn_pdrop, resid_pdrop)
+        self.layernorm2 = nn.LayerNorm(d_model)
+        self.ff = FeedForward(d_model, dff, dropout)
+
+    def forward(self, x):
+        x = x + self.attn(self.layernorm1(x))
+        x = x + self.ff(self.layernorm2(x))
+        return x</code></pre> 
+<p>有了decoder block之后，GPT 2的模型就是把这些block串起来，例如最小的GPT 2的模型结构是定义了12个decoder block。模型接收的是字符序列经过tokenizer之后的数字，然后把这些数字通过embedding层映射为向量表达，例如对每个token id，映射为784维度的一个向量。为了能在embedding的向量里面反映字符的位置信息，我们需要把字符的位置也做一个embedding，然后两个embedding相加。</p> 
+<p>输入数据经过embedding处理后，通过多个decoder block处理之后，数据的维度为(batch_size, seq_len, dimension), 我们需要通过一个权重维度为(dimension, vocab_size)的线性变换，把数据映射为(batch_size, seq_len, vocab_size)的维度。这里vocab_size表示tokenizer的单词表的长度，例如对于GPT 2所用的tokenizer，有50257个单词。对于输出数据进行softmax计算之后，我们就可以得到每个token的预测概率，从而可以和label数据，即真实的下一个token id进行比较，计算loss值。</p> 
+<p>GPT 2模型的代码如下：</p> 
+<pre><code class="language-python">class GPT2(nn.Module):
+    def __init__(self, vocab_size, d_model, block_size, embed_pdrop, num_heads, dff, attn_pdrop, resid_pdrop, dropout, num_layer):
+        super().__init__()
+        self.token_embed = nn.Embedding(vocab_size, d_model, sparse=False)
+        self.pos_embed = nn.Embedding(block_size, d_model, sparse=False)
+        self.dropout_embed = nn.Dropout(embed_pdrop)
+        #self.blocks = [Block(d_model, num_heads, dff, attn_pdrop, resid_pdrop, dropout) for _ in range(num_layer)]
+        self.blocks = nn.ModuleList([Block(d_model, num_heads, dff, attn_pdrop, resid_pdrop, dropout) for _ in range(num_layer)])
+        self.num_layer = num_layer
+        self.block_size = block_size
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+        self.token_embed.weight = self.lm_head.weight
+        self.layernorm = nn.LayerNorm(d_model)
+
+        self.apply(self._init_weights)
+
+        # apply special scaled init to the residual projections, per GPT-2 paper
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * num_layer))
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, x, targets=None):
+        device = x.device
+        b, t = x.size()
+        pos = torch.arange(0, t, dtype=torch.long, device=device) 
+        x = self.token_embed(x) + self.pos_embed(pos)
+        x = self.dropout_embed(x)
+        for block in self.blocks:
+            x = block(x)
+        x = self.layernorm(x)
+
+        if targets is not None:
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            logits = self.lm_head(x[:, -1, :])
+            loss = None
+
+        return logits, loss
+
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        # start with all of the candidate parameters
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        # filter out those that do not require grad
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() &gt;= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() &lt; 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        print(f"using fused AdamW: {use_fused}")
+
+        return optimizer
+    
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, block_size=512):
+        for _ in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
+            idx_cond = idx if idx.size(1) &lt;= block_size else idx[:, -block_size:]
+            # forward the model to get the logits for the index in the sequence
+            logits, _ = self(idx_cond)
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits / temperature
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits &lt; v[:, [-1]]] = -float('Inf')
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+            # append sampled index to the running sequence and continue
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx</code></pre> 
+<h2>模型训练</h2> 
+<p>定义好模型之后，我们就可以开始训练了。</p> 
+<p>首先我们需要准备训练数据集。GPT 2采用的是webtext，网上的一些公开网页数据来进行训练。在Huggingface上面有对应的一个公开数据集。不过考虑到我们的资源有限，我这次还是采用GPT 1所用的bookcorpus数据集来训练。</p> 
+<p>以下代码是下载huggingface的数据集，并用GPT 2的tokenizer来进行编码：</p> 
+<pre><code class="language-python">from datasets import load_dataset
+from transformers import GPT2Tokenizer
+
+dataset = load_dataset("bookcorpusopen", split="train")
+
+block_size=513
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+
+def tokenize_function(examples):
+    token_ids = [tokenizer(text) for text in examples["text"]]
+    total_length = [len(t["input_ids"]) for t in token_ids]
+    total_length = [(l//(block_size+1))*(block_size+1) for l in total_length]
+    result = []
+    label = []
+ 
+    for i in range(len(total_length)):
+        result.extend([token_ids[i]["input_ids"][j:j+block_size+1] for j in range(0, total_length[i], block_size+1)])
+    return {"token_ids": result}
+ 
+ds_test = ds['train'].select(range(10000))
+ 
+tokenized_datasets = ds_test.map(
+    tokenize_function, batched=True, num_proc=8, remove_columns=["title", "text"], batch_size=100
+)
+ 
+tokenized_datasets.save_to_disk("data/boocorpusopen_10000_512tokens")</code></pre> 
+<p>GPT1采用的bookcorpus有7000多本书，huggingface的bookcorpusopen数据集有14000多本，这里我只采用了10000本书来构建数据集，对于每本书进行tokenizer转化后，每513个token写入为1条记录。这样我们在训练时，每条记录我们采用前1-512个token作为训练，取2-513个token作为label。</p> 
+<p>以下代码将读取我们处理好的数据集，并转化为pytorch的dataloader</p> 
+<pre><code class="language-python">from datasets import load_from_disk
+
+dataset = load_from_disk("data/boocorpusopen_10000_512tokens")
+dataset = dataset.with_format("torch")
+dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)</code></pre> 
+<p>然后我们就可以实例化一个GPT 2的model并开始训练，具体的代码可以见repo <a href="https://github.com/gzroy/gpt2_torch.git" title="https://github.com/gzroy/gpt2_torch.git">https://github.com/gzroy/gpt2_torch.git</a> 里面的train.py文件。</p> 
+<p>如果在本地显卡上训练，对应12层的网络结构需要30多G的显存，我的显卡是2080Ti，只有11G显存，因此只能指定6层decoder。我们可以在autodl上面租用一个40G显存的A100显卡，价格是3.45元每小时，在这个显卡上开启半精度进行训练，大约1个小时可以跑10000个迭代，batch大小为64。我总共训练了2小时，最终在训练集上的Loss值为3.5左右，准确度为35%，花费为7元。</p> 
+<h2>生成文本</h2> 
+<p>最后我们可以基于这个训练了1个小时的GPT 2模型来测试一下，看生成文本的效果如何，如以下代码：</p> 
+<pre><code class="language-python">from transformers import GPT2Tokenizer
+from model import GPT2
+import torch
+from torch.nn import functional as F
+import argparse
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='gpt2 predict')
+    parser.add_argument('--checkpoint_path', type=str, default='checkpoints/')
+    parser.add_argument('--checkpoint_name', type=str, default='')
+    parser.add_argument('--d_model', type=int, default=768)
+    parser.add_argument('--block_size', type=int, default=512)
+    parser.add_argument('--dff', type=int, default=768*4)
+    parser.add_argument('--heads', type=int, default=12)
+    parser.add_argument('--decoder_layers', type=int, default=6)
+    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--input', type=str)
+    parser.add_argument('--generate_len', type=int, default=100)
+    parser.add_argument('--topk', type=int, default=5)
+    args = parser.parse_args()
+
+    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    vocab_size = len(tokenizer.get_vocab())
+    model = GPT2(vocab_size, args.d_model, args.block_size, 0, args.heads, args.dff, 0, 0, 0, args.decoder_layers)
+    model.to(args.device)
+    model = torch.compile(model)
+    checkpoint = torch.load(args.checkpoint_path+args.checkpoint_name)
+    model.load_state_dict(checkpoint['model_state_dict'])
+
+    token_id = tokenizer.encode(args.input)
+    input_data = torch.reshape(torch.tensor(token_id, device=args.device), [1,-1])
+    predicted = model.generate(input_data, args.generate_len, 1.0, args.topk, args.block_size)
+    print("Generated text:n-------------------")
+    print(tokenizer.decode(predicted.cpu().numpy()[0]))</code></pre> 
+<p>运行以下命令，给定一个文本的开头，然后让模型生成200字看看：</p> 
+<pre><code class="language-bash">python predict.py --checkpoint_name model_1.pt --input 'it was saturday night, the street' --generate_len 200 --topk 10</code></pre> 
+<p>生成的文本如下：</p> 
+<pre><code class="language-bash">it was saturday night, the street lights blared and the street lights flickered on. A few more houses were visible.
+
+The front door opened, and a large man stepped in and handed him one. He handed the man the keys and a small smile. It looked familiar, and then a little too familiar. The door was closed.
+
+"Hey! You guys out there?" he said, his eyes wide.
+
+"What are you up to?" the man asked.
+
+"I'm just asking for you out in my office."
+
+The man was about thirty feet away from them.
+
+"I'm in a serious situation, but it's just the way you are."
+
+He looked around at the man, the man looked up and down, and then his eyes met hers. He was a little older than he was, but his eyes were blue with red blood. He looked like a giant. His eyes were blue and red, and his jaw looked like a giant</code></pre> 
+<p>可见生成的文本语法没有问题，内容上也比较连贯，上下文的逻辑也有关联。如果模型继续训练更长时间，相信生成文本的内容会更加好。</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

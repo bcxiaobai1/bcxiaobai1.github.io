@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>腾讯三面：说说Kafka的分区状态机的实现原理？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">腾讯三面：说说Kafka的分区状态机的实现原理？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <h1>
+<a id="PartitionStateMachine_0"></a>PartitionStateMachine分区状态转换实现</h1> 
+<h2>
+<a id="1__1"></a>1 我为何读这源码？</h2> 
+<p>PartitionStateMachine，分区状态机负责管理Kafka分区状态的转换，类似ReplicaStateMachine。</p> 
+<p>很多面试官都爱问Leader选举策略。学完本文，你不但能说出4种Leader选举场景，还能总结出它们的共性。</p> 
+<h2>
+<a id="2__7"></a>2 简介</h2> 
+<p><img src="https://images2.imgbox.com/72/33/xYT7wLu6_o.png" alt=""></p> 
+<ul>
+<li>
+<strong>PartitionStateMachine</strong>：定义如startup、shutdown公共方法及处理分区状态转换入口方法handleStateChanges的签名</li>
+<li>
+<strong>ZkPartitionStateMachine</strong>：PartitionSM目前唯一子类，实现分区状态机的主体逻辑功能。类似ZkReplicaStateMachine，重写了父类的handleStateChanges，和私有的doHandleStateChanges协作完成分区状态转换</li>
+<li>
+<strong>PartitionState接口及其实现对象</strong>：定义4类分区状态及相互流转关系</li>
+<li>
+<strong>PartitionLeaderElectionStrategy接口及其实现对象</strong>：定义4类分区Leader选举策略，发生Leader选举的4种场景</li>
+<li>
+<strong>PartitionLeaderElectionAlgorithms</strong>：分区Leader选举的算法实现。既然定义了4类选举策略，就一定有相应的实现代码，PartitionLeaderElectionAlgorithms就提供了这4类选举策略的实现代码。</li>
+</ul> 
+<h2>
+<a id="3__17"></a>3 类定义与字段</h2> 
+<p>类似ReplicaSM：</p> 
+<p><img src="https://images2.imgbox.com/50/0b/r17tuj4u_o.png" alt=""></p> 
+<p><img src="https://images2.imgbox.com/1d/f5/jwsUWtJG_o.png" alt=""></p> 
+<p>类定义一样！尤其是ZkPartitionSM和ZKReplicaSM，所接收字段列表都一致。所以功能其实也差不多。</p> 
+<p>同理，ZkPartitionSM实例的创建和启动时机也和ZkReplicaSM完全相同：每个Broker进程启动时，会在创建KafkaController对象的过程中，生成ZkPartitionSM实例，而只有Controller组件所在Broker，才会启动分区状态机。</p> 
+<p><img src="https://images2.imgbox.com/1f/d4/5mSFjQ0l_o.png" alt=""></p> 
+<p><strong>每个Broker启动时，都会创建对应分区状态机和副本状态机实例，但只有Controller所在的Broker才会启动它们</strong>。若Controller变更到其他Broker：</p> 
+<ul>
+<li>老Controller所在Broker要调用这些状态机的shutdown方法关闭它们</li>
+<li>新Controller所在的Broker调用状态机的startup方法启动它们</li>
+</ul> 
+<h2>
+<a id="4__36"></a>4 分区状态</h2> 
+<p>PartitionState定义了分区的状态空间及流转规则，以OnlinePartition态为例：</p> 
+<p><img src="https://images2.imgbox.com/b2/18/9nxoxSS0_o.png" alt=""></p> 
+<p><img src="https://images2.imgbox.com/5e/92/fIPKrta6_o.png" alt=""></p> 
+<h3>
+<a id="_44"></a>分区状态枚举</h3> 
+<ul>
+<li>NewPartition：分区被创建后被设置成这个状态，表明是全新的分区对象，Kafka认为是“未初始化”的初生牛犊子，因此不能竞选Leader</li>
+<li>OnlinePartition：分区正式提供服务时所处态</li>
+<li>OfflinePartition：分区下线后所处态</li>
+<li>NonExistentPartition：分区被删除，并且从分区状态机移除后所处态</li>
+</ul> 
+<h3>
+<a id="_51"></a>分区状态转换规则</h3> 
+<p><img src="https://images2.imgbox.com/96/8f/7RQdkvyp_o.png" alt=""></p> 
+<p>OnlinePartition和OfflinePartition都有一根箭头指向自己，表明OnlinePartition切换到OnlinePartition的操作是允许的。<strong>当分区Leader选举发生的时候，就可能出现</strong>。</p> 
+<h2>
+<a id="5_Leader_59"></a>5 分区Leader选举场景</h2> 
+<p>分区Leader选举，PartitionStateMachine的特有功能。每个分区都得选举出Leader，才能正常提供服务。因此，对于分区，Leader副本很重要。所以必须熟悉Leader选举的流程实现。</p> 
+<p>Kafka定义了哪些推选策略，何时执行Leader选举？</p> 
+<h3>
+<a id="51_PartitionLeaderElectionStrategy_65"></a>5.1 PartitionLeaderElectionStrategy</h3> 
+<p>分区Leader选举：为Kafka主题的某个分区推选Leader副本，当前分区Leader选举有如下场景：</p> 
+<p><img src="https://images2.imgbox.com/6a/d0/bqOSrweP_o.png" alt=""></p> 
+<h3>
+<a id="52_PartitionLeaderElectionAlgorithms_71"></a>5.2 PartitionLeaderElectionAlgorithms</h3> 
+<p>针对以上场景，分区状态机的PartitionLeaderElectionAlgorithms定义如下方法分别负责为每种场景选举Leader副本：</p> 
+<ul>
+<li>offlinePartitionLeaderElection；</li>
+<li>reassignPartitionLeaderElection；</li>
+<li>preferredReplicaPartitionLeaderElection；</li>
+<li>controlledShutdownPartitionLeaderElection。</li>
+</ul> 
+<p>其中属offlinePartitionLeaderElection最复杂：</p> 
+<p><img src="https://images2.imgbox.com/cb/4f/NdIydINX_o.png" alt=""></p> 
+<p><img src="https://images2.imgbox.com/d9/ff/Tdbmr4hT_o.png" alt=""></p> 
+<p>该方法接收如下参数：</p> 
+<p><strong>1.assignments</strong></p> 
+<p>分区的副本列表：Assigned Replicas，AR。创建主题后，使用kafka-topics脚本查看主题时，可见Replicas列数据：主题下每个分区的AR。assignments参数类型是Seq[Int]，说明<strong>AR有序，不一定和ISR顺序相同</strong></p> 
+<p><strong>2.isr</strong></p> 
+<p>保存了分区所有与Leader副本保持同步的副本列表。Leader副本自己也在ISR中。作为Seq[Int]类型的变量，isr自身也是有顺序的。</p> 
+<p><strong>3.liveReplicas</strong></p> 
+<p>保存该分区下所有存活状态的副本。</p> 
+<ul><li> <p>怎知副本是否存活？</p> <p>根据Controller元数据缓存中的数据。所有在运行中的Broker上的副本，都认为是活的。</p> </li></ul> 
+<p><strong>4.uncleanLeaderElectionEnabled</strong></p> 
+<p>默认只要不是由AdminClient发起的Leader选举，该参数为false：Kafka不允许执行Unclean Leader选举。</p> 
+<p>Unclean Leader选举：在ISR列表为空时，Kafka选择一个非ISR副本作为新Leader。由于存在丢数据风险，Broker端参数unclean.leader.election.enable默认值为false，禁掉Unclean Leader选举。</p> 
+<p>2.4.0.0版本正式支持在AdminClient端为给定分区选举Leader：若Leader选举由AdminClient触发，默认开启Unclean Leader选举。</p> 
+<h3>
+<a id="53__112"></a>5.3 具体流程</h3> 
+<p>顺序搜索AR列表，将第一个满足如下条件的副本作为新Leader返回：</p> 
+<ul>
+<li>该副本为存活状态，即副本所在Broker依然在运行中</li>
+<li>该副本在ISR列表</li>
+</ul> 
+<p>若找不到这样的副本，检查是否开启Unclean Leader选举：</p> 
+<ul>
+<li>若开启，则降低标准，只要满足上面第一个条件</li>
+<li>若未开启，则本次Leader选举失败，无新Leader被选出</li>
+</ul> 
+<p><img src="https://images2.imgbox.com/af/12/bvQNn6hw_o.png" alt=""></p> 
+<p>其它选举策略几乎相同，都是从AR或给定副本列表中寻找存活状态的ISR副本。</p> 
+<p>所以Kafka为分区选举Leader就是：<strong>AR列表（或给定副本列表）中首个处于存活状态，且在ISR列表的副本</strong>。</p> 
+<h2>
+<a id="6__130"></a>6 分区状态转换</h2> 
+<p>PartitionSM的工作原理。</p> 
+<h3>
+<a id="handleStateChanges_134"></a>handleStateChanges</h3> 
+<p>入口方法签名：</p> 
+<p><img src="https://images2.imgbox.com/3e/a5/gTrSoHXJ_o.png" alt=""></p> 
+<p><img src="https://images2.imgbox.com/b1/18/2jkDQFO0_o.png" alt=""></p> 
+<ol>
+<li> <p>调用doHandleStateChanges执行分区状态转换</p> <p>包含确认哪些Broker属于下一步的相关Broker，给Broker发送哪些请求</p> </li>
+<li> <p>Controller给相关Broker发送请求，告知它们这些分区的状态变更</p> </li>
+</ol> 
+<p>重点还是</p> 
+<h3>
+<a id="doHandleStateChanges_150"></a>doHandleStateChanges</h3> 
+<p><img src="https://images2.imgbox.com/be/56/3G73E0Gq_o.png" alt=""></p> 
+<ul>
+<li>首先状态初始化，即在方法调用时，不在【元数据缓存】中的所有分区的状态被初始化为NonExistentPartition</li>
+<li>然后，检查哪些分区执行的状态转换非法&amp;&amp;记录错误日志</li>
+<li>据合法状态转换的分区列表，进入case分支。分区状态只有4个，其case分支代码远比ReplicaSM的简单，且只有OnlinePartition分支较复杂，其余3路仅是将分区状态置成目标状态</li>
+</ul> 
+<p>重点看OnlinePartition分支：</p> 
+<p><img src="https://images2.imgbox.com/81/f4/O4ikRs11_o.png" alt=""></p> 
+<ol><li> <p>初始化NewPartition态的分区，即在zk中，创建并写入分区节点数据。</p> <p>节点位置：<code>/brokers/topics/&lt;topic&gt;/partitions/&lt;partition&gt;</code>，每个节点都要包含分区的Leader和ISR。</p> <p>Leader和ISR的确定规则：</p> 
+  <ul>
+<li>选择存活副本列表的第一个副本作为Leader</li>
+<li>选择存活副本列表作为ISR</li>
+</ul> <p>详见initializeLeaderAndIsrForPartitions：</p> </li></ol> 
+<p><img src="https://images2.imgbox.com/08/a4/3Xn7Ed7X_o.png" alt=""></p> 
+<ol start="2"><li>为具备Leader选举资格的分区推选Leader，调用electLeaderForPartitions实现：不断尝试为多个分区选举Leader，直到所有分区都成功选出Leader。</li></ol> 
+<p>选举Leader的核心代码：</p> 
+<h4>
+<a id="doElectLeaderForPartitions_179"></a>doElectLeaderForPartitions</h4> 
+<p><img src="https://images2.imgbox.com/5e/50/SdF3sfoP_o.png" alt="img"></p> 
+<p>大体分为如下步骤：</p> 
+<ol><li>从zk获取给定分区的Leader、ISR信息，将结果封装进validLeaderAndIsrs：</li></ol> 
+<p><img src="https://images2.imgbox.com/cf/22/yfpdGoZm_o.png" alt=""></p> 
+<ol start="2"><li> <p>开始选举Leader，并根据有无Leader将分区进行分区</p> <p><img src="https://images2.imgbox.com/50/a5/TrAqx0Ts_o.png" alt=""></p> </li></ol> 
+<p>根据给定的PartitionLeaderElectionStrategy，调用PartitionLeaderElectionAlgorithms的不同方法执行Leader选举，同时，区分出成功选举Leader和未选出Leader的分区。</p> 
+<p>4种不同策略定义了4个专属方法执行Leader选举。选择Leader的规则：副本集合中首个存活&amp;&amp;处于ISR中的副本。</p> 
+<ol start="3"><li> <p>更新zk节点数据及Controller端元数据缓存信息：</p> <p><img src="https://images2.imgbox.com/73/88/YmM7sHnM_o.png" alt=""></p> </li></ol> 
+<p>联想到handleStateChanges的step2是Controller给相关的Broker发送请求：</p> 
+<p><img src="https://images2.imgbox.com/5f/00/IlOAHgLQ_o.png" alt=""></p> 
+<h2>
+<a id="7__205"></a>7 总结</h2> 
+<p>本文深入研究了Kafka分区状态机的构造原理和工作机制。</p> 
+<p>Kafka目前提供4种Leader选举策略：</p> 
+<ul>
+<li>分区下线后的Leader选举</li>
+<li>分区执行副本重分配时的Leader选举</li>
+<li>分区执行Preferred副本Leader选举</li>
+<li>Broker下线时的分区Leader选举</li>
+</ul> 
+<p>这4类选举策略在选择Leader上，几乎都是选择当前副本有序集合中的、首个处于ISR集合中的存活副本作为新Leader。</p> 
+<p>PartitionSM是Kafka Controller端定义的分区状态机，负责定义、维护和管理合法的分区状态转换。每个Broker启动时都会实例化一个分区状态机对象，但只有Controller所在的Broker才会启动它。</p> 
+<p>Kafka分区有4类状态：</p> 
+<ul>
+<li> <p>NewPartition</p> <p>未初始化状态，处于该状态下的分区尚不具备选举Leader的资格</p> </li>
+<li> <p>OnlinePartition</p> <p>分区正常工作时的状态</p> </li>
+<li> <p>OfflinePartition</p> </li>
+<li> <p>NonExistentPartition</p> </li>
+</ul> 
+<p>Leader选举有4类场景：</p> 
+<ul>
+<li> <p>Offline</p> </li>
+<li> <p>Reassign</p> </li>
+<li> <p>Preferrer Leader Election</p> </li>
+<li> <p>ControlledShutdown</p> </li>
+</ul> 
+<p>每类场景都对应于一种特定的Leader选举策略。handleStateChanges是入口方法，内部调用doHandleStateChanges执行实际Leader选举功能</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

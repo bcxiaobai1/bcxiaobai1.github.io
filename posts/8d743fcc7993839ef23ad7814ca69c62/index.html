@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>跑了4个实验，实战讲解 MySQL的行锁、间隙锁...​ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">跑了4个实验，实战讲解 MySQL的行锁、间隙锁...​</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <blockquote> 
+ <p>微信搜索 【微观技术】，关注这个不喜欢内卷的程序员。<br><br> 精彩文章汇总 GitHub https://github.com/aalansehaiyang/technology-talk ，Star 12K ，汇总java生态圈常用技术框架、开源中间件，系统架构、数据库、大公司架构案例、常用三方类库、项目管理、线上问题排查、个人成长、思考等知识</p> 
+</blockquote> 
+<p>大家好，我是Tom哥~</p> 
+<p>今天跟大家聊一聊MySQL的事务隔离，并通过一些实验做了些总结。光说不练，假把式，没有经过实践就没有话语权。</p> 
+<p><img src="https://images2.imgbox.com/36/9e/Dby2iajY_o.png" alt="图片"><br> 我们都知道数据库有四种隔离级别，分别是：</p> 
+<ul>
+<li> <p>读未提交（READ UNCOMMITTED）</p> </li>
+<li> <p>读已提交 （READ COMMITTED）</p> </li>
+<li> <p>可重复读 （REPEATABLE READ）</p> </li>
+<li> <p>串行化 （SERIALIZABLE）</p> </li>
+</ul> 
+<p><img src="https://images2.imgbox.com/23/b4/TspAwaBn_o.png" alt="图片"></p> 
+<p><strong>实验前的准备工作</strong></p> 
+<p><strong>1、基础环境</strong></p> 
+<ul><li>当前的数据库版本</li></ul> 
+<pre><code>mysql&gt; select version();
++-----------+
+| version() |
++-----------+
+| 8.0.27    |
++-----------+
+1 row in set (0.00 sec)
+
+</code></pre> 
+<ul><li>当前的事务隔离级别</li></ul> 
+<pre><code>mysql&gt; show variables like 'transaction_isolation';
++-----------------------+-----------------+
+| Variable_name         | Value           |
++-----------------------+-----------------+
+| transaction_isolation | REPEATABLE-READ |
++-----------------------+-----------------+
+1 row in set (0.00 sec)
+
+</code></pre> 
+<p><strong>2、创建个人收支表，并对 <code>income</code> 字段创建索引，<code>expend</code>字段没有索引</strong></p> 
+<pre><code>CREATE TABLE `person` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  `income` bigint(20) NOT NULL COMMENT '收入',
+  `expend` bigint(20) NOT NULL COMMENT '支出',
+  PRIMARY KEY (`id`),
+  KEY `idx_income` (`income`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8 COMMENT='个人收支表';
+
+</code></pre> 
+<p><strong>3、初始化表数据，插入5条记录</strong></p> 
+<pre><code>insert into person values(100,1000,1000);
+insert into person values(200,2000,2000);
+insert into person values(300,3000,3000);
+insert into person values(400,4000,4000);
+insert into person values(500,5000,5000);
+</code></pre> 
+<blockquote> 
+ <p>整理了一份大厂常考面试题，这份pdf包括 Java基础、Java并发、JVM、MySQL、Redis、Spring、MyBatis、Kafka、设计模式等面试题，分享给大家。<br> 下载地址：百度云链接：https://pan.baidu.com/s/1XHT4ppXTp430MEMW2D0-Bg 提取码: s3ab</p> 
+</blockquote> 
+<h3><a id="_81"></a></h3> 
+<h3>
+<a id="AB_83"></a><strong>实验一：（事务A、B的条件字段没有索引）</strong>
+</h3> 
+<p><img src="https://images2.imgbox.com/cc/08/KZ6mEoUL_o.png" alt="图片"></p> 
+<p><strong>实验过程：</strong></p> 
+<p>为了便于描述，我们定义时间轴坐标，用T1、T2、T3… 表示当前时刻。</p> 
+<p>T1：</p> 
+<p>事务A开启事务，并执行 select * from person where expend=4000 for update;</p> 
+<p>由于 <code>expend</code> 字段没有索引，需要扫描全表。此时加的锁是所有记录的行锁和它们之间的间隙锁，也称为 next-key lock，前开后闭区间。分别是 (-∞,100]、(100,200]、(200,300]、(300,400]、(400，500]、(500, +supremum]</p> 
+<p>T2：</p> 
+<p>事务B开启事务，执行插入语句 insert into person values(401,4001,4001); <code>此时一直被阻塞住，因为并没有获得锁</code>。</p> 
+<p>面的这种情况，有两种选择：一种等到事务A结束（提交或回滚）；另一种等事务锁超时。</p> 
+<p><strong>接着这个话题，我们稍微扩展介绍下锁超时：</strong></p> 
+<p>MySQL数据库采用InnoDB模式，默认参数：<code>innodb_lock_wait_timeout</code>设置锁等待的时间是50s，一旦数据库锁超过这个时间就会报错。</p> 
+<pre><code>ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
+
+</code></pre> 
+<p>当然，我们也可以通过命令来查看、修改这个超时时间</p> 
+<pre><code># 查看超时时间
+SHOW GLOBAL VARIABLES LIKE 'innodb_lock_wait_timeout';
+
+# 修改时间
+SET GLOBAL innodb_lock_wait_timeout=120;
+
+</code></pre> 
+<p>T3：</p> 
+<p>事务A ，执行 commit 操作， 提交事务</p> 
+<p>T4：</p> 
+<p>事务B，插入一条记录，insert into person values(401,4001,4001); 操作成功。</p> 
+<p>此时 select * from person; 可以看到新插入的记录</p> 
+<h3>
+<a id="AB_135"></a><strong>实验二：（事务A、B的条件字段有创建索引）</strong>
+</h3> 
+<p><img src="https://images2.imgbox.com/2c/fb/4lF5Fawb_o.png" alt="图片"></p> 
+<p><img src="https://images2.imgbox.com/47/d1/tv7L1iNh_o.png" alt="图片"></p> 
+<p>T1：</p> 
+<p>事务A，开启事务，并执行 select * from person where income=3000 for update，命中记录且 income 有索引，此时的加锁区间是 income=3000 的行记录以及与下一个值4000之间的空隙（行锁+间隙锁），也就是[3000，4000]</p> 
+<p>T2：</p> 
+<p>事务B，开始事务，执行 insert into person values(301,3001,3001); 没有抢到锁，线程被阻塞住，直到事务A提交事务并释放锁。</p> 
+<h3>
+<a id="_149"></a><strong>实验三：（自动识别死锁）</strong>
+</h3> 
+<p><img src="https://images2.imgbox.com/d4/7e/DHpwvFWw_o.png" alt="图片"></p> 
+<p><img src="https://images2.imgbox.com/44/d5/xuUKp9XR_o.png" alt="图片"></p> 
+<p>特别说明：</p> 
+<p>T3：事务A执行insert操作，被事务B的锁拦截住了</p> 
+<p>T4：同理，事务B执行insert操作，被事务A拦截了，这里被系统自动检测到，抛出 ERROR 1213 (40001): Deadlock found when trying to get lock; try restarting transaction 。将事务B持有的锁释放掉，并重启事务。</p> 
+<p>T5：事务A在T3时刻的insert可以继续操作</p> 
+<h3>
+<a id="_163"></a><strong>实验四：（更新记录锁保护）</strong>
+</h3> 
+<p><img src="https://images2.imgbox.com/3d/ae/Nt49Rqrx_o.png" alt="图片"></p> 
+<p>1、事务A在执行后 update person set income=111 where income=3000; 开启了锁保护</p> 
+<p>2、这时，事务B再执行 insert into person values(307,3000,3000) 或者 update person set income=3000 where id=100，都会重新去抢夺锁，从而保证安全。</p> 
+<h3>
+<a id="_171"></a><strong>知识小结</strong>
+</h3> 
+<p>1、对于事务，binlog 日志是在 <code>commit</code> 提交时才生成的</p> 
+<p>2、行锁与间隙锁有很大区别。</p> 
+<ul>
+<li> <p>行锁：如果事务A对 <code>id=1</code> 添加行锁，事务B则无法对 <code>id=1</code> 添加行锁</p> </li>
+<li> <p>间隙锁：如果 <code>select .. from 表名 where d=6 for updata</code>，事务A 和 事务 B 都可以对（5，12）添加间隙锁。间隙锁是开区间。</p> </li>
+</ul> 
+<p>3、行锁和间隙锁合称 next-key lock，每个 next-key lock 是前开后闭区间。</p> 
+<p>4、<strong>只有在可重复读的隔离级别下，才会有间隙锁</strong></p> 
+<p>5、读提交级别没有间隙锁，只有行锁，但是如何保证一个间隙操作产生的 binlog 对主从数据同步产生的影响呢？我们需要把 binlog 的格式设置为 row。</p> 
+<p>其本质就是将模糊操作改成了针对具体的主键id行操作</p> 
+<pre><code># 初始语句
+delete from order where c = 10
+
+# 转换后语句
+delete from order where id = 10
+
+</code></pre> 
+<p>6、大部分公司的数据库的隔离级别都是<strong>读提交隔离级别加 binlog_format=row 的组合</strong></p> 
+<p>7、 大多数数据库的默认级别就是读提交（Read committed），比如Sql Server 、 Oracle。MySQL的默认级别是 可重复读（Repeatable Read ）</p> 
+<hr> 
+<p>关于我：Tom哥，前阿里P7技术专家，出过专利，多年大厂实战经验。欢迎关注，我会持续输出更多经典原创文章，为你大厂助力。</p> 
+<p>欢迎小伙伴找Tom哥唠嗑聊天， 技术交流，围观朋友圈，人生打怪不再寂寞。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

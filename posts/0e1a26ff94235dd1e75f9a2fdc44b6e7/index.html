@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>深入剖析多层双向LSTM的输入输出 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深入剖析多层双向LSTM的输入输出</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <p></p>
+<div class="toc">
+ <h3>目录</h3>
+ <ul>
+<li><a href="#_4">一、前言</a></li>
+<li><a href="#_11">二、符号约定</a></li>
+<li><a href="#LSTM_21">三、LSTM的参数</a></li>
+<li><a href="#LSTM_38">四、LSTM的输入</a></li>
+<li><a href="#LSTM_52">五、LSTM的输出</a></li>
+<li><a href="#_107">最后</a></li>
+</ul>
+</div>
+<p></p> 
+<h1>
+<a id="_4"></a>一、前言</h1> 
+<p>本文将结合<a href="https://pytorch.org/docs/stable/generated/torch.nn.LSTM.html#torch.nn.LSTM">官方文档</a>并以seq2seq模型为例全面展示在<strong>多层</strong>（<code>num_layers &gt;= 2</code>）<strong>双向</strong>（<code>bidirectional = True</code>）LSTM中输入输出的形状变化以及如何正确使用它们。</p> 
+<p><strong>以下均假定 <code>batch_first = False</code>，即默认值。</strong></p> 
+<h1>
+<a id="_11"></a>二、符号约定</h1> 
+<table>
+<thead><tr>
+<th align="center">符号</th>
+<th align="center">描述</th>
+</tr></thead>
+<tbody>
+<tr>
+<td align="center"><span class="katex--inline"><span class="katex"><span class="katex-mathml">
+       
+        
+         
+          
+           L
+          
+         
+         
+          L
+         
+        
+       </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal">L</span></span></span></span></span></td>
+<td align="center">序列长度（时间步数）</td>
+</tr>
+<tr>
+<td align="center"><span class="katex--inline"><span class="katex"><span class="katex-mathml">
+       
+        
+         
+          
+           N
+          
+         
+         
+          N
+         
+        
+       </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span></span></span></span></span></td>
+<td align="center">即 <code>batch_size</code>
+</td>
+</tr>
+<tr>
+<td align="center"><span class="katex--inline"><span class="katex"><span class="katex-mathml">
+       
+        
+         
+          
+           d
+          
+         
+         
+          d
+         
+        
+       </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em"></span><span class="mord mathnormal">d</span></span></span></span></span></td>
+<td align="center">词向量的维度，即 <code>embed_size</code>
+</td>
+</tr>
+<tr>
+<td align="center"><span class="katex--inline"><span class="katex"><span class="katex-mathml">
+       
+        
+         
+          
+           h
+          
+         
+         
+          h
+         
+        
+       </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em"></span><span class="mord mathnormal">h</span></span></span></span></span></td>
+<td align="center">LSTM隐藏层神经元的个数</td>
+</tr>
+<tr>
+<td align="center"><span class="katex--inline"><span class="katex"><span class="katex-mathml">
+       
+        
+         
+          
+           n
+          
+         
+         
+          n
+         
+        
+       </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em"></span><span class="mord mathnormal">n</span></span></span></span></span></td>
+<td align="center">即 <code>num_layers</code>
+</td>
+</tr>
+</tbody>
+</table>
+<h1>
+<a id="LSTM_21"></a>三、LSTM的参数</h1> 
+<p>LSTM<strong>最常用</strong>的参数列在下方：</p> 
+<pre><code class="prism language-python">nn<span class="token punctuation">.</span>LSTM<span class="token punctuation">(</span>
+	input_size<span class="token punctuation">,</span>
+	hidden_size<span class="token punctuation">,</span>
+	num_layers<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span>
+	dropout<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">,</span>
+	bidirectional<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span>
+<span class="token punctuation">)</span>
+</code></pre> 
+<p>除了前两个参数为<strong>必需参数</strong>以外，后面三个都是<strong>可选参数</strong>。其中 <code>input_size</code> 是输入层神经元的个数，<code>hidden_size</code> 是隐藏层神经元的个数。</p> 
+<p>需要注意的是，对于有 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        n
+       
+      
+      
+       n
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em"></span><span class="mord mathnormal">n</span></span></span></span></span> 个层的LSTM来说，除了第一个层的 <code>input_size</code> 和 <code>hidden_size</code> 可能不同以外，后面 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        n
+       
+       
+        −
+       
+       
+        1
+       
+      
+      
+       n-1
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6667em;vertical-align: -0.0833em"></span><span class="mord mathnormal">n</span><span class="mspace" style="margin-right: 0.2222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em"></span></span><span class="base"><span class="strut" style="height: 0.6444em"></span><span class="mord">1</span></span></span></span></span> 个层的 <code>input_size</code> 和 <code>hidden_size</code> 都相同，均为第一个层的 <code>hidden_size</code>。</p> 
+<h1>
+<a id="LSTM_38"></a>四、LSTM的输入</h1> 
+<p>LSTM的输入共有三个：<code>input</code>、<code>h_0</code> 和 <code>c_0</code>。为便于理解，我们先来回顾一下seq2seq编码器的工作流程。</p> 
+<p>在seq2seq模型中，<strong>假设我们的编码器采用的就是多层双向的LSTM</strong>。对于NMT任务，一般来讲，我们需要根据语料库构建一个词表，该词表不重复地包含了语料库中的所有词元（一般是单词），并根据每个词元的出现频率为其分配唯一的索引（特殊词元一般位于词表的最上方，剩余的词元出现频率越高，索引越小，出现频率过低的词元会被丢弃并视为未知词元）。之后，我们会选定一个序列长度 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        L
+       
+      
+      
+       L
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal">L</span></span></span></span></span>，并对语料库中的每个句子进行填充或截断（否则无法批量加载）。</p> 
+<p>在批量读取数据时，数据形状通常为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        L
+       
+       
+        )
+       
+      
+      
+       (N,L)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">L</span><span class="mclose">)</span></span></span></span></span>（即每次读取 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        N
+       
+      
+      
+       N
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span></span></span></span></span> 个句子，每个句子的长度为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        L
+       
+      
+      
+       L
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal">L</span></span></span></span></span>），并且其中的每个元素都是原先词元在词表中的<strong>索引</strong>。将这批数据丢进embedding层后其形状变为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        L
+       
+       
+        ,
+       
+       
+        d
+       
+       
+        )
+       
+      
+      
+       (N,L,d)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">L</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">d</span><span class="mclose">)</span></span></span></span></span>（本质是一个根据索引查表的过程）。为了符合 <code>batch_first = False</code>，我们需要用 <code>permute</code> 方法将 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        L
+       
+       
+        ,
+       
+       
+        d
+       
+       
+        )
+       
+      
+      
+       (N,L,d)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">L</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">d</span><span class="mclose">)</span></span></span></span></span> 变为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        L
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        d
+       
+       
+        )
+       
+      
+      
+       (L,N,d)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal">L</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">d</span><span class="mclose">)</span></span></span></span></span>，而这个 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        L
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        d
+       
+       
+        )
+       
+      
+      
+       (L,N,d)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal">L</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">d</span><span class="mclose">)</span></span></span></span></span> 形状的张量正是LSTM的 <code>input</code>。所以<strong>对于编码器而言</strong>，<code>nn.LSTM</code> 的 <code>input_size</code> 就是 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        d
+       
+      
+      
+       d
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em"></span><span class="mord mathnormal">d</span></span></span></span></span>。</p> 
+<p>因为通常来讲 <code>c_0</code> 的形状和 <code>h_0</code> 的一样，所以接下来我们只介绍 <code>h_0</code>（后续的 <code>h_n</code> 和 <code>c_n</code> 同理）。</p> 
+<p>顾名思义，<code>h_0</code> 就是LSTM的初始隐状态。对于 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        n
+       
+      
+      
+       n
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em"></span><span class="mord mathnormal">n</span></span></span></span></span> 层单向LSTM，我们需要为每一个层都提供初始的隐状态，那么此时 <code>h_0</code> 的形状为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        n
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        h
+       
+       
+        )
+       
+      
+      
+       (n,N,h)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal">n</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">h</span><span class="mclose">)</span></span></span></span></span>。对于双向的情形，我们自然需要<strong>两个</strong>形状为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        n
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        h
+       
+       
+        )
+       
+      
+      
+       (n,N,h)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal">n</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">h</span><span class="mclose">)</span></span></span></span></span> 的张量，PyTorch的做法是将这两个张量concat在一起成为一个 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        2
+       
+       
+        n
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        h
+       
+       
+        )
+       
+      
+      
+       (2n,N,h)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord">2</span><span class="mord mathnormal">n</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">h</span><span class="mclose">)</span></span></span></span></span> 的张量作为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        n
+       
+      
+      
+       n
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em"></span><span class="mord mathnormal">n</span></span></span></span></span> 层双向LSTM的初始隐状态（至于怎么concat后面会提到）。</p> 
+<blockquote> 
+ <p><strong>? LSTM的输入如果只提供 <code>input</code>，那么 <code>h_0</code> 和 <code>c_0</code> 将进行零初始化。此外，<code>h_0</code> 和 <code>c_0</code> 要么同时提供，要么同时不提供，不可以只提供一个而不提供另一个，否则会报错。</strong></p> 
+</blockquote> 
+<h1>
+<a id="LSTM_52"></a>五、LSTM的输出</h1> 
+<p>LSTM的输出为 <code>output</code>、<code>h_n</code> 和 <code>c_n</code>。</p> 
+<p>其中 <code>output</code> 的形状为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        L
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        2
+       
+       
+        h
+       
+       
+        )
+       
+      
+      
+       (L,N,2h)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal">L</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord">2</span><span class="mord mathnormal">h</span><span class="mclose">)</span></span></span></span></span>，这是因为PyTorch将正向LSTM和反向LSTM的输出<strong>直接concat</strong>在了一起。如果需要分别获得正向和反向的输出结果，我们需要将 <code>output</code> 的形状 <code>reshape</code> 成 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        L
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        2
+       
+       
+        ,
+       
+       
+        h
+       
+       
+        )
+       
+      
+      
+       (L,N,2,h)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal">L</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord">2</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">h</span><span class="mclose">)</span></span></span></span></span>，这样一来，<code>output[:, :, 0, :]</code> 代表的是正向LSTM的输出结果，<code>output[:, :, 1, :]</code> 代表的是反向LSTM的输出结果，形状均为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        L
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        h
+       
+       
+        )
+       
+      
+      
+       (L,N,h)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal">L</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">h</span><span class="mclose">)</span></span></span></span></span>。</p> 
+<p><code>h_n</code> 的形状和 <code>h_0</code> 的相同（事实上每一个 <code>h_t</code> 的形状都相同），均为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        2
+       
+       
+        n
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        h
+       
+       
+        )
+       
+      
+      
+       (2n, N,h)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord">2</span><span class="mord mathnormal">n</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">h</span><span class="mclose">)</span></span></span></span></span>，这是因为PyTorch将正向LSTM和反向LSTM的 <code>h_n</code> <strong>交替concat</strong>在了一起。如果需要分别获得正向和反向的 <code>h_n</code>，我们不能再像之前那样做 <code>reshape</code> 操作了，而是按步长为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        2
+       
+      
+      
+       2
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6444em"></span><span class="mord">2</span></span></span></span></span> 去索引，即 <code>h_n[::2]</code> 代表的是正向LSTM的 <code>h_n</code>，<code>h_n[1::2]</code> 代表的是反向LSTM的 <code>h_n</code>，形状均为 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        (
+       
+       
+        n
+       
+       
+        ,
+       
+       
+        N
+       
+       
+        ,
+       
+       
+        h
+       
+       
+        )
+       
+      
+      
+       (n,N,h)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord mathnormal">n</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal" style="margin-right: 0.109em">N</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord mathnormal">h</span><span class="mclose">)</span></span></span></span></span>。</p> 
+<p>需要注意的是，无论是正向LSTM还是反向LSTM，其 <code>output</code> 均指的是 <strong><span class="katex--inline"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         L
+        
+       
+       
+        L
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal">L</span></span></span></span></span> 个时间步</strong>上<strong>最后一个隐藏层</strong>的输出，而 <code>h_n</code> 指的是<strong>最后一个时间步</strong>上 <strong><span class="katex--inline"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         n
+        
+       
+       
+        n
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em"></span><span class="mord mathnormal">n</span></span></span></span></span> 个隐藏层</strong>的输出。下图直观地展示了 <code>output</code> 和 <code>h_n</code> 的区别（<strong>以单向的LSTM为例</strong>）：</p> 
+<div align="center"> 
+ <img src="https://images2.imgbox.com/57/cd/waY9q1e9_o.png" width="70%"> 
+</div> 
+<p><em>图中使用的记号和本文的略有出入（其中 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         L
+        
+       
+       
+        L
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal">L</span></span></span></span></span> 相当于本文的 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         n
+        
+       
+       
+        n
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em"></span><span class="mord mathnormal">n</span></span></span></span></span>，<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         T
+        
+       
+       
+        T
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal" style="margin-right: 0.1389em">T</span></span></span></span></span> 相当于本文的 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         L
+        
+       
+       
+        L
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal">L</span></span></span></span></span>）</em>。可以看出，<code>output[-1] = h_n[-1]</code>，因为它们均是最后一个时间步上的最后一个隐层的输出。</p> 
+<p>验证双向LSTM的输出：</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>nn <span class="token keyword">as</span> nn
+
+L <span class="token operator">=</span> <span class="token number">6</span>  <span class="token comment"># 序列长度</span>
+N <span class="token operator">=</span> <span class="token number">5</span>  <span class="token comment"># 批量大小</span>
+d <span class="token operator">=</span> <span class="token number">4</span>  <span class="token comment"># 嵌入维度</span>
+h <span class="token operator">=</span> <span class="token number">3</span>  <span class="token comment"># 隐层大小</span>
+n <span class="token operator">=</span> <span class="token number">2</span>  <span class="token comment"># LSTM的深度</span>
+lstm <span class="token operator">=</span> nn<span class="token punctuation">.</span>LSTM<span class="token punctuation">(</span>d<span class="token punctuation">,</span> h<span class="token punctuation">,</span> num_layers<span class="token operator">=</span>n<span class="token punctuation">,</span> bidirectional<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+inputs <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span>L<span class="token punctuation">,</span> N<span class="token punctuation">,</span> d<span class="token punctuation">)</span>  <span class="token comment"># LSTM的输入</span>
+output<span class="token punctuation">,</span> <span class="token punctuation">(</span>h_n<span class="token punctuation">,</span> c_n<span class="token punctuation">)</span> <span class="token operator">=</span> lstm<span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>  <span class="token comment"># LSTM的输出</span>
+
+output <span class="token operator">=</span> output<span class="token punctuation">.</span>reshape<span class="token punctuation">(</span>L<span class="token punctuation">,</span> N<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> h<span class="token punctuation">)</span>
+forward_output <span class="token operator">=</span> output<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span>  <span class="token comment"># 正向LSTM的输出，形状为(L, N, h)</span>
+backward_output <span class="token operator">=</span> output<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span>  <span class="token comment"># 反向LSTM的输出，形状为(L, N, h)</span>
+forward_h_n <span class="token operator">=</span> h_n<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">]</span>  <span class="token comment"># 正向LSTM的h_n，形状为(n, N, h)</span>
+backward_h_n <span class="token operator">=</span> h_n<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">]</span>  <span class="token comment"># 反向LSTM的h_n，形状为(n, N, h)</span>
+
+<span class="token comment"># 因为是正向LSTM，所以时间方向是从左向右，因此forward_output[-1]代表</span>
+<span class="token comment"># 最后一个时间步上的最后一层的输出</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>forward_output<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">==</span> forward_h_n<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+<span class="token comment"># 因为是反向LSTM，所以时间方向是从右向左，因此backward_output[0]代表</span>
+<span class="token comment"># 最后一个时间步上的最后一层的输出</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span>backward_output<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">==</span> backward_h_n<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>输出均为 <code>True</code>，这里不再展示，读者可自行运行程序。</p> 
+<p>从以上程序可以看出，<code>backward_h_n[-1]</code> 并不等于 <code>backward_output[-1]</code>，这时因为反向LSTM是<strong>从右往左</strong>进行的，因此 <code>backward_output[-1]</code> 实际上是反向LSTM在<strong>第一个时间步</strong>上的最后一层的输出，而 <code>backward_h_n</code> 则是反向LSTM在<strong>最后一个时间步</strong>上的 <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        n
+       
+      
+      
+       n
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em"></span><span class="mord mathnormal">n</span></span></span></span></span> 个层的输出。</p> 
+<h1>
+<a id="_107"></a>最后</h1> 
+<blockquote> 
+ <p>?‍? <strong>博主水平有限，文章难免存在一定的错误，欢迎批评指正！</strong></p> 
+</blockquote>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

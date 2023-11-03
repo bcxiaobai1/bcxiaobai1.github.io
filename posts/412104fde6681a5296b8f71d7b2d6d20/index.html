@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Pytorch多GPU训练：DataParallel和DistributedDataParallel - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Pytorch多GPU训练：DataParallel和DistributedDataParallel</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>引言</h1> 
+<p>Pytorch有两种方法实现多GPU训练，分别是DataParallel（DP）和DistributedDataParallel（DDP）。DP实现简单，但没有完全利用所有GPU资源，DDP实现相对复杂，但是更快，我建议使用DDP。</p> 
+<hr> 
+<h1>
+<a id="DP_3"></a>DP</h1> 
+<p>DP使用torch.nn.DataParallel。原理是，假设用K个GPU训练，前向传播阶段，一个batch的数据会被平均分成K份，模型也会复制K份，分别送到每个GPU上；反向传播阶段，各复制模型产生的梯度会被累加到主模型上。<strong>batch size应该大于使用的GPU数量</strong>。</p> 
+<h2>
+<a id="Demo_5"></a>Demo</h2> 
+<p>我们写一份简单的程序实现一下torch.nn.DataParallel：</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>nn <span class="token keyword">as</span> nn
+<span class="token keyword">from</span> torch<span class="token punctuation">.</span>utils<span class="token punctuation">.</span>data <span class="token keyword">import</span> Dataset<span class="token punctuation">,</span> DataLoader
+
+
+<span class="token keyword">class</span> <span class="token class-name">RandomDataset</span><span class="token punctuation">(</span>Dataset<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> size<span class="token punctuation">,</span> length<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        self<span class="token punctuation">.</span><span class="token builtin">len</span> <span class="token operator">=</span> length
+        self<span class="token punctuation">.</span>data <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span>length<span class="token punctuation">,</span> size<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">__getitem__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> index<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>data<span class="token punctuation">[</span>index<span class="token punctuation">]</span>
+
+    <span class="token keyword">def</span> <span class="token function">__len__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span><span class="token builtin">len</span>
+
+
+<span class="token keyword">class</span> <span class="token class-name">Model</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> input_size<span class="token punctuation">,</span> output_size<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>Model<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>fc <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>input_size<span class="token punctuation">,</span> output_size<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token builtin">input</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        output <span class="token operator">=</span> self<span class="token punctuation">.</span>fc<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"tIn: input size"</span><span class="token punctuation">,</span> <span class="token builtin">input</span><span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+              <span class="token string">"output size"</span><span class="token punctuation">,</span> output<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">return</span> output
+
+
+<span class="token comment"># 超参数</span>
+input_size <span class="token operator">=</span> <span class="token number">5</span>    <span class="token comment"># 输入维数</span>
+output_size <span class="token operator">=</span> <span class="token number">2</span>   <span class="token comment"># 输出维数</span>
+batch_size <span class="token operator">=</span> <span class="token number">30</span>   <span class="token comment"># batch size</span>
+data_size <span class="token operator">=</span> <span class="token number">30</span>    <span class="token comment"># 样本数</span>
+gpus <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">]</span>  <span class="token comment"># GPU索引</span>
+
+rand_loader <span class="token operator">=</span> DataLoader<span class="token punctuation">(</span>dataset<span class="token operator">=</span>RandomDataset<span class="token punctuation">(</span>input_size<span class="token punctuation">,</span> data_size<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                         batch_size<span class="token operator">=</span>batch_size<span class="token punctuation">,</span> shuffle<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+model <span class="token operator">=</span> Model<span class="token punctuation">(</span>input_size<span class="token punctuation">,</span> output_size<span class="token punctuation">)</span>
+
+<span class="token comment"># Multi-GPUS操作</span>
+model <span class="token operator">=</span> nn<span class="token punctuation">.</span>DataParallel<span class="token punctuation">(</span>model<span class="token punctuation">,</span> device_ids<span class="token operator">=</span>gpus<span class="token punctuation">)</span>
+model <span class="token operator">=</span> model<span class="token punctuation">.</span>to<span class="token punctuation">(</span>gpus<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>  <span class="token comment"># 主模型</span>
+
+<span class="token keyword">for</span> data <span class="token keyword">in</span> rand_loader<span class="token punctuation">:</span>
+    <span class="token builtin">input</span> <span class="token operator">=</span> data<span class="token punctuation">.</span>to<span class="token punctuation">(</span>gpus<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+    output <span class="token operator">=</span> model<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"Out: input size"</span><span class="token punctuation">,</span> <span class="token builtin">input</span><span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+          <span class="token string">"output_size"</span><span class="token punctuation">,</span> output<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>GPUS = [0, 1, 2]<br> <img src="https://images2.imgbox.com/4f/2c/Y6pkTQuJ_o.png" alt="在这里插入图片描述"><br> GPUS = [0, 1]<br> <img src="https://images2.imgbox.com/b3/9a/PjGhqUxr_o.png" alt="在这里插入图片描述"><br> 建议使用DDP代替DP。DP基于单进程，多线程，只能在一个机器上多卡训练，由于多线程之间GIL连接引入了额外开销，即使在一个机器上也比DDP慢；DDP基于多进程，可以在多个机器上训练，每个GPU由专有进程控制，训练更快！</p> 
+<hr> 
+<h1>
+<a id="DDP_65"></a>DDP</h1> 
+<p>下面的介绍都针对单机器多卡训练，因为这是我们最常见的情况。DDP的基本原理也是将模型复制到每个GPU上，收集每个GPU产生的梯度，平均这些梯度更新模型，然后同步所有GPU上的模型。首先了解一些必要的概念：</p> 
+<ul>
+<li>master node 主节点：负责同步，复制模型，加载模型，写日志的主GPU</li>
+<li>process group 进程组：DDP给K个GPU各自分配一个进程，这K个进程构成进程组；进程组由一个后端控制协调，pytorch建议使用nccl后端</li>
+<li>rank：各进程的索引，从0到K-1</li>
+<li>world size：进程组中进程的总数K</li>
+</ul> 
+<p>DDP的实现流程可以概括为：<strong>设置进程组，分割数据，DDP化模型，训练模型，clean up</strong>。我们首先介绍各部分对应的代码，最后给出整体demo。</p> 
+<h2>
+<a id="_73"></a>设置进程组</h2> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch<span class="token punctuation">.</span>distributed <span class="token keyword">as</span> dist
+
+<span class="token keyword">def</span> <span class="token function">setup</span><span class="token punctuation">(</span>rank<span class="token punctuation">,</span> world_size<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    os<span class="token punctuation">.</span>environ<span class="token punctuation">[</span><span class="token string">'MASTER_ADDR'</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">'localhost'</span>  <span class="token comment"># 主节点地址</span>
+    os<span class="token punctuation">.</span>environ<span class="token punctuation">[</span><span class="token string">'MASTER_PORT'</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">'12355'</span>      <span class="token comment"># 主节点端口，用于进程之间通讯</span>
+    dist<span class="token punctuation">.</span>init_process_group<span class="token punctuation">(</span><span class="token string">"nccl"</span><span class="token punctuation">,</span> rank<span class="token operator">=</span>rank<span class="token punctuation">,</span> world_size<span class="token operator">=</span>world_size<span class="token punctuation">)</span>
+</code></pre> 
+<h2>
+<a id="_82"></a>分割数据</h2> 
+<p>可以使用torch.utils.data.distributed.DistributedSampler分割数据的索引，然后将每组索引送入dataloader组成batch。<strong>请注意，这里与DP有区别，DP将一个batch的数据分成K份，然后送入每个GPU，因此设置的batch size等于训练使用的batch size；DDP先将训练数据分成K份，然后送入每个GPU，再生成batch，因此实际训练使用的batch size等于设置的batch size再乘以K！</strong></p> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> torch<span class="token punctuation">.</span>utils<span class="token punctuation">.</span>data<span class="token punctuation">.</span>distributed <span class="token keyword">import</span> DistributedSampler
+
+<span class="token keyword">def</span> <span class="token function">prepare</span><span class="token punctuation">(</span>rank<span class="token punctuation">,</span> world_size<span class="token punctuation">,</span> batch_size<span class="token operator">=</span><span class="token number">32</span><span class="token punctuation">,</span> pin_memory<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> num_workers<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    dataset <span class="token operator">=</span> Your_Dataset<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    sampler <span class="token operator">=</span> DistributedSampler<span class="token punctuation">(</span>dataset<span class="token punctuation">,</span> num_replicas<span class="token operator">=</span>world_size<span class="token punctuation">,</span> rank<span class="token operator">=</span>rank<span class="token punctuation">,</span> shuffle<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> drop_last<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+    dataloader <span class="token operator">=</span> DataLoader<span class="token punctuation">(</span>dataset<span class="token punctuation">,</span> batch_size<span class="token operator">=</span>batch_size<span class="token punctuation">,</span> pin_memory<span class="token operator">=</span>pin_memory<span class="token punctuation">,</span> num_workers<span class="token operator">=</span>num_workers<span class="token punctuation">,</span> drop_last<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> shuffle<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> sampler<span class="token operator">=</span>sampler<span class="token punctuation">)</span>
+    
+    <span class="token keyword">return</span> dataloader
+</code></pre> 
+<p>假设K = 3，共有10条数据。</p> 
+<ul>
+<li>如果sampler.drop_last = False，会对索引个数不足的rank补零。例如数据索引为[0, 1, …, 9]，那么这3个rank的索引分割结果可能是[0, 3, 6, 9]，[0, 4, 7, 0]和[2, 5, 8, 0]，sampler尽量保证每组的索引不重复，但由于补零操作，不可避免地使数据0有重复</li>
+<li>否则，会丢弃一些索引，此时的分割结果可能是[0, 3, 6]，[1, 4, 7]和[2, 5, 8]，其中索引9被丢弃了</li>
+</ul> 
+<p><strong>请注意，设置num_workers = 0和pin_memory = False可以避免DDP下一些不必要的BUG。</strong></p> 
+<h2>
+<a id="DDP_99"></a>DDP化模型</h2> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>parallel <span class="token keyword">import</span> DistributedDataParallel <span class="token keyword">as</span> DDP
+
+model <span class="token operator">=</span> Model<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>to<span class="token punctuation">(</span>rank<span class="token punctuation">)</span>
+model <span class="token operator">=</span> DDP<span class="token punctuation">(</span>model<span class="token punctuation">,</span> device_ids<span class="token operator">=</span><span class="token punctuation">[</span>rank<span class="token punctuation">]</span><span class="token punctuation">,</span> output_device<span class="token operator">=</span>rank<span class="token punctuation">,</span> find_unused_parameters<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这边也有一些需要注意的点！</p> 
+<ul>
+<li>当我们要访问DDP化的模型属性时，需要使用model.module.attr</li>
+<li>直接保存DDP模型时，state_dict会对所有参数增加module前缀</li>
+<li>如果要把DDP模型参数加载到非DDP模型时，需要删除参数前的module前缀</li>
+</ul> 
+<h2>
+<a id="_111"></a>训练模型</h2> 
+<p>使用spawn方法管理多进程，对于多进程来说，所有子进程和父进程运行的是相同的程序。</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch<span class="token punctuation">.</span>multiprocessing <span class="token keyword">as</span> mp
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">'__main__'</span><span class="token punctuation">:</span>
+    world_size <span class="token operator">=</span> <span class="token number">3</span>        
+    mp<span class="token punctuation">.</span>spawn<span class="token punctuation">(</span>
+        main<span class="token punctuation">,</span>
+        args<span class="token operator">=</span><span class="token punctuation">(</span>world_size<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        nprocs<span class="token operator">=</span>world_size
+    <span class="token punctuation">)</span>
+</code></pre> 
+<p>main是运行在每一个进程上的训练过程，main的第一个形参必须是rank，spawn会自动传递这个值给main，所以spawn.args只写了world_size参数。rank = 0是默认的主节点。<strong>同时注意在epoch和iter的循环之间必须加上dataloader.sampler.set_epoch(epoch)，数据才能正确分割。</strong></p> 
+<h2>
+<a id="Clean_Up_125"></a>Clean Up</h2> 
+<p>main的最后一行是clean up操作。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">cleanup</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    dist<span class="token punctuation">.</span>destroy_process_group<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<h2>
+<a id="_131"></a>保存网络</h2> 
+<p>在主节点保存网络，保存函数后面要加上dist.barrier()函数，暂停此时其他进程的运行，等待网络保存完毕。</p> 
+<pre><code class="prism language-python"><span class="token keyword">if</span> rank <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+   model<span class="token punctuation">.</span>save_nets<span class="token punctuation">(</span><span class="token punctuation">)</span>
+dist<span class="token punctuation">.</span>barrier<span class="token punctuation">(</span><span class="token punctuation">)</span>  <span class="token comment"># 保存结束前其他 process 不运行</span>
+</code></pre> 
+<h2>
+<a id="Demo_138"></a>Demo</h2> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> os
+<span class="token keyword">import</span> torch
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>nn <span class="token keyword">as</span> nn
+<span class="token keyword">from</span> torch<span class="token punctuation">.</span>utils<span class="token punctuation">.</span>data <span class="token keyword">import</span> Dataset<span class="token punctuation">,</span> DataLoader
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>multiprocessing <span class="token keyword">as</span> mp
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>distributed <span class="token keyword">as</span> dist
+<span class="token keyword">from</span> torch<span class="token punctuation">.</span>utils<span class="token punctuation">.</span>data<span class="token punctuation">.</span>distributed <span class="token keyword">import</span> DistributedSampler
+<span class="token keyword">from</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>parallel <span class="token keyword">import</span> DistributedDataParallel <span class="token keyword">as</span> DDP
+
+
+<span class="token keyword">class</span> <span class="token class-name">RandomDataset</span><span class="token punctuation">(</span>Dataset<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> size<span class="token punctuation">,</span> length<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        self<span class="token punctuation">.</span><span class="token builtin">len</span> <span class="token operator">=</span> length
+        self<span class="token punctuation">.</span>data <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span>length<span class="token punctuation">,</span> size<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>label <span class="token operator">=</span> torch<span class="token punctuation">.</span>randn<span class="token punctuation">(</span>length<span class="token punctuation">,</span> size<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">__getitem__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> index<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>data<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">,</span> self<span class="token punctuation">.</span>label<span class="token punctuation">[</span>index<span class="token punctuation">]</span>
+
+    <span class="token keyword">def</span> <span class="token function">__len__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span><span class="token builtin">len</span>
+
+
+<span class="token keyword">class</span> <span class="token class-name">Model</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> input_size<span class="token punctuation">,</span> output_size<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>Model<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>fc <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>input_size<span class="token punctuation">,</span> output_size<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token builtin">input</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        output <span class="token operator">=</span> self<span class="token punctuation">.</span>fc<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> output
+
+
+<span class="token keyword">def</span> <span class="token function">setup</span><span class="token punctuation">(</span>rank<span class="token punctuation">,</span> world_size<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    os<span class="token punctuation">.</span>environ<span class="token punctuation">[</span><span class="token string">'MASTER_ADDR'</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">'localhost'</span>  <span class="token comment"># 主节点地址</span>
+    os<span class="token punctuation">.</span>environ<span class="token punctuation">[</span><span class="token string">'MASTER_PORT'</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">'12355'</span>      <span class="token comment"># 主节点端口，用于进程之间通讯</span>
+    dist<span class="token punctuation">.</span>init_process_group<span class="token punctuation">(</span><span class="token string">"nccl"</span><span class="token punctuation">,</span> rank<span class="token operator">=</span>rank<span class="token punctuation">,</span> world_size<span class="token operator">=</span>world_size<span class="token punctuation">)</span>
+
+
+<span class="token keyword">def</span> <span class="token function">prepare</span><span class="token punctuation">(</span>rank<span class="token punctuation">,</span> world_size<span class="token punctuation">,</span> batch_size<span class="token operator">=</span><span class="token number">32</span><span class="token punctuation">,</span> pin_memory<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> num_workers<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    dataset <span class="token operator">=</span> RandomDataset<span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">60</span><span class="token punctuation">)</span>
+    sampler <span class="token operator">=</span> DistributedSampler<span class="token punctuation">(</span>dataset<span class="token punctuation">,</span> num_replicas<span class="token operator">=</span>world_size<span class="token punctuation">,</span> rank<span class="token operator">=</span>rank<span class="token punctuation">,</span> shuffle<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> drop_last<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+    dataloader <span class="token operator">=</span> DataLoader<span class="token punctuation">(</span>dataset<span class="token punctuation">,</span> batch_size<span class="token operator">=</span>batch_size<span class="token punctuation">,</span> pin_memory<span class="token operator">=</span>pin_memory<span class="token punctuation">,</span> num_workers<span class="token operator">=</span>num_workers<span class="token punctuation">,</span>
+                            drop_last<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> shuffle<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> sampler<span class="token operator">=</span>sampler<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> dataloader
+
+
+<span class="token keyword">def</span> <span class="token function">cleanup</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    dist<span class="token punctuation">.</span>destroy_process_group<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">def</span> <span class="token function">main</span><span class="token punctuation">(</span>rank<span class="token punctuation">,</span> world_size<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 建立进程组</span>
+    setup<span class="token punctuation">(</span>rank<span class="token punctuation">,</span> world_size<span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"Rank"</span><span class="token punctuation">,</span> rank<span class="token punctuation">)</span>
+    <span class="token comment"># 分割数据</span>
+    dataloader <span class="token operator">=</span> prepare<span class="token punctuation">(</span>rank<span class="token punctuation">,</span> world_size<span class="token punctuation">,</span> batch_size<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">)</span>
+    <span class="token comment"># DDP化模型</span>
+    model <span class="token operator">=</span> Model<span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">.</span>to<span class="token punctuation">(</span>rank<span class="token punctuation">)</span>
+    model <span class="token operator">=</span> DDP<span class="token punctuation">(</span>model<span class="token punctuation">,</span> device_ids<span class="token operator">=</span><span class="token punctuation">[</span>rank<span class="token punctuation">]</span><span class="token punctuation">,</span> output_device<span class="token operator">=</span>rank<span class="token punctuation">,</span> find_unused_parameters<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    <span class="token comment"># 训练模型</span>
+    loss <span class="token operator">=</span> torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>MSELoss<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    optim <span class="token operator">=</span> torch<span class="token punctuation">.</span>optim<span class="token punctuation">.</span>Adam<span class="token punctuation">(</span>model<span class="token punctuation">.</span>parameters<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> lr<span class="token operator">=</span><span class="token number">1e-4</span><span class="token punctuation">)</span>
+    model<span class="token punctuation">.</span>train<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> epoch <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        dataloader<span class="token punctuation">.</span>sampler<span class="token punctuation">.</span>set_epoch<span class="token punctuation">(</span>epoch<span class="token punctuation">)</span>  <span class="token comment"># 这个必须要加！</span>
+        <span class="token keyword">for</span> x<span class="token punctuation">,</span> y <span class="token keyword">in</span> dataloader<span class="token punctuation">:</span>
+            optim<span class="token punctuation">.</span>zero_grad<span class="token punctuation">(</span><span class="token punctuation">)</span>
+            x <span class="token operator">=</span> x<span class="token punctuation">.</span>to<span class="token punctuation">(</span>rank<span class="token punctuation">)</span>
+            y <span class="token operator">=</span> y<span class="token punctuation">.</span>to<span class="token punctuation">(</span>rank<span class="token punctuation">)</span>
+            pred <span class="token operator">=</span> model<span class="token punctuation">(</span>x<span class="token punctuation">)</span>
+            l <span class="token operator">=</span> loss<span class="token punctuation">(</span>pred<span class="token punctuation">,</span> y<span class="token punctuation">)</span>
+            l<span class="token punctuation">.</span>backward<span class="token punctuation">(</span><span class="token punctuation">)</span>
+            optim<span class="token punctuation">.</span>step<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token comment"># 保存网络</span>
+    <span class="token comment"># if rank == 0:</span>
+    <span class="token comment">#     model.save_nets()  # 自己编写保存参数函数</span>
+    <span class="token comment"># dist.barrier()</span>
+    <span class="token comment"># clean up</span>
+    cleanup<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">"__main__"</span><span class="token punctuation">:</span>
+    world_size <span class="token operator">=</span> <span class="token number">3</span>
+
+    mp<span class="token punctuation">.</span>spawn<span class="token punctuation">(</span>
+        main<span class="token punctuation">,</span>
+        args<span class="token operator">=</span><span class="token punctuation">(</span>world_size<span class="token punctuation">,</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        nprocs<span class="token operator">=</span>world_size<span class="token punctuation">,</span>
+    <span class="token punctuation">)</span>
+</code></pre> 
+<h1>
+<a id="_231"></a>参考</h1> 
+<p><a href="https://pytorch.org/tutorials/beginner/blitz/data_parallel_tutorial.html">链接1</a><br> <a href="https://medium.com/codex/a-comprehensive-tutorial-to-pytorch-distributeddataparallel-1f4b42bb1b51">链接2</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

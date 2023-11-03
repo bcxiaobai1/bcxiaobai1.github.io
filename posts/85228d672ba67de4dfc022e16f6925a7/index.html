@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>吃透Kafka三：详细分析生产和消费对消息的保障 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">吃透Kafka三：详细分析生产和消费对消息的保障</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-dracula">
+                    
+                        
+                    
+                    <h2>
+<a id="kafka_0"></a>一，kafka消息传递的三种语义</h2> 
+<ul>
+<li>At most once：最多一次，消息可能会丢失，但不会重复。</li>
+<li>At least once：最少一次，消息不会丢失，可能会重复。</li>
+<li>Exactly once：只且一次，消息不丢失不重复，只且消费一次。</li>
+</ul> 
+<p>我们使用kafka肯定是希望Exactly once，要保证Exactly once效率上面需要做出一定的牺牲，那么是要Exactly once还是效率就要结合具体业务来分析了。但是整体的消息投递语义需要 Producer 端和 Consumer 端两者来保证。</p> 
+<h2>
+<a id="Producer__8"></a>二，Producer 消息生产端</h2> 
+<p>当 producer 向 broker 发送一条消息，这时网络出错了，producer 无法得知 broker 是否接受到了这条消息。网络出错可能是发生在消息传递的过程中，也可能发生在 broker 已经接受到了消息，并返回 ack 给 producer 的过程中。</p> 
+<p>这时，producer 会有两种选择：</p> 
+<ul>
+<li>不管了（At most once），消息可能会丢失</li>
+<li>再发一次（At least once），消息可能会重复</li>
+</ul> 
+<p>那么如何保证Exactly once，就要结合Ack和send返回结果来保证了。</p> 
+<h4>
+<a id="1ack_19"></a>1，ack确认机制：</h4> 
+<ul>
+<li>Ack=0，相当于异步发送，意味着producer不等待broker同步完成，消息发送完毕继续发送下一批信息。提供了最低延迟，但持久性最弱，当服务器发生故障时很可能发生数据丢失。如果leader死亡，producer继续发送消息，broker接收不到数据就会造成数据丢失。</li>
+<li>Ack=1，producer要等待leader成功收到消息并确认，才发送下一条message。提供较低的延迟性以及较好的持久性。但是如果partition下的leader死亡，而follower尚未复制数据，数据就会丢失。</li>
+<li>Ack=-1，leader收到所有消息，且follower同步完数据，才发送下一条数据。延迟性最差，持久性最好（即可靠性最好）。</li>
+</ul> 
+<h4>
+<a id="2send_25"></a>2，send发送函数：</h4> 
+<p>Kafka为生产者生产消息提供了一个 <code>send(producerRecord)</code> 方法，另有一个重载的方法<code>send(producerRecord, callback)</code>。</p> 
+<p><strong>1，通过send方法返回的future，同步阻塞拿到结果。</strong></p> 
+<pre><code class="prism language-java"><span class="token class-name">Future</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">RecordMetadata</span><span class="token punctuation">&gt;</span></span> future <span class="token operator">=</span> producer<span class="token punctuation">.</span><span class="token function">send</span><span class="token punctuation">(</span><span class="token keyword">record</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>上面的示例代码也可以看到，<code>send</code>返回的是一个 <code>Future</code>，也就是说其实你是可以 <code>Future.get()</code>获取返回值，但是future是同步阻塞的，这种效率比较低。</p> 
+<p><strong>2，通过send方法提供的异步回到拿到结果。</strong></p> 
+<pre><code class="prism language-java"><span class="token class-name">ProducerRecord</span><span class="token operator">&lt;</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">&gt;</span> <span class="token keyword">record</span> <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ProducerRecord</span><span class="token operator">&lt;</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token string">"topic"</span><span class="token punctuation">,</span> key<span class="token punctuation">,</span> value<span class="token punctuation">)</span><span class="token punctuation">;</span>
+producer<span class="token punctuation">.</span><span class="token function">send</span><span class="token punctuation">(</span>myRecord<span class="token punctuation">,</span>
+         <span class="token keyword">new</span> <span class="token class-name">Callback</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+             <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onCompletion</span><span class="token punctuation">(</span><span class="token class-name">RecordMetadata</span> metadata<span class="token punctuation">,</span> <span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            
+             <span class="token punctuation">}</span>
+         <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>send(msg, callback)该方法可以将一条消息发送出去，并且可以从<code>callback</code>回调中得到该条消息的发送结果， 并且<code>callback</code>是异步回调，所以在兼具性能的情况下，也对消息具有比较好的掌控。</p> 
+<h4>
+<a id="3producer_51"></a>3，幂等producer</h4> 
+<p>所谓幂等producer指producer.send的逻辑是幂等的，即发送相同的Kafka消息，broker端不会重复写入消息。同一条消息Kafka保证底层日志中只会持久化一次，既不会丢失也不会重复。幂等性可以极大地减轻下游consumer系统实现消息去重的工作负担，因此是非常实用的功能。值得注意的是，幂等producer提供的语义保证是有条件的：</p> 
+<ul>
+<li>单分区幂等性：幂等producer无法实现多分区上的幂等性。如前所述，若要实现多分区上的原子性，需要引入事务。</li>
+<li>单会话幂等性：幂等producer无法跨会话实现幂等性。即使同一个producer宕机并重启也无法保证消息的EOS语义。</li>
+</ul> 
+<p>虽然有上面两个限制，幂等producer依然是一个非常实用的新功能。下面我们来讨论下它的设计原理。如果要实现幂等性， 通常都需要花费额外的空间来保存状态以执行消息去重。Kafka的幂等producer整体上也是这样的思想。</p> 
+<p>首先，producer对象引入了一个新的字段：Producer ID(下称PID)，它唯一标识一个producer，当producer启动时Kafka会为每个producer分配一个PID（64位整数），因此PID的生成和分配对用户来说是完全透明的，用户无需考虑PID的事情，甚至都感受不到PID的存在。</p> 
+<p>其次，0.11 Kafka重构了消息格式，引入了序列号字段(sequence number，下称seq number)来标识某个PID producer发送的消息。和consumer端的offset类似，seq number从0开始计数并严格单调增加。同时在broker端会为每个PID(即每个producer)保存该producer发送过来的消息batch的某些元信息，比如PID信息、消息batch的起始seq number及结束seq number等。这样每当该PID发送新的消息batch时，Kafka broker就会对比这些信息，如果发生冲突(比如起始seq number和结束seq number与当前缓存的相同)，那么broker就会拒绝这次写入请求。倘若没有冲突，那么broker端就会更新这部分缓存然后再开始写入消息。</p> 
+<p>这就是Kafka实现幂等producer的设计思路：</p> 
+<ol>
+<li>为每个producer设置唯一的PID。</li>
+<li>引入seq number以及broker端seq number缓存更新机制来去重。</li>
+</ol> 
+<p><strong>要启用幂等性，只需要将 Producer 的参数中 enable.idompotence 设置为 true 即可。</strong></p> 
+<h4>
+<a id="4producer_71"></a>4，producer事务</h4> 
+<p>事务可以支持多分区的数据完整性，原子性。并且支持跨会话的exactly once处理语义，也就是说如果producer宕机重启，依旧能保证数据只处理一次。</p> 
+<p>开启事务也很简单，首先需要开启幂等性，即设置enable.idempotence为true。然后对producer发送代码做一些小小的修改。</p> 
+<pre><code class="prism language-java"><span class="token comment">//初始化事务</span>
+producer<span class="token punctuation">.</span><span class="token function">initTransactions</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//开启一个事务</span>
+    producer<span class="token punctuation">.</span><span class="token function">beginTransaction</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    producer<span class="token punctuation">.</span><span class="token function">send</span><span class="token punctuation">(</span>record1<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    producer<span class="token punctuation">.</span><span class="token function">send</span><span class="token punctuation">(</span>record2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//提交</span>
+    producer<span class="token punctuation">.</span><span class="token function">commitTransaction</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">KafkaException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//出现异常的时候，终止事务</span>
+    producer<span class="token punctuation">.</span><span class="token function">abortTransaction</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>所以无论开启幂等还是事务的特性，都会对性能有一定影响，这是必然的。所以kafka默认也并没有开启这两个特性，而是交由开发者根据自身业务特点进行处理。</strong></p> 
+<h2>
+<a id="Consumer__97"></a>三，Consumer 消息消费端</h2> 
+<h4>
+<a id="1atmostonce_99"></a>1，at-most-once</h4> 
+<p>最多一次消费语义是kafka消费者的默认实现。配置这种消费者最简单的方式是：</p> 
+<ul>
+<li>enable.auto.commit设置为true。</li>
+<li>auto.commit.interval.ms设置为一个较低的时间范围。</li>
+</ul> 
+<p>由于上面的配置，此时kafka会有一个独立的线程负责按照指定间隔提交offset。</p> 
+<p>消费者的offset已经提交，但是消息还在处理中(还没有处理完)，这个时候程序挂了，导致数据没有被成 功处理，再重启的时候会从上次提交的offset处消费，导致上次没有被成功处理的消息就丢失了。</p> 
+<h4>
+<a id="2atleastonce_110"></a>2，at-least-once</h4> 
+<p>实现最少一次消费语义的消费者也很简单：</p> 
+<ul>
+<li>设置enable.auto.commit为false。</li>
+<li>消息处理完之后手动调用consumer.commitSync()。</li>
+</ul> 
+<p>这种方式是在消费数据之后，手动调用函数consumer.commitSync()异步提交offset，有可能处理多次的场景是消费者的消息处理完并输出到结果库，但是offset还没提交，这个时候消费者挂掉了，再重启的时候会重新消费并处理消息，所以至少会处理一次</p> 
+<h4>
+<a id="3exactlyonce_119"></a>3，exactly-once</h4> 
+<p>这种语义可以保证数据只被消费处理一次。</p> 
+<ul>
+<li>将enable.auto.commit设置为false。</li>
+<li>使用consumer.seek(topicPartition，offset)来指定offset。</li>
+<li>在处理消息的时候，要同时保存住每个消息的offset。</li>
+</ul> 
+<p>以原子事务的方式保存offset和处理的消息结果，这个时候相当于自己保存offset信息了，把offset和具体的数据绑定到一块，数据真正处理成功的时候才会保存offset信息，这样就可以保证数据仅被处理一次了。</p> 
+<h4>
+<a id="4exactlyonce_129"></a>4，exactly-once实现</h4> 
+<p>从kafka的消费机制，我们可以得到是否能够精确的消费关键在消费进度信息的准确性，如果能够保证消费进度的准确性，也就保证了消费数据的准确性：</p> 
+<ul>
+<li>数据有状态：可以根据数据信息进行确认数据是否重复消费，这时候可以使用手动提交的最少一次消费语义实现，即使消费的数据有重复，可以通过状态进行数据去重，以达到幂等的效果</li>
+<li>存储数据容器具备幂等性：在数据存入的容器具备天然的幂等（比如ElasticSearch的put操作具备幂等性，相同的数据多次执行Put操作和一次执行Put操作的结果是一致的），这样的场景也可以使用手动提交的最少一次消费语义实现，由存储数据端来进行数据去重。</li>
+</ul> 
+<p>但是当数据无状态，并且存储容器不具备幂等时，这种场景需要自行控制offset的准确性：</p> 
+<ol>
+<li>利用consumer.seek(topicPartition，offset)方法可以指定offset进行消费，在启动消费者时查询数据库中记录的offset信息，如果是第一次启动，那么数据库中将没有offset信息，需要进行消费的元数据插入，然后从offset=0开始消费。</li>
+<li>关系型数据库具备事务的特性，当数据入库时，同时也将offset信息更新，<strong>借用关系型数据库事务的特性保证数据入库和修改offset记录这两个操作是在同一个事务中进行</strong>
+</li>
+<li>使用ConsumerRebalanceListener来完成在分配分区时和Relalance时作出相应的处理逻辑</li>
+</ol> 
+<p>要弄清楚的是，我们在消费的时候，关闭了自动提交，我们也没有通过consumer.commitAsync()手动提交我们的位移信息，而是在每次启动一个新的consumer的时候，触发rebalance时，读取数据库中的位移信息，从该位移中开始读取partition的信息（初始化的时候为0），在没有出现异常的情况下，我们的consumer会不断从producer读取信息，这个位移是最新的那个消息位移，而且会同时把这个位移更新到数据库中，但是，当出现了rebalance时，那么consumer就会从数据库中读取开始的位移。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

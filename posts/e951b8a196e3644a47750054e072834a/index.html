@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>ceph-mon运行原理分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ceph-mon运行原理分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h2 id="ceph-mon研究分析报告-一、流程：ceph-deploy部署ceph-mon组建集群">一、流程：ceph-deploy部署ceph-mon组建集群</h2> 
+<h3 id="ceph-mon研究分析报告-1.ceph-deploy部署ceph-mon的工作流程及首次启动">1.ceph-deploy部署ceph-mon的工作流程及首次启动</h3> 
+<p>1）通过命令创建ceph-mon，命令为：ceph-deploy create mon keyring</p> 
+<pre><code class="language-python">def mon(args):
+    if args.subcommand == 'create':
+        mon_create(args)
+    elif args.subcommand == 'add':
+        mon_add(args)
+    elif args.subcommand == 'destroy':
+        mon_destroy(args)
+    elif args.subcommand == 'create-initial':
+        mon_create_initial(args)
+    else:
+        LOG.error('subcommand %s not implemented', args.subcommand)</code></pre> 
+<p>2）在创建mon时，会根据传入的args参数生成配置文件ceph.conf。</p> 
+<pre><code class="language-python">def mon_create(distro, args, monitor_keyring):
+    hostname = distro.conn.remote_module.shortname()
+    logger = distro.conn.logger
+    logger.debug('remote hostname: %s' % hostname)
+    path = paths.mon.path(args.cluster, hostname)
+    uid = distro.conn.remote_module.path_getuid(constants.base_path)
+    gid = distro.conn.remote_module.path_getgid(constants.base_path)
+    done_path = paths.mon.done(args.cluster, hostname)
+    init_path = paths.mon.init(args.cluster, hostname, distro.init)
+ 
+    conf_data = conf.ceph.load_raw(args)
+ 
+    # write the configuration file
+    distro.conn.remote_module.write_conf(    #写入配置/etc/ceph/ceph.conf
+        args.cluster,
+        conf_data,
+        args.overwrite_conf,
+    )
+ 
+def write_conf(cluster, conf, overwrite):  #写入配置/etc/ceph/ceph.conf
+    """ write cluster configuration to /etc/ceph/{cluster}.conf """
+    import os
+ 
+    path = '/etc/ceph/{cluster}.conf'.format(cluster=cluster)
+    tmp = '{path}.{pid}.tmp'.format(path=path, pid=os.getpid())
+ 
+    if os.path.exists(path):
+        with open(path) as f:
+            old = f.read()
+            if old != conf and not overwrite:
+                raise RuntimeError('config file %s exists with different content; use --overwrite-conf to overwrite' % path)
+    with open(tmp, 'w') as f:
+        f.write(conf)
+        f.flush()
+        os.fsync(f)
+    os.rename(tmp, path)</code></pre> 
+<p>3）检查ceph-mon组件工作目录（/var/lib/ceph/mon/mycluster-myhostname）是否存在，不存在就创建，除了创建该目录外，还需要在该路径下创建keyring秘钥。然后执行命令"ceph-mon --cluster args.cluster --mkfs -i hostname --keyring --setuser  uid  --setgroup gid"启动ceph-mon进程，此时也是第一次启动ceph-mon。然后它会创建done文件并启动cepn-mon服务。</p> 
+<pre><code class="language-python"># if the mon path does not exist, create it
+    distro.conn.remote_module.create_mon_path(path, uid, gid)  #path为/var/lib/ceph/mon/mycluster-myhostname
+    if not distro.conn.remote_module.path_exists(done_path):
+        logger.debug('done path does not exist: %s' % done_path)
+        if not distro.conn.remote_module.path_exists(paths.mon.constants.tmp_path):   #如果路径不存在还需要创建keyring
+            logger.info('creating tmp path: %s' % paths.mon.constants.tmp_path)
+            distro.conn.remote_module.makedir(paths.mon.constants.tmp_path)
+        keyring = paths.mon.keyring(args.cluster, hostname)
+ 
+        logger.info('creating keyring file: %s' % keyring)
+        distro.conn.remote_module.write_monitor_keyring(  #创建keyring
+            keyring,
+            monitor_keyring,
+            uid, gid,
+        )
+        user_args = []
+        if uid != 0:
+            user_args = user_args + [ '--setuser', str(uid) ]
+        if gid != 0:
+            user_args = user_args + [ '--setgroup', str(gid) ]
+ 
+        remoto.process.run(   #第一次运行时需要执行的命令
+            distro.conn,
+            [
+                'ceph-mon',
+                '--cluster', args.cluster,
+                '--mkfs',  
+                '-i', hostname,
+                '--keyring', keyring,
+            ] + user_args
+        )
+    # create the done file 创建done文件
+    distro.conn.remote_module.create_done_path(done_path, uid, gid)
+ 
+    # create init path
+    distro.conn.remote_module.create_init_path(init_path, uid, gid)
+    # start mon service 启动服务
+    start_mon_service(distro, args.cluster, hostname) 
+ 
+ 
+def create_mon_path(path, uid=-1, gid=-1):
+    """create the mon path if it does not exist"""
+    if not os.path.exists(path):
+        os.makedirs(path)
+        os.chown(path, uid, gid);</code></pre> 
+<p>4）启动之后，需要将ceph-mon加入到mon_in_quorum里面，这是一个set的数据结构，这里面包含着集群的所有ceph-mon。该mon_in_quorum里面包含着leader，其他全都是peon(普通成员)。</p> 
+<pre><code class="language-python">def mon_create_initial(args):
+ # create them normally through mon_create
+ args.mon = mon_initial_members
+ mon_create(args)
+ 
+ # make the sets to be able to compare late
+ mon_in_quorum = set([])  
+ for host in mon_initial_members:
+        mon_name = 'mon.%s' % host
+        LOG.info('processing monitor %s', mon_name)
+        sleeps = [20, 20, 15, 10, 10, 5]
+        tries = 5
+        rlogger = logging.getLogger(host)
+        distro = hosts.get(
+            host,
+            username=args.username,
+            callbacks=[packages.ceph_is_installed]
+        )
+ 
+        while tries:
+            status = mon_status_check(distro.conn, rlogger, host, args)
+            has_reached_quorum = status.get('state', '') in ['peon', 'leader']
+            if not has_reached_quorum:
+                LOG.warning('%s monitor is not yet in quorum, tries left: %s' % (mon_name, tries))
+                tries -= 1
+                sleep_seconds = sleeps.pop()
+                LOG.warning('waiting %s seconds before retrying', sleep_seconds)
+                time.sleep(sleep_seconds)  # Magic number
+            else:
+                mon_in_quorum.add(host)  //添加进mon_in_quorum
+                LOG.info('%s monitor has reached quorum!', mon_name)
+                break
+        distro.conn.exit()
+
+
+</code></pre> 
+<h3 id="ceph-mon研究分析报告-2.ceph-mon数据存储方式">2.ceph-mon数据存储方式</h3> 
+<p>1）存储方式：mon它的数据可以通过两种方式来进行存储，一种是rocksDB存储、一种是leveldb存储，在ceph中具体使用哪一种存储方式取决于/var/lib/ceph/mon/$ceph-id目录下的kv_backend文件的内容，如果kv_backend中为rocksdb，则使用rocksdb存储，若为空或读取错误时，使用leveldb存储，它们都是一个key/value类型的数据库，区别在于rocksdb配置更灵活，支持的压缩算法比较多，除了snappy压缩外还支持zstd压缩，并且压缩比也更高。</p> 
+<pre><code class="language-cpp">int open(ostream &amp;out) {
+    string kv_type;
+    int r = read_meta("kv_backend", &amp;kv_type); //读取kv_backend文件，获取存储类型kv_type
+    if (r &lt; 0 || kv_type.empty()) { 
+      // assume old monitors that did not mark the type were leveldb.
+      kv_type = "leveldb";
+      r = write_meta("kv_backend", kv_type);
+      if (r &lt; 0)
+    return r;
+    }
+    _open(kv_type);
+    r = db-&gt;open(out);
+    if (r &lt; 0)
+      return r;
+.....
+}</code></pre> 
+<p>2）存储位置：mon的数据存储在一个可配置的路径mon_data下面，mon_data默认位置为/var/lib/ceph/mon/$ceph-id目录下，该目录存放了mon的keyring秘钥、kv存储引擎名称（rocksdb）、mon支持的版本（octopus）、以及RocksDB的存储文件store.db。</p> 
+<pre><code class="language-cpp"> Option("mon_data", Option::TYPE_STR, Option::LEVEL_ADVANCED)
+  .set_flag(Option::FLAG_NO_MON_UPDATE)
+  .set_default("/var/lib/ceph/mon/$cluster-$id") //默认mon_data配置路径为/var/lib/ceph/mon/$cluster-$id
+  .add_service("mon")
+  .set_description("path to mon database")
+ 
+MonitorDBStore *store = new MonitorDBStore(g_conf()-&gt;mon_data);</code></pre> 
+<blockquote> 
+ <p><code>ceph3:</code><code>/var/lib/ceph/mon/ceph-ceph3</code><code># ls</code></p> 
+ <p><code>done</code>  <code>keyring  kv_backend  min_mon_release  store.db  systemd</code></p> 
+ <p><code>ceph3:</code><code>/var/lib/ceph/mon/ceph-ceph3</code><code># cat kv_backend</code></p> 
+ <p><code>rocksdb</code></p> 
+ <p><code>ceph3:</code><code>/var/lib/ceph/mon/ceph-ceph3</code><code># </code></p> 
+</blockquote> 
+<p>3）ceph-mon数据主要包括集群健康状态、配置、osd是否存活和Paxos等数据，而存储在Rocksdb中的也正是这些数据，存储方式主要是采用SSTable(Sorted String Table)的方式存储。通过encode_pending将数据编码后存入rocksdb。</p> 
+<pre><code class="language-cpp">MonitorDBStore::TransactionRef t = paxos-&gt;get_pending_transaction();
+ 
+if (should_stash_full())
+  encode_full(t);
+ 
+encode_pending(t);
+have_pending = false;
+ 
+if (format_version &gt; 0) {
+  t-&gt;put(get_service_name(), "format_version", format_version);
+}</code></pre> 
+<h2 id="ceph-mon研究分析报告-二、流程：ceph-mon加入集群后二次启动">二、流程：ceph-mon加入集群后二次启动</h2> 
+<h3 id="ceph-mon研究分析报告-1.启动流程">1.启动流程</h3> 
+<p>1.在<a href="" title="ceph_mon.cc">ceph_mon.cc</a>文件的main函数中，首先判断linxdfs序列号是否正确，然后设置线程名ceph-mon；接着读取启动时传入的命令行参数“/usr/bin/ceph-mon -f --cluster ceph --id ceph1 --setuser root --setgroup root”，并检验命令行参数。</p> 
+<pre><code class="language-cpp">int main(int argc, const char **argv)
+{
+  //检查序列号
+  char* const linxdfspath = "/etc/linxsn/linxdfs_sn.conf";
+.....
+  ceph_pthread_setname(pthread_self(), "ceph-mon");
+......
+//解析命令行参数
+ std::string val;
+  for (std::vector&lt;const char*&gt;::iterator i = args.begin(); i != args.end(); ) {
+    if (ceph_argparse_double_dash(args, i)) {
+      break;
+    } else if (ceph_argparse_flag(args, i, "--mkfs", (char*)NULL)) { //若命令行参数中有mkfs参数，则会进行370的mkfs操作
+      mkfs = true;
+    } else if (ceph_argparse_flag(args, i, "--compact", (char*)NULL)) {
+      compact = true;
+    } else if (ceph_argparse_flag(args, i, "--force-sync", (char*)NULL)) {
+      force_sync = true;
+    } else if (ceph_argparse_flag(args, i, "--yes-i-really-mean-it", (char*)NULL)) {
+      yes_really = true;
+    } else if (ceph_argparse_witharg(args, i, &amp;val, "--osdmap", (char*)NULL)) {
+      osdmapfn = val;
+    } else if (ceph_argparse_witharg(args, i, &amp;val, "--inject_monmap", (char*)NULL)) {
+      inject_monmap = val;
+    } else if (ceph_argparse_witharg(args, i, &amp;val, "--extract-monmap", (char*)NULL)) {
+      extract_monmap = val;
+    } else {
+      ++i;
+    }
+  }</code></pre> 
+<p>2.然后进行mkfs流程，该流程里面会检查并创建/var/lib/ceph/mon/$ceph_id目录，该目录包括以下几个文件：done keyring kv_backend min_mon_release systemd和子目录 store.db 。</p> 
+<pre><code class="language-cpp">// -- mkfs --
+  if (mkfs) { //第一次启动时，mkfs一定会为true，并进入该if内部创建/var/lib/ceph/$ceph_id目录,同时会为该目录填充内容
+ 
+    int err = check_mon_data_exists(); //当mkfs为true时，第一次启动会检查mon_data存在，不存在会mkdir创建
+    if (err == -ENOENT) {
+      if (::mkdir(g_conf()-&gt;mon_data.c_str(), 0755)) {
+    derr &lt;&lt; "mkdir(" &lt;&lt; g_conf()-&gt;mon_data &lt;&lt; ") : "
+         &lt;&lt; cpp_strerror(errno) &lt;&lt; dendl;
+    exit(1);
+      }
+    } else if (err &lt; 0) {
+      derr &lt;&lt; "error opening '" &lt;&lt; g_conf()-&gt;mon_data &lt;&lt; "': "
+           &lt;&lt; cpp_strerror(-err) &lt;&lt; dendl;
+      exit(-err);
+    }</code></pre> 
+<p>3.构建monmap，将mon_data中的数据（store.db）decode解码到bufflist中，再写入到文件,以此来构建monmap。</p> 
+<pre><code class="language-cpp">......
+  MonMap monmap;  //构建monmap
+  {
+    // note that even if we don't find a viable monmap, we should go ahead
+    // and try to build it up in the next if-else block.
+    bufferlist mapbl;
+    int err = obtain_monmap(*store, mapbl);   //从store.db中获取monmap信息并构建monmap
+    if (err &gt;= 0) {
+      try {
+        monmap.decode(mapbl);
+      } catch (const buffer::error&amp; e) {
+        derr &lt;&lt; "can't decode monmap: " &lt;&lt; e.what() &lt;&lt; dendl;
+      }
+    } else {
+      derr &lt;&lt; "unable to obtain a monmap: " &lt;&lt; cpp_strerror(err) &lt;&lt; dendl;
+    }
+ 
+    dout(10) &lt;&lt; __func__ &lt;&lt; " monmap:n";
+    JSONFormatter jf(true);
+    jf.dump_object("monmap", monmap);
+    jf.flush(*_dout);
+    *_dout &lt;&lt; dendl;
+ 
+    if (!extract_monmap.empty()) {
+      int r = mapbl.write_file(extract_monmap.c_str());</code></pre> 
+<p></p> 
+<p>4.创建Messager对象msgr，从monmap中获取rank并绑定到msgr上面，设置msgr信息、绑定地址等</p> 
+<pre><code class="language-cpp">//创建msgr
+  Messenger *msgr = Messenger::create(g_ceph_context, public_msgr_type,
+                      entity_name_t::MON(rank), "mon",
+                      0,  // zero nonce
+                      Messenger::HAS_MANY_CONNECTIONS);
+  msgr-&gt;set_cluster_protocol(CEPH_MON_PROTOCOL);
+  msgr-&gt;set_default_send_priority(CEPH_MSG_PRIO_HIGH);
+ 
+  msgr-&gt;set_default_policy(Messenger::Policy::stateless_server(0));
+  msgr-&gt;set_policy(entity_name_t::TYPE_MON,
+                   Messenger::Policy::lossless_peer_reuse(
+             CEPH_FEATURE_SERVER_LUMINOUS));
+  msgr-&gt;set_policy(entity_name_t::TYPE_OSD,
+                   Messenger::Policy::stateless_server(
+             CEPH_FEATURE_SERVER_LUMINOUS));
+  msgr-&gt;set_policy(entity_name_t::TYPE_CLIENT,
+                   Messenger::Policy::stateless_server(0));
+  msgr-&gt;set_policy(entity_name_t::TYPE_MDS,
+                   Messenger::Policy::stateless_server(0));
+  // bind
+  err = msgr-&gt;bindv(bind_addrs);
+  if (public_addrs != bind_addrs) {
+    msgr-&gt;set_addrs(public_addrs);
+  }</code></pre> 
+<p>5.创建Monitor对象mon，设置传入的cmd信息，调用preinit进行预初始化（预初始化里面主要包括对paxos、msgr对应的服务端，客户端初始化）。</p> 
+<pre><code class="language-cpp">//创建mon对象
+  mon = new Monitor(g_ceph_context, g_conf()-&gt;name.get_id(), store,
+            msgr, mgr_msgr, &amp;monmap);  //创建mon对象
+  mon-&gt;orig_argc = argc;
+  mon-&gt;orig_argv = argv;
+  err = mon-&gt;preinit();  //预初始化
+int Monitor::preinit()
+{
+  paxos-&gt;init_logger();
+  init_paxos();
+  messenger-&gt;set_auth_client(this);
+  messenger-&gt;set_auth_server(this);
+  mgr_messenger-&gt;set_auth_client(this);
+....
+}</code></pre> 
+<p>6.启动msgr，然后调用init对mon进行初始化同时启动mon。</p> 
+<pre><code class="language-cpp">msgr-&gt;start();
+mgr_msgr-&gt;start();
+ 
+mon-&gt;init(); //初始化mon</code></pre> 
+<p>7.当触发SIGINT、SIGTERM信号时就会释放所有mon、msgr等资源。</p> 
+<pre><code class="language-cpp">register_async_signal_handler_oneshot(SIGINT, handle_mon_signal);
+  register_async_signal_handler_oneshot(SIGTERM, handle_mon_signal);
+ 
+  if (g_conf()-&gt;inject_early_sigterm)
+    kill(getpid(), SIGTERM);
+ 
+  msgr-&gt;wait();
+  mgr_msgr-&gt;wait();
+ 
+  store-&gt;close();
+ 
+  shutdown_async_signal_handler();
+ 
+  delete mon;
+  delete store;
+  delete msgr;
+ 
+.....</code></pre> 
+<p><img alt="" height="746" src="https://images2.imgbox.com/ba/39/mdcIfqCq_o.png" width="639"></p> 
+<h3 id="ceph-mon研究分析报告-3.加入集群">3.加入集群</h3> 
+<p>ceph-mon需要与其他监视器节点进行通信以构建监视器集群。它会尝试连接到其他已知的监视器节点，并通过消息交换建立集群中的监视器之间的通信。</p> 
+<h5 id="ceph-mon研究分析报告-3.1）建立通信连接（绑定地址、端口等）">3.1）建立通信连接（绑定地址、端口等）</h5> 
+<p> <img alt="" height="325" src="https://images2.imgbox.com/75/06/wYrYfmIN_o.png" width="782"></p> 
+<p> ceph-mon模块通信依赖于AsyncMessager的异步通信，在<a href="http://ceph-mon.cc" title="ceph-mon.cc">ceph-mon.cc</a>里面创建mon和Messenger对象（由于继承关系实质上是创建的AsyncMessenger对象），并且在初始化mon和AsyncMessager时，服务端会绑定本机ip和端口（通过配置获取），然后再调用_init_local_connection函数建立连接。</p> 
+<pre><code class="language-cpp">//创建Messenger对象
+Messenger *Messenger::create(CephContext *cct, const string &amp;type,
+                 entity_name_t name, string lname,
+                 uint64_t nonce, uint64_t cflags)
+{
+  int r = -1;
+  if (type == "random") {
+    r = 0;
+    //r = ceph::util::generate_random_number(0, 1);
+  }
+  if (r == 0 || type.find("async") != std::string::npos)
+    return new AsyncMessenger(cct, name, type, std::move(lname), nonce);  //异步对象
+  lderr(cct) &lt;&lt; "unrecognized ms_type '" &lt;&lt; type &lt;&lt; "'" &lt;&lt; dendl;
+  return nullptr;
+} 
+ 
+// bind
+  err = msgr-&gt;bindv(bind_addrs);
+  if (err &lt; 0) {
+    derr &lt;&lt; "unable to bind monitor to " &lt;&lt; bind_addrs &lt;&lt; dendl;
+    prefork.exit(1);
+  }
+//绑定socket具体实现
+int AsyncMessenger::bindv(const entity_addrvec_t &amp;bind_addrs)
+{
+  lock.lock();
+ 
+  if (!pending_bind &amp;&amp; started) {
+    ldout(cct,10) &lt;&lt; __func__ &lt;&lt; " already started" &lt;&lt; dendl;
+    lock.unlock();
+    return -1;
+  }
+ 
+  ldout(cct,10) &lt;&lt; __func__ &lt;&lt; " " &lt;&lt; bind_addrs &lt;&lt; dendl;
+ 
+  if (!stack-&gt;is_ready()) {
+    ldout(cct, 10) &lt;&lt; __func__ &lt;&lt; " Network Stack is not ready for bind yet - postponed" &lt;&lt; dendl;
+    pending_bind_addrs = bind_addrs;
+    pending_bind = true;
+    lock.unlock();
+    return 0;
+  }
+ 
+  lock.unlock();
+ 
+  // bind to a socket
+  set&lt;int&gt; avoid_ports;
+  entity_addrvec_t bound_addrs;
+  unsigned i = 0;
+  for (auto &amp;&amp;p : processors) {
+    int r = p-&gt;bind(bind_addrs, avoid_ports, &amp;bound_addrs);
+    if (r) {
+      // Note: this is related to local tcp listen table problem.
+      // Posix(default kernel implementation) backend shares listen table
+      // in the kernel, so all threads can use the same listen table naturally
+      // and only one thread need to bind. But other backends(like dpdk) uses local
+      // listen table, we need to bind/listen tcp port for each worker. So if the
+      // first worker failed to bind, it could be think the normal error then handle
+      // it, like port is used case. But if the first worker successfully to bind
+      // but the second worker failed, it's not expected and we need to assert
+      // here
+      ceph_assert(i == 0);
+      return r;
+    }
+    ++i;
+  }
+  _finish_bind(bind_addrs, bound_addrs);
+  return 0;
+}
+//启动AsyncMessenger
+int AsyncMessenger::start()
+{
+  std::scoped_lock l{lock};
+  ldout(cct,1) &lt;&lt; __func__ &lt;&lt; " start" &lt;&lt; dendl;
+ 
+  // register at least one entity, first!
+  ceph_assert(my_name.type() &gt;= 0);
+ 
+  ceph_assert(!started);
+  started = true;
+  stopped = false;
+ 
+  if (!did_bind) {
+    entity_addrvec_t newaddrs = *my_addrs;
+    for (auto&amp; a : newaddrs.v) {
+      a.nonce = nonce;
+    }
+    set_myaddrs(newaddrs);
+    _init_local_connection();  //建立连接
+  }
+ 
+  return 0;
+}</code></pre> 
+<h5 id="ceph-mon研究分析报告-3.2）加入集群">3.2）加入集群</h5> 
+<p>ceph-mon在与其他ceph-mon建立起链接过后会进入STATE_PROBING状态，然后发送OP_PROBE消息给各个节点，等待其他节点同步完成后开始插入到集群中。</p> 
+<pre><code class="language-cpp">void Monitor::bootstrap() 
+{
+.....
+  // probe monitors
+  dout(10) &lt;&lt; "probing other monitors" &lt;&lt; dendl;
+  for (unsigned i = 0; i &lt; monmap-&gt;size(); i++) {
+    if ((int)i != rank)
+      send_mon_message(
+    new MMonProbe(monmap-&gt;fsid, MMonProbe::OP_PROBE, name, has_ever_joined,  //发送probe消息给其他节点
+              ceph_release()),
+    i);
+......
+  dout(10) &lt;&lt; "bootstrap" &lt;&lt; dendl;
+  wait_for_paxos_write();  //等待其他节点同步完成
+......
+  if (monmap-&gt;contains(name))
+    quorum.insert(name);  //插入集群中
+....
+}</code></pre> 
+<h3 id="ceph-mon研究分析报告-4.mon选举">4.mon选举</h3> 
+<p><img alt="" height="601" src="https://images2.imgbox.com/ce/1b/g0g7kzX5_o.png" width="1180"></p> 
+<p>当mon增加或减少时，ceph-mon进程会触发回调函数call_async里start_election开始进行选举，在该函数里主要做了以下几件事：</p> 
+<p>1）如果Paxos正在STATE_WRITING或者STATE_WRITING_PREVIOUS状态，则等待paxos更新完成。</p> 
+<p>2）调用_reset()重置monitor中的服务，包括probe timeout事件、health检查事件、scrub事件等，并且restart paxos以及所有的paxos service服务。</p> 
+<p>3）设置自己进入STATE_ELECTING状态，并增加l_mon_num_elections和l_mon_election_call这些统计数据。</p> 
+<p>4）调用elector的call_election()进行选举。</p> 
+<p> </p> 
+<pre><code class="language-cpp">void Monitor::start_election()
+{
+  dout(10) &lt;&lt; "start_election" &lt;&lt; dendl;
+  wait_for_paxos_write(); //等待paxos的更新完成
+  _reset();
+  state = STATE_ELECTING;  //设置自身状态
+ 
+  logger-&gt;inc(l_mon_num_elections);
+  logger-&gt;inc(l_mon_election_call);
+ 
+  clog-&gt;info() &lt;&lt; "mon." &lt;&lt; name &lt;&lt; " calling monitor election";
+  elector.call_election();
+}
+ 
+// called by bootstrap(), or on leader|peon -&gt; electing
+void Monitor::_reset()
+{
+  dout(10) &lt;&lt; __func__ &lt;&lt; dendl;
+ 
+  // disable authentication
+  {
+    std::lock_guard l(auth_lock);
+    authmon()-&gt;_set_mon_num_rank(0, 0);
+  }
+ 
+  cancel_probe_timeout();
+  timecheck_finish();
+  health_events_cleanup();  //重置健康服务
+  health_check_log_times.clear();
+  scrub_event_cancel();
+ 
+  leader_since = utime_t();
+  quorum_since = {};
+  if (!quorum.empty()) {
+    exited_quorum = ceph_clock_now();
+  }
+  quorum.clear();
+  outside_quorum.clear();  //重置选举服务
+  quorum_feature_map.clear();
+ 
+  scrub_reset();
+ 
+  paxos-&gt;restart();
+ 
+  for (auto&amp; svc : paxos_service) {
+    svc-&gt;restart();
+  }
+}</code></pre> 
+<p>5）Elector::call_election ()，在这里主要做了以下几件事：</p> 
+<p>5.1）从Mon store中读出mon的election_epoch存储在epoch中，更新epoch的值使其变为奇数，表明进入了选举cycle。epoch为偶数，表明已经形成了稳定的quorum。epoch为偶数时表示为稳定状态，奇数为还在选举中。</p> 
+<p>5.2)把自己加入到acked_me map中，并设置electing_me为true，希望大家选自己当leader。</p> 
+<p>5.3)向monmap中的成员发送MMonElection::OP_PROPOSE消息。</p> 
+<pre><code class="language-cpp">void ElectionLogic::start()
+{
+  if (!participating) {
+    ldout(cct, 0) &lt;&lt; "not starting new election -- not participating" &lt;&lt; dendl;
+    return;
+  }
+  ldout(cct, 5) &lt;&lt; "start -- can i be leader?" &lt;&lt; dendl;
+ 
+  acked_me.clear();
+  init();
+   
+  // start by trying to elect me
+  if (epoch % 2 == 0) {
+    bump_epoch(epoch+1);  // odd == election cycle·更新epoch值为奇数
+  } else {
+    elector-&gt;validate_store();
+  }
+  electing_me = true;
+  acked_me.insert(elector-&gt;get_my_rank());  //加入acked_me
+  leader_acked = -1;
+ 
+  elector-&gt;propose_to_peers(epoch);  //发送OP_PROPOSE消息
+  elector-&gt;_start();
+}</code></pre> 
+<p>6）其它的Monitor收到消息后，经过dispatch逻辑，即Monitor:: ms_dispatch() --&gt; Monitor::_ms_dispatch() --&gt; Monitor::dispatch_op()--&gt; Elector::dispatch()，之后进入消息处理流程。dispatch()中调用Elector::handle_propose()，首先确保收到消息的epoch版本是处于选举的版本（奇数）并且满足对feature的要求，接着判断将自己的选举epoch设置为和消息中包含的epoch的值，最后调用ElectionLogic::receive_propose比对rank值，如果其他的Monitor它们自己的rank值更小，则自己不去确认此次选举，而是重新发起一轮选举，如果它们自己的rank值更大，则进入Elector::defer()流程，发送MMonElection::OP_ACK消息，确认该轮选举为最小的那个Monitor，这样经过rank值小的Monitor多次选举后，最终选出了rank值最小的那个Monitor，选它为leader。</p> 
+<pre><code class="language-cpp">bool ms_dispatch(Message *m) override {
+    std::lock_guard l{lock};
+    _ms_dispatch(m); //
+    return true;
+  }
+ 
+void Monitor::_ms_dispatch(Message *m)
+{
+......
+  if ((is_synchronizing() ||
+       (!s-&gt;authenticated &amp;&amp; !exited_quorum.is_zero())) &amp;&amp;
+      !src_is_mon &amp;&amp;
+      m-&gt;get_type() != CEPH_MSG_PING) {
+    waitlist_or_zap_client(op);
+  } else {
+    dispatch_op(op);  //
+  }
+  return;
+}
+void Monitor::dispatch_op(MonOpRequestRef op)
+{
+......
+    // elector messages
+    case MSG_MON_ELECTION:
+      op-&gt;set_type_election();
+      //check privileges here for simplicity
+      if (!op-&gt;get_session()-&gt;is_capable("mon", MON_CAP_X)) {
+        dout(0) &lt;&lt; "MMonElection received from entity without enough caps!"
+          &lt;&lt; op-&gt;get_session()-&gt;caps &lt;&lt; dendl;
+        return;;
+      }
+      if (!is_probing() &amp;&amp; !is_synchronizing()) {
+        elector.dispatch(op);  //
+      }
+......
+}
+ 
+void Elector::dispatch(MonOpRequestRef op)
+{
+  op-&gt;mark_event("elector:dispatch");
+  ceph_assert(op-&gt;is_type_election());
+ 
+  switch (op-&gt;get_req()-&gt;get_type()) {
+     
+  case MSG_MON_ELECTION:
+......
+      switch (em-&gt;op) {
+      case MMonElection::OP_PROPOSE:  //处理OP_PROPOSE消息
+    handle_propose(op);
+    return;
+......
+}
+ 
+void Elector::handle_propose(MonOpRequestRef op)
+{
+  op-&gt;mark_event("elector:handle_propose");
+  auto m = op-&gt;get_req&lt;MMonElection&gt;();
+  dout(5) &lt;&lt; "handle_propose from " &lt;&lt; m-&gt;get_source() &lt;&lt; dendl;
+  int from = m-&gt;get_source().num();
+ 
+  ceph_assert(m-&gt;epoch % 2 == 1); // election  确保选举epoch为奇数
+  uint64_t required_features = mon-&gt;get_required_features();
+  mon_feature_t required_mon_features = mon-&gt;get_required_mon_features();
+ 
+  dout(10) &lt;&lt; __func__ &lt;&lt; " required features " &lt;&lt; required_features
+           &lt;&lt; " " &lt;&lt; required_mon_features
+           &lt;&lt; ", peer features " &lt;&lt; m-&gt;get_connection()-&gt;get_features()
+           &lt;&lt; " " &lt;&lt; m-&gt;mon_features
+           &lt;&lt; dendl;
+ 
+  if ((required_features ^ m-&gt;get_connection()-&gt;get_features()) &amp;
+      required_features) {
+    dout(5) &lt;&lt; " ignoring propose from mon" &lt;&lt; from
+        &lt;&lt; " without required features" &lt;&lt; dendl;
+    nak_old_peer(op);
+    return;
+  } else if (mon-&gt;monmap-&gt;min_mon_release &gt; m-&gt;mon_release) {
+    dout(5) &lt;&lt; " ignoring propose from mon" &lt;&lt; from
+        &lt;&lt; " release " &lt;&lt; (int)m-&gt;mon_release
+        &lt;&lt; " &lt; min_mon_release " &lt;&lt; (int)mon-&gt;monmap-&gt;min_mon_release
+        &lt;&lt; dendl;
+    nak_old_peer(op);
+    return;
+  } else if (!m-&gt;mon_features.contains_all(required_mon_features)) {
+    // all the features in 'required_mon_features' not in 'm-&gt;mon_features'
+    mon_feature_t missing = required_mon_features.diff(m-&gt;mon_features);
+    dout(5) &lt;&lt; " ignoring propose from mon." &lt;&lt; from
+            &lt;&lt; " without required mon_features " &lt;&lt; missing
+            &lt;&lt; dendl;
+    nak_old_peer(op);
+  }
+  logic.receive_propose(from, m-&gt;epoch);  //比对rank值，决定选举权
+}
+ 
+void ElectionLogic::receive_propose(int from, epoch_t mepoch)
+{
+......
+  if (elector-&gt;get_my_rank() &lt; from) {
+    // i would win over them.
+    if (leader_acked &gt;= 0) {        // we already acked someone
+      ceph_assert(leader_acked &lt; from);  // and they still win, of course
+      ldout(cct, 5) &lt;&lt; "no, we already acked " &lt;&lt; leader_acked &lt;&lt; dendl;
+    } else {
+      // wait, i should win!
+      if (!electing_me) {
+    elector-&gt;trigger_new_election();
+      }
+    }
+  } else {   //自身rank值更大
+    // they would win over me
+    if (leader_acked &lt; 0 ||      // haven't acked anyone yet, or
+    leader_acked &gt; from ||   // they would win over who you did ack, or
+    leader_acked == from) {  // this is the guy we're already deferring to
+      defer(from);  //确认选举
+    } else {
+      // ignore them!
+      ldout(cct, 5) &lt;&lt; "no, we already acked " &lt;&lt; leader_acked &lt;&lt; dendl;
+    }
+  }......}</code></pre> 
+<h3 id="ceph-mon研究分析报告-5.同步数据">5.同步数据</h3> 
+<p>选举完成后，ceph-mon需要同步leader节点数据，触发MSG_MON_SYNC事件类型，经过调用栈dispatch_op-&gt;handle_sync-&gt;handle_sync_chunk→sync_finish调用apply_transaction进行数据同步。</p> 
+<pre><code class="language-cpp">void Monitor::sync_finish(version_t last_committed)
+{
+......
+ if (sync_full) {
+    // finalize the paxos commits
+    auto tx(std::make_shared&lt;MonitorDBStore::Transaction&gt;());
+    paxos-&gt;read_and_prepare_transactions(tx, sync_start_version,
+                     last_committed);
+    tx-&gt;put(paxos-&gt;get_name(), "last_committed", last_committed);
+ 
+    dout(30) &lt;&lt; __func__ &lt;&lt; " final tx dump:n";
+    JSONFormatter f(true);
+    tx-&gt;dump(&amp;f);
+    f.flush(*_dout);
+    *_dout &lt;&lt; dendl;
+ 
+    store-&gt;apply_transaction(tx);
+  }
+......
+}</code></pre> 
+<h3 id="ceph-mon研究分析报告-6.健康检查">6.健康检查</h3> 
+<p>当其他节点传入的消息op类型为CEPH_MSG_PING时，mon会执行handle_ping流程去处理，处理过程是先通过op获取到请求的消息，然后构造reply消息进行回复，reply消息的内容是通过mon内置的healthMonitor获取到的状态信息。</p> 
+<pre><code class="language-cpp">void Monitor::dispatch_op(MonOpRequestRef op)
+{
+.......
+    case CEPH_MSG_PING:
+      handle_ping(op); 
+      return;
+......
+}
+ 
+void Monitor::handle_ping(MonOpRequestRef op)
+{
+  auto m = op-&gt;get_req&lt;MPing&gt;();
+  dout(10) &lt;&lt; __func__ &lt;&lt; " " &lt;&lt; *m &lt;&lt; dendl;
+  MPing *reply = new MPing;
+  bufferlist payload;
+  boost::scoped_ptr&lt;Formatter&gt; f(new JSONFormatter(true));
+  f-&gt;open_object_section("pong");
+ 
+  healthmon()-&gt;get_health_status(false, f.get(), nullptr);
+  get_mon_status(f.get());
+ 
+  f-&gt;close_section();
+  stringstream ss;
+  f-&gt;flush(ss);
+  encode(ss.str(), payload);
+  reply-&gt;set_payload(payload);  //设置发送内容，即健康信息
+  dout(10) &lt;&lt; __func__ &lt;&lt; " reply payload len " &lt;&lt; reply-&gt;get_payload().length() &lt;&lt; dendl;
+  m-&gt;get_connection()-&gt;send_message(reply);  //发送回复
+}</code></pre> 
+<h2 id="ceph-mon研究分析报告-三、ceph-mon集群正常工作时的工作流程">三、ceph-mon集群正常工作时的工作流程</h2> 
+<p>ceph-mon集群正常运行情况下，mon数量和状态并没有发生变化，因此不会触发重新选举leader的行为，所以此时的ceph-mon更多的是监控和维护集群的状态，它会执行一些监控流程，比如监控集群状态情况、记录日志等。</p> 
+<p>1.记录日志</p> 
+<p>ceph-mon通过dout宏来将日志输出到指定文件中，日志路径可通过配置写入log_file变量中，当需要打印日志时，可通过如下方式写入日志到文件中(需要将ceph.conf中对应模块日志级别debug mgr、debug mon等调至20 dout（20）才能生效)：</p> 
+<pre><code class="language-cpp">void LogMonitor::update_from_paxos(bool *need_bootstrap)
+{
+.......
+      if (g_conf()-&gt;mon_cluster_log_to_file) {  //获取配置中的log_file变量，该变量存放日志位置
+    string log_file = channels.get_log_file(channel);
+    dout(20) &lt;&lt; __func__ &lt;&lt; " logging for channel '" &lt;&lt; channel
+         &lt;&lt; "' to file '" &lt;&lt; log_file &lt;&lt; "'" &lt;&lt; dendl;
+......
+}</code></pre> 
+<p>2.监控集群状态</p> 
+<p>2.1）ceph-mon定期进行对集群其他节点进行状态收集，状态收集的周期默认为30s，可通过mon_data_avail_warn进行配置更改周期长度，状态收集的过程实质是更新monmap、osdmap和pgmap这些表来监控集群的状态。</p> 
+<pre><code class="language-cpp">Option("mon_data_avail_warn", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+.set_default(30)  //配置默认30s
+.add_service("mon")
+.set_description("issue MON_DISK_LOW health warning when mon available space below this percentage"),</code></pre> 
+<p>2.2）每个节点的ceph-mon都会收集自身的节点状态，然后互相通信来同步各自节点的状态。</p> 
+<p>2.2.1）ceph-mon 在处理同步的流程中，根据ceph-mon发出的同步请求MMonSync::OP_CHUNK给leader进行处理，调用Monitor::handle_sync_chunk(MonOpRequestRef op)将数据发送给集群leader节点。</p> 
+<pre><code class="language-cpp">void Monitor::handle_sync(MonOpRequestRef op)
+{
+  auto m = op-&gt;get_req&lt;MMonSync&gt;();
+  dout(10) &lt;&lt; __func__ &lt;&lt; " " &lt;&lt; *m &lt;&lt; dendl;
+  switch (m-&gt;op) {
+ 
+    // provider ---------
+ 
+  case MMonSync::OP_CHUNK:  //同步
+  case MMonSync::OP_LAST_CHUNK:
+    handle_sync_chunk(op); 
+    break;
+......
+}
+ 
+void Monitor::handle_sync_chunk(MonOpRequestRef op)
+{
+......
+  if (m-&gt;op == MMonSync::OP_CHUNK) {
+    sync_reset_timeout();
+    sync_get_next_chunk();
+  } else if (m-&gt;op == MMonSync::OP_LAST_CHUNK) {
+    sync_finish(m-&gt;last_committed);
+  }
+......
+}</code></pre> 
+<p>2.2.2）选举完成后，ceph-mon需要同步leader节点数据，触发MSG_MON_SYNC事件类型，经过调用栈dispatch_op-&gt;handle_sync-&gt;handle_sync_chunk→sync_finish调用apply_transaction进行数据同步。</p> 
+<pre><code class="language-cpp">void Monitor::sync_finish(version_t last_committed)
+{
+......
+ if (sync_full) {
+    // finalize the paxos commits
+    auto tx(std::make_shared&lt;MonitorDBStore::Transaction&gt;());
+    paxos-&gt;read_and_prepare_transactions(tx, sync_start_version,
+                     last_committed);
+    tx-&gt;put(paxos-&gt;get_name(), "last_committed", last_committed);
+ 
+    dout(30) &lt;&lt; __func__ &lt;&lt; " final tx dump:n";
+    JSONFormatter f(true);
+    tx-&gt;dump(&amp;f);
+    f.flush(*_dout);
+    *_dout &lt;&lt; dendl;
+ 
+    store-&gt;apply_transaction(tx);
+  }
+......
+}</code></pre> 
+<h3 id="ceph-mon研究分析报告-其他：ceph-mon通信方式分析">其他：ceph-mon通信方式分析</h3> 
+<h4 id="ceph-mon研究分析报告-1）vip迁移到另外节点，ceph-mon恢复需要同步哪些数据">1）vip迁移到另外节点，ceph-mon恢复需要同步哪些数据</h4> 
+<p>当vip发生迁移时，需要同步迁移ceph-mon的节点的/var/lib/ceph/mon/$cluster-$ceph-id/目录内的所有数据，因为该目录存储了ceph-mon的所有数据。可参考：<a href="https://www.bookstack.cn/read/ceph-handbook/Advance_usage-mon_backup.md" title="https://www.bookstack.cn/read/ceph-handbook/Advance_usage-mon_backup.mdhttps://www.bookstack.cn/read/ceph-handbook/Advance_usage-mon_backup.md">https://www.bookstack.cn/read/ceph-handbook/Advance_usage-mon_backup.mdhttps://www.bookstack.cn/read/ceph-handbook/Advance_usage-mon_backup.md</a></p> 
+<p></p> 
+<h4 id="ceph-mon研究分析报告-2）数据通信">2）数据通信</h4> 
+<p>建立通信连接后，AsyncMessenger对象中的NetworkStack成员会默认创建三个worker（可配置），每个worker线程被创建时都会被命名为msgr-worker-0/1/2以此类推，这些线程是真正被用来进行通信的，具体通信方式是：每个线程中包含一个EventCenter去获取发生的事件，通过EventCenter内置的EpollDriver对象来获取并处理这些事件，该对象使用epoll网络模型，当某个socket有事件到来时，会被该epoll对象监测到并根据不同的事件类型进行处理，EventCenter中支持的事件类型有file事件和timer事件，主要包含事件的创建、删除以及处理超时事件。</p> 
+<pre><code class="language-cpp">NetworkStack::NetworkStack(CephContext *c, const string &amp;t): type(t), started(false), cct(c)
+{
+  const uint64_t InitEventNumber = 5000;
+  num_workers = cct-&gt;_conf-&gt;ms_async_op_threads;        // cct-&gt;_conf-&gt;ms_async_op_threads默认配置为3
+  for (unsigned i = 0; i &lt; num_workers; ++i) {
+    Worker *w = create_worker(cct, type, i);
+    w-&gt;center.init(InitEventNumber, i, type);
+    workers.push_back(w);
+  }
+  cct-&gt;register_fork_watcher(this);
+}
+//线程命名为msgr-worker-%u
+std::function&lt;void ()&gt; NetworkStack::add_thread(unsigned worker_id)
+{
+  Worker *w = workers[worker_id];  //worker线程
+  return [this, w]() {
+      char tp_name[16];
+      sprintf(tp_name, "msgr-worker-%u", w-&gt;id);
+      ceph_pthread_setname(pthread_self(), tp_name);
+      const unsigned EventMaxWaitUs = 30000000;
+      w-&gt;center.set_owner();  //创建CenterDriver
+      ldout(cct, 10) &lt;&lt; __func__ &lt;&lt; " starting" &lt;&lt; dendl;
+      w-&gt;initialize();
+      w-&gt;init_done();
+      while (!w-&gt;done) {
+        ldout(cct, 30) &lt;&lt; __func__ &lt;&lt; " calling event process" &lt;&lt; dendl;
+ 
+//创建worker如下
+Worker* NetworkStack::create_worker(CephContext *c, const string &amp;type, unsigned i)
+{
+  if (type == "posix")
+    return new PosixWorker(c, i);
+  ...
+}
+//EventCenter
+class Worker : public Thread {
+  ...
+  EventCenter center;
+  ...
+}
+ 
+//初始化EventCenter
+int EventCenter::init(int nevent, unsigned center_id, const std::string &amp;type)
+{
+  // can't init multi times
+  ceph_assert(this-&gt;nevent == 0);
+ 
+  this-&gt;type = type;
+  this-&gt;center_id = center_id;
+ 
+  if (type == "dpdk") {
+#ifdef HAVE_DPDK
+    driver = new DPDKDriver(cct);
+#endif
+  } else {
+#ifdef HAVE_EPOLL
+  driver = new EpollDriver(cct);  //使用epoll模型
+#else
+#ifdef HAVE_KQUEUE
+  driver = new KqueueDriver(cct);
+#else
+  driver = new SelectDriver(cct);
+#endif
+#endif
+  }
+......
+ 
+  int fds[2];
+  if (pipe_cloexec(fds, 0) &lt; 0) {  //创建管道
+    int e = errno;
+    lderr(cct) &lt;&lt; __func__ &lt;&lt; " can't create notify pipe: " &lt;&lt; cpp_strerror(e) &lt;&lt; dendl;
+    return -e;
+  }
+ 
+  notify_receive_fd = fds[0];
+  notify_send_fd = fds[1];
+  r = net.set_nonblock(notify_receive_fd); //设置非阻塞socket
+  if (r &lt; 0) {
+    return r;
+  }
+  r = net.set_nonblock(notify_send_fd);
+  if (r &lt; 0) {
+    return r;
+  }
+ 
+  return r;
+}
+}  // Used by internal thread
+  int create_file_event(int fd, int mask, EventCallbackRef ctxt);  //创建file事件
+  uint64_t create_time_event(uint64_t milliseconds, EventCallbackRef ctxt); //创建timer事件
+  void delete_file_event(int fd, int mask);
+  void delete_time_event(uint64_t id);
+  int process_events(unsigned timeout_microseconds, ceph::timespan *working_dur = nullptr);  //处理超时事件
+
+
+</code></pre> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

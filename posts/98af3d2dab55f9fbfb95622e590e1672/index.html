@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>DeepSpeed使用指南(简略版) - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">DeepSpeed使用指南(简略版)</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p>现在的模型越来越大，动辄几B甚至几百B。但是显卡显存大小根本无法支撑训练推理。例如，一块RTX2090的10G显存，光把模型加载上去，就会<code>OOM</code>，更别提后面的训练优化。</p> 
+<p>作为传统pytorch Dataparallel的一种替代，DeepSpeed的目标，就是为了能够让亿万参数量的模型，能够在自己个人的工作服务器上进行训练推理。</p> 
+<p>本文旨在简要地介绍Deepspeed进行大规模模型训练的核心理念，以及最基本的使用方法。更多内容，笔者强烈建议阅读HuggingFace Transformer官网对于DeepSpeed的教程：</p> 
+<p><a href="https://huggingface.co/docs/transformers/main/main_classes/deepspeed">Transformer DeepSpeed Integration</a></p> 
+<h2>
+<a id="1__TLDR_7"></a>1. 核心思想 (TLDR)</h2> 
+<p>DeepSpeed的核心就在于，<strong>GPU显存不够，CPU内存来凑</strong>。</p> 
+<p>比方说，我们只有一张10GB的GPU，那么我们很可能需要借助80GB的CPU，才能够训练一个大模型。</p> 
+<p>看一下官网对于这个理念的描述：</p> 
+<blockquote> 
+ <p>Why would you want to use DeepSpeed with just one GPU?</p> 
+ <ol>
+<li>It has a ZeRO-offload feature which can <strong>delegate some computations and memory to the host’s CPU and RAM, and thus leave more GPU resources for model’s needs</strong> - e.g. larger batch size, or enabling a fitting of a very big model which normally won’t fit.</li>
+<li>It provides a smart GPU memory management system, that minimizes memory fragmentation, which again allows you to fit bigger models and data batches.</li>
+</ol> 
+</blockquote> 
+<p>具体点说，DeepSpeed将当前时刻，训练模型用不到的参数，缓存到CPU中，等到要用到了，再从CPU挪到GPU。这里的“参数”，不仅指的是模型参数，还指optimizer、梯度等。</p> 
+<p>越多的参数挪到CPU上，GPU的负担就越小；但随之的代价就是，更为频繁的CPU，GPU交互，极大增加了训练推理的时间开销。因此，DeepSpeed使用的一个核心要义是，<strong>时间开销和显存占用的权衡</strong>。</p> 
+<h2>
+<a id="2__22"></a>2. 如何安装</h2> 
+<p>直接pip安装：</p> 
+<pre><code class="prism language-bash">pip <span class="token function">install</span> deepspeed
+</code></pre> 
+<p>官方更推荐的是用仓库本地编译安装，能够更加适配你的本地硬件环境：</p> 
+<pre><code class="prism language-bash"><span class="token function">git</span> clone https://github.com/microsoft/DeepSpeed/
+<span class="token builtin class-name">cd</span> DeepSpeed
+<span class="token function">rm</span> <span class="token parameter variable">-rf</span> build
+<span class="token assign-left variable">TORCH_CUDA_ARCH_LIST</span><span class="token operator">=</span><span class="token string">"8.6"</span> <span class="token assign-left variable">DS_BUILD_CPU_ADAM</span><span class="token operator">=</span><span class="token number">1</span> <span class="token assign-left variable">DS_BUILD_UTILS</span><span class="token operator">=</span><span class="token number">1</span> pip <span class="token function">install</span> <span class="token builtin class-name">.</span> <span class="token punctuation"></span>
+--global-option<span class="token operator">=</span><span class="token string">"build_ext"</span> --global-option<span class="token operator">=</span><span class="token string">"-j8"</span> --no-cache <span class="token parameter variable">-v</span> <span class="token punctuation"></span>
+--disable-pip-version-check <span class="token operator"><span class="token file-descriptor important">2</span>&gt;</span><span class="token file-descriptor important">&amp;1</span> <span class="token operator">|</span> <span class="token function">tee</span> build.log
+</code></pre> 
+<p>另外，<strong>HuggingFace提供了对DeepSpeed的友好集成</strong>，DeepSpeed使用所需要的很多参数，都可以由Transformer的<a href="https://huggingface.co/docs/transformers/main/en/main_classes/trainer#transformers.Trainer">Trainer</a>来自动指定。可以说，DeepSpeed在HuggingFace Transformer上的使用，会更为便捷（当然，DeepSpeed也可以独立使用，并不依赖于Transformer）。</p> 
+<p>作为Transformer的附属包安装：</p> 
+<pre><code class="prism language-bash">pip <span class="token function">install</span> transformers<span class="token punctuation">[</span>deepspeed<span class="token punctuation">]</span>
+</code></pre> 
+<h2>
+<a id="3__47"></a>3. 如何使用</h2> 
+<p>使用DeepSpeed之后，你的命令行看起来就会像下面这样：</p> 
+<pre><code class="prism language-bash">deepspeed <span class="token parameter variable">--master_port</span> <span class="token number">29500</span> <span class="token parameter variable">--num_gpus</span><span class="token operator">=</span><span class="token number">2</span> run_s2s.py <span class="token punctuation"></span>
+<span class="token parameter variable">--deepspeed</span> ds_config.json
+</code></pre> 
+<ul>
+<li>
+<code>--master_port</code>：端口号。最好显示指定，默认为29500，可能会被占用（i.e., 跑了多个DeepSpeed进程）。</li>
+<li>
+<code>--num_gpus</code>: GPU数目，默认会使用当前所见的所有GPU。</li>
+<li>
+<code>--deepspeed</code>: 提供的config文件，用来指定许多DeepSpeed的重要参数。</li>
+</ul> 
+<p>使用DeepSpeed的一个核心要点，就在于写一个<code>config</code>文件（可以是.json，也可以是类json格式的配置文件），在这个配置文件中，你可以指定你想要的参数，例如，权衡时间和显存 (前文所提到的，这是一个很重要的权衡)。因此，上面几个参数里，最重要的便是<code>--deepspeed</code>，即你提供的config文件，即<code>ZeRO</code>。这也是本文接下来要重点介绍的。</p> 
+<h3>
+<a id="31_ZeRO_63"></a>3.1 ZeRO概述</h3> 
+<p>Zero Redundancy Optimizer (ZeRO)是DeepSpeed的workhorse. 用户可以提供不同的ZeRO config文件，来实现DeepSpeed的不同功能特性。</p> 
+<p>来看一下<a href="https://deepspeed.readthedocs.io/en/latest/zero3.html#getting-started">官网教程</a>对ZeRO的描述：</p> 
+<blockquote> 
+ <p>The Zero Redundancy Optimizer (ZeRO) removes the memory redundancies across data-parallel processes by partitioning the three model states (optimizer states, gradients, and parameters) across data-parallel processes instead of replicating them. By doing this, it boosts memory efficiency compared to classic data-parallelism while retaining its computational granularity and communication efficiency.</p> 
+</blockquote> 
+<p>一句话总结： <code>partitioning instead of replicating</code>，<strong>划分而不是复制</strong>。</p> 
+<p>即，传统的深度学习，模型训练并行，是将模型参数复制多份到多张GPU上，只将数据拆分（如，torch的Dataparallel），这样就会有大量的显存冗余浪费。而ZeRO就是为了消除这种冗余，提高对memory的利用率。注意，这里的“memory”不仅指多张GPU memory，还包括CPU。</p> 
+<p>而ZeRO的实现方法，就是把参数占用，逻辑上分成三种类型。将这些类型的参数划分：</p> 
+<ul>
+<li>
+<code>optimizer states</code>：即优化器的参数状态。例如，Adam的动量参数。</li>
+<li>
+<code>gradients</code>：梯度缓存，对应于optimizer。</li>
+<li>
+<code>parameters</code>：模型参数。</li>
+</ul> 
+<p>对应的，DeepSpeed的ZeRO config文件就可以分为如下几类：</p> 
+<ul>
+<li>
+<code>ZeRO Stage 1</code>: 划分optimizer states。优化器参数被划分到多个memory上，每个momoey上的进程只负责更新它自己那部分参数。</li>
+<li>
+<code>ZeRO Stage 2</code>: 划分gradient。每个memory，只保留它分配到的optimizer state所对应的梯度。这很合理，因为梯度和optimizer是紧密联系在一起的。只知道梯度，不知道optimizer state，是没有办法优化模型参数的。</li>
+<li>
+<code>ZeRO Stage 3</code>: 划分模型参数，或者说，不同的layer. ZeRO-3会在forward和backward的时候，自动将模型参数分配到多个memory。</li>
+</ul> 
+<p>由于ZeRO-1只分配optimizer states(参数量很小)，实际使用的时候，<strong>我们一般只会考虑<code>ZeRO-2</code>和<code>ZeRO-3</code>。</strong></p> 
+<p>接下来介绍stage 2和3的常用config文件。</p> 
+<h3>
+<a id="32_ZeRO_Stage_2_91"></a>3.2 ZeRO Stage 2</h3> 
+<p>结合官网的介绍，笔者提供一个常用的ZeRO-stage-2的config文件：</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">{<!-- --></span>
+    <span class="token key atrule">"bfloat16"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"enabled"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"fp16"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"enabled"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"loss_scale"</span><span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"loss_scale_window"</span><span class="token punctuation">:</span> <span class="token number">1000</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"initial_scale_power"</span><span class="token punctuation">:</span> <span class="token number">16</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"hysteresis"</span><span class="token punctuation">:</span> <span class="token number">2</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"min_loss_scale"</span><span class="token punctuation">:</span> <span class="token number">1</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"optimizer"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"type"</span><span class="token punctuation">:</span> <span class="token string">"AdamW"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"params"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token key atrule">"lr"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"betas"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"eps"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"weight_decay"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"scheduler"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"type"</span><span class="token punctuation">:</span> <span class="token string">"WarmupLR"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"params"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token key atrule">"warmup_min_lr"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"warmup_max_lr"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"warmup_num_steps"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"zero_optimization"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"stage"</span><span class="token punctuation">:</span> <span class="token number">2</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"offload_optimizer"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token key atrule">"device"</span><span class="token punctuation">:</span> <span class="token string">"cpu"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"pin_memory"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"allgather_partitions"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"allgather_bucket_size"</span><span class="token punctuation">:</span> <span class="token number">2e8</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"overlap_comm"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"reduce_scatter"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"reduce_bucket_size"</span><span class="token punctuation">:</span> <span class="token number">2e8</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"contiguous_gradients"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"gradient_accumulation_steps"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"gradient_clipping"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"train_batch_size"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"train_micro_batch_size_per_gpu"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"steps_per_print"</span><span class="token punctuation">:</span> <span class="token number">1e5</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>有关于<code>offload</code>
+</li></ul> 
+<p>上述参数中，最重要的一个就是<code>"offload_optimizer"</code>。如上述所示，我们将其<code>”device“</code>设置成了cpu，DeepSpeed就会按照之前提到过的ZeRO操作，在训练过程中，将优化器状态分配到cpu上。从而降低单张GPU的memory占用。</p> 
+<ul><li>有关于<code>overlap_comm</code>
+</li></ul> 
+<p>另外一个需要提到的参数是<code>overlap_comm</code>。简单地理解，它控制着多个memory上进程之间通信的buffer的大小。这个值越大，进程之间通信越快，模型训练速度也会提升，但相应的显存占用也会变大；反之亦然。</p> 
+<p>因此，<code>overlap_comm</code>也是一个需要进行一定权衡的参数。</p> 
+<ul><li>有关于<code>auto</code>
+</li></ul> 
+<p>我们可以发现，上述大量参数被设置为<code>auto</code>。由于DeepSpeed目前已经被集成到了HuggingFace Transformer框架。而DeepSpeed的很多参数，和Transformer的Trainer参数设置是一模一样的，例如，<code>"optimizer"</code>，<code>"scheduler"</code>。因此，官方推荐将很多常用的模型训练参数，设置为<code>auto</code>，在使用Trainer进行训练的时候，这些值都会自动更新为Trainer中的设置，或者帮你自动计算。</p> 
+<p>当然，你也可以自己设置，但一定要确保和Trainer中的设置一样。因为，如果设置错误，DeepSpeed还是会正常运行，不会立即报错。</p> 
+<ul><li>总结</li></ul> 
+<p>大多数情况下，你只需要注意DeepSpedd-specific参数(如，offload)，其他和Trainner重复的参数项，强烈建议设置成<code>auto</code>。而具体这些每一项参数的含义，和值的设置，请参见官网的<a href="https://www.deepspeed.ai/docs/config-json/">详细介绍</a>。</p> 
+<p>总而言之，由于设置了<code>auto</code>，上述config，能够适配大多数的Transformer框架<code>stage-2</code>的use-cases。</p> 
+<h3>
+<a id="33_ZeRO_Stage_3_168"></a>3.3 ZeRO Stage 3</h3> 
+<p>和Stage-2类似，笔者也提供一个stage-3的模板config</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">{<!-- --></span>
+    <span class="token key atrule">"bfloat16"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"enabled"</span><span class="token punctuation">:</span> <span class="token boolean important">false</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"fp16"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"enabled"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"loss_scale"</span><span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"loss_scale_window"</span><span class="token punctuation">:</span> <span class="token number">1000</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"initial_scale_power"</span><span class="token punctuation">:</span> <span class="token number">16</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"hysteresis"</span><span class="token punctuation">:</span> <span class="token number">2</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"min_loss_scale"</span><span class="token punctuation">:</span> <span class="token number">1</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"optimizer"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"type"</span><span class="token punctuation">:</span> <span class="token string">"AdamW"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"params"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token key atrule">"lr"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"betas"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"eps"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"weight_decay"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"scheduler"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"type"</span><span class="token punctuation">:</span> <span class="token string">"WarmupLR"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"params"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token key atrule">"warmup_min_lr"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"warmup_max_lr"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"warmup_num_steps"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"zero_optimization"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token key atrule">"stage"</span><span class="token punctuation">:</span> <span class="token number">3</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"offload_optimizer"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token key atrule">"device"</span><span class="token punctuation">:</span> <span class="token string">"cpu"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"pin_memory"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"offload_param"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token key atrule">"device"</span><span class="token punctuation">:</span> <span class="token string">"cpu"</span><span class="token punctuation">,</span>
+            <span class="token key atrule">"pin_memory"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"overlap_comm"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"contiguous_gradients"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"sub_group_size"</span><span class="token punctuation">:</span> <span class="token number">1e9</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"reduce_bucket_size"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"stage3_prefetch_bucket_size"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"stage3_param_persistence_threshold"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"stage3_max_live_parameters"</span><span class="token punctuation">:</span> <span class="token number">1e9</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"stage3_max_reuse_distance"</span><span class="token punctuation">:</span> <span class="token number">1e9</span><span class="token punctuation">,</span>
+        <span class="token key atrule">"stage3_gather_fp16_weights_on_model_save"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"gradient_accumulation_steps"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"gradient_clipping"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"steps_per_print"</span><span class="token punctuation">:</span> <span class="token number">1e5</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"train_batch_size"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"train_micro_batch_size_per_gpu"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+    <span class="token key atrule">"wall_clock_breakdown"</span><span class="token punctuation">:</span> <span class="token boolean important">false</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>有关于<code>“offload_param”</code>
+</li></ul> 
+<p>可以看到，除了和stage2一样，有<code>offload_optimizer</code>参数之外，stage3还有一个<code>offload_param</code>参数。即，将模型参数进行划分。</p> 
+<ul><li>stage-3相关的其他参数</li></ul> 
+<p>下面这些参数是stage-3-specific的：</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">"sub_group_size"</span><span class="token punctuation">:</span> <span class="token number">1e9</span><span class="token punctuation">,</span>
+<span class="token key atrule">"reduce_bucket_size"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+<span class="token key atrule">"stage3_prefetch_bucket_size"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+<span class="token key atrule">"stage3_param_persistence_threshold"</span><span class="token punctuation">:</span> <span class="token string">"auto"</span><span class="token punctuation">,</span>
+<span class="token key atrule">"stage3_max_live_parameters"</span><span class="token punctuation">:</span> <span class="token number">1e9</span><span class="token punctuation">,</span>
+<span class="token key atrule">"stage3_max_reuse_distance"</span><span class="token punctuation">:</span> <span class="token number">1e9</span><span class="token punctuation">,</span>
+<span class="token key atrule">"stage3_gather_fp16_weights_on_model_save"</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+</code></pre> 
+<p>一样的道理，这些值很多都可以用来控制stage-3的显存占用和训练效率(e.g.，<code>sub_group_size</code>)；同时，有一些参数也可以设置为auto，让Trainer去决定值(e.g., <code>reduce_bucket_size</code>,<code>stage3_prefetch_bucket_size</code>,<code>stage3_param_persistence_threshold</code>).</p> 
+<p>对于这些参数的具体描述，和值的trade-off，详见官网：<br> <a href="https://huggingface.co/docs/transformers/main/main_classes/deepspeed#zero3-config">ZeRO-3 Config</a></p> 
+<ul><li>总结</li></ul> 
+<p>一样的道理，上述config文件，也能够适配绝大多是use-cases。一些stage-3-specific的参数可能需要额外注意一下。具体而言，推荐阅读官方文档。</p> 
+<h3>
+<a id="34_ZeRO_Infinity_255"></a>3.4 ZeRO Infinity</h3> 
+<p>除了stage2和3之外，这里简单介绍一下<code>ZeRO-Infinity</code>。</p> 
+<p><code>ZeRO-Infinity</code>可以看成是stage-3的进阶版本，需要依赖于<a href="https://en.wikipedia.org/wiki/NVM_Express">NVMe</a>的支持。他可以offload所有模型参数状态到CPU以及NVMe上。得益于NMVe协议，除了使用CPU内存之外，ZeRO可以额外利用SSD(固态)，从而极大地节约了memory开销，加速了通信速度。</p> 
+<p>官网对于<code>ZeRO-Infinity</code>的详细介绍：</p> 
+<blockquote> 
+ <p><a href="https://deepspeed.readthedocs.io/en/latest/zero3.html#getting-started"><strong>DeepSpeed官方教程</strong></a> ：<br> ZeRO-Infinity has all of the savings of ZeRO-Offload, plus is able to offload more the model weights and has more effective bandwidth utilization and overlapping of computation and communication.<br> <a href="https://huggingface.co/docs/transformers/main/main_classes/deepspeed#nvme-support"><strong>HuggingFace官网</strong></a>：<br> It allows for training incredibly large models by extending GPU and CPU memory with NVMe memory. Thanks to smart partitioning and tiling algorithms each GPU needs to send and receive very small amounts of data during offloading so modern NVMe proved to be fit to allow for an even larger total memory pool available to your training process. ZeRO-Infinity requires ZeRO-3 enabled.</p> 
+</blockquote> 
+<p>具体config文件，以及使用事项，请参见官网。</p> 
+<h2>
+<a id="4__268"></a>4. 其他</h2> 
+<h3>
+<a id="41__270"></a>4.1 模型推理</h3> 
+<p>除了模型训练，有时候模型太大，连预测推理都有可能炸显存。</p> 
+<p>DeepSpeed自然也支持推理。自然，推理的时候，用和<strong>stage-3一样参数的config文件</strong>就可以，其中某些训练参数是会被自动忽略掉的(如，optimizer，lr)。</p> 
+<p>具体参考：<br> <a href="https://huggingface.co/docs/transformers/main/main_classes/deepspeed#zero-inference">ZeRO-Inference</a></p> 
+<h3>
+<a id="42_span_idjumpspan_279"></a>4.2 <span id="jump">内存估计</span>
+</h3> 
+<p>如之前多次强调的，DeepSpeed使用过程中的一个难点，就在于<code>时间和空间</code>的权衡。</p> 
+<p>分配更多参数到CPU上，虽然能够降低显存开销，但是也会极大地提升时间开销。</p> 
+<p>DeepSpeed提供了一段简单的memory估算代码：</p> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> transformers <span class="token keyword">import</span> AutoModel
+<span class="token keyword">from</span> deepspeed<span class="token punctuation">.</span>runtime<span class="token punctuation">.</span>zero<span class="token punctuation">.</span>stage3 <span class="token keyword">import</span> estimate_zero3_model_states_mem_needs_all_live
+
+<span class="token comment">## specify the model you want to train on your device</span>
+model <span class="token operator">=</span> AutoModel<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span><span class="token string">"t5-large"</span><span class="token punctuation">)</span> 
+<span class="token comment">## estimate the memory cost (both CPU and GPU)</span>
+estimate_zero3_model_states_mem_needs_all_live<span class="token punctuation">(</span>model<span class="token punctuation">,</span> num_gpus_per_node<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> num_nodes<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>以T5-large，只使用一块GPU为例，使用DeepSpeed的开销将会如下：</p> 
+<p><img src="https://images2.imgbox.com/5b/90/0fw0CRUa_o.png" alt="在这里插入图片描述"><br> 如上，如果不用stage2和stage3(最下面那两行)，训练T5-large需要一张显存至少为12.49GB的显卡(考虑到很多其他的缓存变量，还有你的batch_size，实际上可能需要24GB大小的卡)。而在相继使用了stage2和3之后，显存开销被极大地降低，转而CPU内存消耗显著提升，模型训练时间开销也相应地增大。</p> 
+<p><em><strong>建议:</strong></em><br> 在使用DeepSpeed之前，先使用上述代码，大概估计一下显存消耗，决定使用的GPU数目，以及ZeRO-stage。</p> 
+<p>原则是，<strong>能直接多卡训练，就不要用ZeRO；能用ZeRO-2就不要用ZeRO-3.</strong></p> 
+<p>具体参见官网：<a href="https://huggingface.co/docs/transformers/main/main_classes/deepspeed#memory-requirements">Memory Requirements</a></p> 
+<h3>
+<a id="43__307"></a>4.3 使用测评</h3> 
+<p>笔者尝试使用DeepSpeed进行模型的训练。</p> 
+<hr> 
+<p>首先是stage 2，也就是只把optimizer放到cpu上。下面是使用前后的GPU显存占用和训练速度对比：</p> 
+<ul>
+<li>GPU显存：<code>20513</code>MB =&gt; <code>17349</code>MiB</li>
+<li>训练速度 (由<code>tqdm</code>估计)：<code>1.3</code> iter/s =&gt; <code>0.77</code> iter/s</li>
+</ul> 
+<p>可以明显看到，GPU的显存占用有了明显降低，但是训练速度也变慢了。以笔者当前的使用体感来说，deepspeed并没有带来什么收益。</p> 
+<p>笔者的机器配有<code>24000</code>MB的显卡，batch_size为2时，占用<code>20513</code>MB；而DeepSpeed仅仅帮助笔者空出了<code>3000</code>MB的显存，<strong>还是完全不够增加batch_size</strong>, 导致笔者总训练时长变长。</p> 
+<p>因此，DeepSpeed或许仅适用于显存极度短缺（i.e., 模型大到 batch_size == 1也跑不了）的情况；亦或是，使用DeepSpped节省下来的显存，刚好够支持更大的batch_size。否则，像笔者当前这种情况下，使用DeepSpeed只会增加时间开销，并没有其他益处。</p> 
+<hr> 
+<p>此后，笔者还尝试使用stage 3，但是<strong>速度极其缓慢</strong>。一个原先需要6h的训练过程，用了DeepSpeed stage3之后，运行了2天2夜，也没有结束的迹象。无奈笔者只好终止测试。</p> 
+<p>此外，在使用DeepSpeed stage2时，由于分配了模型参数到多个设备上，console里面也看不到任何输出信息（但是GPU还是在呼呼响，utility也为100%），让人都不知道程序的运行进度，可以说对用户非常不友好了。</p> 
+<h3>
+<a id="44__329"></a>4.4 一些常见问题</h3> 
+<p>由于DeepSpeed会通过占用CPU内存来减缓GPU的开销，当系统CPU不够的时候，DeepSpeed进程就会自动被系统停止，<strong>造成没有任何报错，DeepSpeed无法启动的现象</strong>。建议先用上文介绍的<a href="#jump">estimation</a>估计一下CPU内存占用，然后用<code>free -h</code>查看一下机器的CPU内存空余量，来判断能否使用DeepSpeed。</p> 
+<p>另外，还有可能因为训练精度问题，出现loss为<code>NAN</code>的情况。详见：<a href="https://huggingface.co/docs/transformers/main/main_classes/deepspeed#troubleshooting">Troubleshooting</a>.</p> 
+<hr> 
+<p>使用DeepSpeed stage2之后，就不能灵活地更改optimizer了。下图是DeepSpeed.py的源代码：<br> <img src="https://images2.imgbox.com/7c/92/sDTZ7Ev6_o.png" alt="在这里插入图片描述"><br> 默认optimizer必须在config里面设置好，也就是使用默认的优化器和学习率，不能实现分组学习率。如果要自定义optimizer的初始化过程，必须实现两个版本的optimizer（CPU+GPU）。如官方所述：</p> 
+<blockquote> 
+ <p>Detected ZeRO Offload and non-DeepSpeed optimizers: This combination should work as long as the <strong>custom optimizer has both CPU and GPU implementation</strong> (except LAMB).</p> 
+</blockquote> 
+<p>总之这种情况下想要自定义optimizer，就会变得比较麻烦。</p> 
+<hr> 
+<p>最后，有关于VScode的重度依赖患者：<br> 很遗憾，DeepSpeed进程目前还不支持在Vscode进行debug，因为缺少相应的VScode编译插件的支持。详见：<a href="https://github.com/microsoft/DeepSpeed/issues/938">github issue</a></p> 
+<hr> 
+<h2>
+<a id="5__349"></a>5. 参考：</h2> 
+<ol>
+<li><a href="https://huggingface.co/docs/transformers/main/main_classes/deepspeed">HuggingFace Transformer DeepSpeed Integration</a></li>
+<li><a href="https://deepspeed.readthedocs.io/en/latest/index.html">DeepSpeed Tutorial 英文教程</a></li>
+<li><a href="https://www.deepspeed.ai/docs/config-json/#zero-optimizations-for-fp16-training">DeepSpeed Setup 参数说明</a></li>
+</ol>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

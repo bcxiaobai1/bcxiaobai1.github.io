@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>OneFlow源码解析：静态图与运行时 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">OneFlow源码解析：静态图与运行时</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p style="text-align:center"><img alt="e280ea25e4fec9b711e37c34b99cec10.jpeg" src="https://images2.imgbox.com/36/ca/ihX1sDa9_o.jpg"></p> 
+ <p style="text-align:justify"><br><strong>作者｜郑建华<br> 更新｜许啸宇、张文骁、成诚</strong><br><br> OneFlow静态图的训练效率远高于动态图（eager模式）。本文试图通过一个简单例子，结合<a href=""><strong>v0.8.0版本</strong></a>的代码，解读一下静态图和运行时的实现机制。</p> 
+ <p style="text-align:left">在开始之前，建议先读一下参考资料中《OneFlow框架的系统设计（<em>https://zhuanlan.zhihu.com/p/337851255</em>）》等系列文章。对静态图、运行时的基本概念和设计理念有基本的了解，会更容易理解代码。</p> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>1 </strong></p> 
+ <p style="text-align:center"><strong>代码示例</strong></p> 
+ <p style="text-align:left">下面的示例代码来自官方文档（<em>https://docs.oneflow.org/master/basics/08_nn_graph.html</em>），是一个线性模型的前向计算。后续主要基于这段代码进行分析。</p> 
+ <pre class="has"><code class="language-ruby">import oneflow as flow
+import oneflow.nn as nn
+
+
+class ModuleMyLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.weight = nn.Parameter(flow.randn(in_features, out_features))
+        self.bias = nn.Parameter(flow.randn(out_features))
+
+
+    def forward(self, input):
+        return flow.matmul(input, self.weight) + self.bias
+
+
+linear_model = ModuleMyLinear(4, 3)
+
+
+class GraphMyLinear(nn.Graph):
+    def __init__(self):
+        super().__init__()
+        # ModuleBlock
+        self.model = linear_model
+
+
+    def build(self, input):
+        # ModuleBlock.__call__
+        return self.model(input)
+
+
+graph_mylinear = GraphMyLinear()
+input = flow.randn(1, 4)
+out = graph_mylinear(input)
+print(out)</code></pre> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>2 </strong></p> 
+ <p style="text-align:center"><strong>oneflow包的初始化</strong></p> 
+ <p style="text-align:left">import oneflow在初始化包（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/__init__.py</em>）时，与静态图相关的主要操作如下：</p> 
+ <ul>
+<li> <p style="text-align:left">GetEnv（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/__init__.py#L228</em>）</p> 
+   <ul><li> <p style="text-align:left">EnvGlobalObjectsScope::Init（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/env_global_objects_scope.cpp#L126</em>）</p> 
+     <ul>
+<li> <p style="text-align:left">启动各个节点的控制面（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/env_global_objects_scope.cpp#L160-L162</em>）网络连接</p> </li>
+<li> <p style="text-align:left">初始化VM（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/env_global_objects_scope.cpp#L180</em>）</p> </li>
+<li> <p style="text-align:left">启动各个节点的数据面网络连接（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/env_global_objects_scope.cpp#L184-L188</em>）</p> </li>
+<li> <p style="text-align:left">初始化KernelObserver（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/env_global_objects_scope.cpp#L192-L203</em>）</p> </li>
+</ul>
+</li></ul>
+</li>
+<li> <p style="text-align:left">NewDefaultSession（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/__init__.py#L229</em>）</p> 
+   <ul>
+<li> <p style="text-align:left">RegsiterSession（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/multi_client_session.py#L39</em>） 创建 Session，并注册为 default session（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/session_util.cpp#L89</em>）</p> </li>
+<li> <p style="text-align:left">创建 Python MultiClientSession 并保存到dict（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/session_context.py#L40</em>），但并不 TryInit</p> 
+     <ul><li> <p style="text-align:left">创建 C++ MultiClientSessionContext（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/multi_client_session.py#L41</em>） 但并不 TryInit</p> </li></ul>
+</li>
+</ul>
+</li>
+</ul>
+ <p style="text-align:left">EnvGlobalObjectsScope::Init中先创建一个全局的ProcessCtx（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/env_global_objects_scope.cpp#L132</em>）对象。然后根据环境变量等配置，在各个进程间创建gRPC和CommNet的连接，分别负责控制面和数据面的数据传输。其中在Bootstrap过程中会初始化全局的ProcessCtx（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/rpc/lib/grpc.cpp#L42</em>），给每个进程分配一个全局唯一的rank编号（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/rpc/lib/global_process_ctx.cpp#L28</em>）（machine_id（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/rpc/lib/global_process_ctx.cpp#L24</em>））。</p> 
+ <p style="text-align:justify">本文不涉及网络层面的操作，只讨论同一进程内各线程间的交互。</p> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>3 </strong></p> 
+ <p style="text-align:center"><strong>Module类</strong></p> 
+ <p style="text-align:justify">虽然可以直接用op和tensor构造模型，但是op的粒度太细了，直接用op构造模型会比较繁琐。</p> 
+ <p style="text-align:left">Module（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/module.py#L54</em>）是由op和tensor构成的、可复用的子模块。利用Module可以更高效、更快捷的构建复杂模型。oneflow.nn（<em>https://github.com/Oneflow-Inc/oneflow/blob/d825243aa7aff5cba8bd3a901b4cc56c2b1a36af/python/oneflow/nn/__init__.py</em>）模块导出了很多预定义的Module。</p> 
+ <p style="text-align:left">Module定义了自己的属性设置逻辑（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/module.py#L262</em>），核心逻辑是</p> 
+ <ul>
+<li> <p style="text-align:justify">如果value是Parameter类型，就保存到Module._parameters中</p> </li>
+<li> <p style="text-align:justify">如果value是Module类型，就保存到Module._modules中</p> </li>
+<li> <p style="text-align:justify">如果value是Tensor类型，就保存到Module._buffers中</p> </li>
+<li> <p style="text-align:justify">否则按常规属性处理</p> </li>
+</ul>
+ <p style="text-align:justify">Module可以包含子Module，形成树结构。因为Module通过setattr将子Module和Parameter都保存到字典结构中，可以方便的遍历所有Module及其参数tensor。</p> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>4 </strong></p> 
+ <p style="text-align:center"><strong>Graph类</strong></p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>4.1 构造函数</strong></p> 
+ <p style="text-align:left">Graph的构造函数中GetDefaultSession（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L145</em>）得到的session，就是导入oneflow包时NewDefaultSession（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/__init__.py#L229</em>）构建的session。当时没有初始化，而是在Graph构造时进行初始化（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L147</em>）。对应的C++函数是MultiClientSessionContext::TryInit（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/multi_client_session_context.cpp#L67</em>），执行时会创建各种全局的资源管理器，比如：<br>  </p> 
+ <ul>
+<li> <p style="text-align:justify">LazyJobBuildAndInferCtxMgr</p> </li>
+<li> <p style="text-align:justify">BufferMgr</p> </li>
+<li> <p style="text-align:justify">RegstMgr</p> </li>
+<li> <p style="text-align:justify">ActorMsgBus</p> </li>
+<li> <p style="text-align:justify">ThreadMgr</p> </li>
+</ul>
+ <h3></h3> 
+ <p style="text-align:justify"><strong>4.2 __setattr__: 将Module和Tensor封装为Block</strong></p> 
+ <p style="text-align:justify">Graph.__setattr__ 支持通过设置属性的方式把一个 Module 添加到 Graph 中，之后改 Module 就可以被 Graph 调用了。添加到 Graph 中的 Module，会被包装到 Block 里面，Block 起到了代理执行的作用，它会给原 Eager 下的 Module 扩展出静态执行需要的一些特殊功能。</p> 
+ <p style="text-align:justify">添加到 Graph 中的 Module 和原 Module 共享了状态（Parameter、Buffer）和 forward 执行逻辑。共享 forward 执行逻辑使得静态和动态执行计算逻辑相同。共享状态则可以使动态图下的模型状态被静态图复用。基于此，两个 Graph，一个用于训练，一个用于预测，他们都复用统一模型 Module，这样训练和预测 Graph 也就实现了模型共享。</p> 
+ <p style="text-align:left">setattr最重要的动作就是对_add_block的调用（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L1332</em>），_add_block中主要是调用get_block_cls并保存结果（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L1326</em>）。get_block_cls（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L39</em>）的作用是将Module及其所有Tensor属性都转为对应的Block对象。为什么要做这个动作呢？主要是静态图编译需要借助Block类型来实现代理执行的功能，这些功能不适合直接写到 eager 下的 Module 和 Tensor 上。</p> 
+ <p style="text-align:left">这个转换是在ModuleBlock构造时调用set_origin（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L131</em>）完成的。对于子Module，会递归调用get_block_cls函数（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L145</em>），这样所有子Module及其Tensor属性都会被转换为对应的Block对象。</p> 
+ <p style="text-align:justify">所以，上述示例代码中，GraphMyLinear实际存储的是ModuleBlock，Graph.build执行时获取的model属性也是ModuleBlock对象，ModuleBlock.origin才是ModuleMyLinear。</p> 
+ <p style="text-align:left">Graph.__setattr__不允许将Tensor对象设置为属性（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L1340</em>）。Tensor只能存到Module中，因为 Module 是做状态共享的基本单位，而 Graph 是不允许复用的。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>4.3 针对不同任务，定义不同的计算图</strong></p> 
+ <p style="text-align:left">根据Oneflow Model Zoo的模型示例（<em>https://github.com/Oneflow-Inc/models/blob/1b291f78d8f60e5f04ee0c5962e4611cc4bab40a/Vision/classification/image/alexnet/graph/train.py</em>），train/eval等阶段可以创建不同的Graph子类。动态图下提供了 Module、Optimizer、Dataloader等模块，这些模型都可以被添加到 Graph 中。不同的组合可以构建不同类型的任务。</p> 
+ <p style="text-align:justify">在这些不同阶段，Graph构造函数的行为、build函数的输入输出都有各自特点。了解这些，看后续代码时会更容易理解各个参数的具体含义。</p> 
+ <ul>
+<li> <p style="text-align:justify">构造函数</p> 
+   <ul>
+<li> <p style="text-align:justify">train阶段，需要添加Module、损失函数、优化器和dataloader</p> </li>
+<li> <p style="text-align:justify">eval阶段，只需要添加Module和dataloader</p> </li>
+</ul>
+</li>
+<li> <p style="text-align:justify">build函数</p> 
+   <ul>
+<li> <p style="text-align:justify">train</p> 
+     <ul>
+<li> <p style="text-align:justify">导入样本和label</p> </li>
+<li> <p style="text-align:justify">调用Module得到前向计算结果</p> </li>
+<li> <p style="text-align:justify">计算损失</p> </li>
+<li> <p style="text-align:justify">计算梯度</p> </li>
+<li> <p style="text-align:justify">返回loss</p> </li>
+</ul>
+</li>
+<li> <p style="text-align:justify">eval</p> 
+     <ul>
+<li> <p style="text-align:justify">导入样本和label</p> </li>
+<li> <p style="text-align:justify">调用Module得到预估结果</p> </li>
+<li> <p style="text-align:justify">返回预估结果和label</p> </li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+ <h3></h3> 
+ <p style="text-align:justify"><strong>4.4 小结</strong></p> 
+ <p style="text-align:justify">上述几个类型的关系如下：</p> 
+ <p style="text-align:justify"><img alt="a714129bd3b8cbfd483f412b01a5223b.png" src="https://images2.imgbox.com/9d/27/QAgH1tN5_o.png"></p> 
+ <p style="text-align:justify">下面描述了GraphMyLinear的构造流程</p> 
+ <pre class="has"><code class="language-ruby">* `__init__`
+  * `Graph.__init__`
+  * self.model = linear_model
+    * `Graph.__setattr__`
+      * _add_block
+        * get_block_cls: 递归地把Module转为ModuleBlock
+        * `ModuleBlock.__init__`
+          * ModuleBlock.set_origin
+            * `ModuleBlock._origin = origin` (Module)
+            * 对origin的sub modules, parameters, buffers递归调用get_block_cls
+            * `ModuleBlock.__setattr__`</code></pre> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>5 </strong></p> 
+ <p style="text-align:center"><strong>逻辑图的编译</strong></p> 
+ <p style="text-align:left">计算机语言的编译，是将高级语言的语句编译为汇编或机器指令。深度学习框架对计算任务的编译，是将用户的特定语句操作转换为DAG图。oneflow中用Job（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/job.proto#L30</em>）描述逻辑的计算图。</p> 
+ <p style="text-align:justify">不同于eager模式的动态图，静态图在开始执行前可以得到整个计算任务的所有信息，可以对DAG进行多轮优化。每轮优化都是输入一个Job、得到一个新Job。</p> 
+ <p style="text-align:left">最后，根据分布式环境配置，将逻辑图Job转换为物理执行的计算图Plan（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/plan.proto#L34</em>）。在物理图中，一个op可能分布在多个节点/进程。</p> 
+ <p style="text-align:justify">启动DAG计算需要调用Graph.__call__，这个函数的执行主要分以下几个步骤：</p> 
+ <ul><li> <p style="text-align:justify">__call__</p> 
+   <ul>
+<li> <p style="text-align:left">_compile（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L221</em>） if not _is_compiled</p> 
+     <ul>
+<li> <p style="text-align:left">build_graph（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L741</em>）</p> 
+       <ul><li> <p style="text-align:left">__build_graph（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L759</em>）</p> </li></ul>
+</li>
+<li> <p style="text-align:justify">finish_complie_and_init_runtime（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L742</em>）</p> </li>
+</ul>
+</li>
+<li> <p style="text-align:left">__run（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L226</em>）</p> </li>
+</ul>
+</li></ul>
+ <p style="text-align:justify">逻辑图编译主要在__build_graph中进行。finish_complie_and_init_runtime会继续做一些优化pass，然后构建物理图、初始化运行时Actor系统。__run会启动一次DAG的运算。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>5.1 graph_build_context: 为逻辑图编译设置基本环境</strong></p> 
+ <p style="text-align:justify">在 Graph 中，build 函数里面的代码执行都在 graph_build_context 的作用域下，这样实现了动态转静态的功能。</p> 
+ <p style="text-align:left">__build_graph中的graph_build_context（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L851</em>）虽然只有一行代码，但却做了几件非常重要的事情。</p> 
+ <p style="text-align:left">首先在context作用域内设置全局的lazy_mode为True（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L46</em>）。在这个context作用域内，所有op都由LazyInterpreter解释执行。</p> 
+ <p style="text-align:left">其次，在JobBuildAndInferCtx（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L47</em>）作用域内，JobBuildAndInferCtx_Open（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L57</em>）调用类似如下C++代码</p> 
+ <pre class="has"><code class="language-javascript">// oneflow/api/python/job_build/job_build_and_infer.h
+// oneflow/core/job/job_build_and_infer_ctx_mgr.cpp
+
+
+// 如前所述，LazyJobBuildAndInferCtxMgr 在 MultiClientSessionContext::TryInit 执行时初始化。
+// LazyJobBuildAndInferCtxMgr mgr;
+mgr.OpenJobBuildAndInferCtx(job_name);</code></pre> 
+ <p style="text-align:left">OpenJobBuildAndInferCtx会新建一个Job对象（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/job_build_and_infer_ctx_mgr.cpp#L32</em>）、一个LazyJobBuildAndInferCtx对象（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/job_build_and_infer_ctx_mgr.cpp#L34</em>）。LazyJobBuildAndInferCtx负责根据用户定制的op等操作，修改Job，其中最主要的功能是添加新 Op。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>5.2 __build_io：为计算图添加input和output Op</strong></p> 
+ <pre class="has"><code class="language-css">self.__build_io("input", graph_build_util.build_graph_input_arg, *args, **kwargs)</code></pre> 
+ <p style="text-align:left">上面这行代码（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L854-L856</em>）的作用是，对于用户传递给graph_mylinear(input)的input参数，针对其中的每个tensor都在逻辑计算图中插入一个FeedInputOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/system_ops.h#L48</em>）节点。也就是说，model的输入（比如样本tensor，具体参考4.3节），在静态图中也视为一个op操作。</p> 
+ <p style="text-align:justify">__build_io内会用args（即input）和kwargs构造一个ArgsTree。ArgsTree 把 Python 下的输入、输出抽象成了一个树，输入、输出可以是嵌套的 Tuple、List、Dict，元素是 Tensor，嵌套的结构刚好可以表示为树，而 Tensor 是树中的叶子节点。示例代码中kwargs是空的。</p> 
+ <p style="text-align:left">遍历ArgsTree，对args和kwargs的每个tensor都调用传入的build_func，对于input来说，就是build_graph_input_arg（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L206</em>）。后面会看到，model的output也会调用__build_io，所以这个函数名的意思应该就是对model的输入、输出进行静态图的构图工作。</p> 
+ <p style="text-align:left">build_graph_input_arg内部会构造一个FeedInputOpExpr（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L213</em>），提交给解释器执行。因为是在lazy作用域内，由LazyInterpreter解释执行（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L471</em>），LazyInterpreter会将对应的op插入静态图。</p> 
+ <p style="text-align:justify">附：build input时ArgsTree的内部结构</p> 
+ <p style="text-align:justify"><img alt="0a6b6c85614174cdc63f23cb4422c0ce.png" src="https://images2.imgbox.com/32/ed/bU4mmASC_o.png"></p> 
+ <p style="text-align:justify">__build_io(input) 中 ArgsTree 的内部数据组织示意</p> 
+ <ul><li> <p style="text-align:justify">_named_io_args: NamedArg</p> 
+   <ul><li> <p style="text-align:justify">_value: tuple</p> 
+     <ul>
+<li> <p style="text-align:justify">[0]: NamedArg</p> 
+       <ul><li> <p style="text-align:justify">_value: tuple of NamedArg</p> 
+         <ul><li> <p style="text-align:justify">[0]: NamedArg</p> 
+           <ul><li> <p style="text-align:justify">_value: args tensor from Graph.__call__</p> </li></ul>
+</li></ul>
+</li></ul>
+</li>
+<li> <p style="text-align:justify">[1]: NamedArg</p> 
+       <ul><li> <p style="text-align:justify">_value: empty kwargs from Graph.__call__</p> </li></ul>
+</li>
+</ul>
+</li></ul>
+</li></ul>
+ <p style="text-align:left">通过pdb命令可以查看变量: p args_tree._named_io_args._value[0]._value[0]._value.to_numpy()</p> 
+ <p style="text-align:justify"><strong>5.2.1 将op添加到逻辑图</strong></p> 
+ <p style="text-align:left">LazyInterpreter::ApplyImpl（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L471</em>）在执行时，GetCurInferCtx()（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L500</em>）返回的就是graph_build_context中OpenJobBuildAndInferCtx（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L57</em>）创建的那个LazyJobBuildAndInferCtx对象，这个对象负责逻辑图的构建。添加op的主要调用流程如下：</p> 
+ <ul>
+<li> <p style="text-align:left">infer_ctx-&gt;AddAndInferConsistentOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L503</em>）</p> </li>
+<li> <p style="text-align:left">AddAndInferOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/job_build_and_infer_ctx.cpp#L563</em>）</p> </li>
+<li> <p style="text-align:left">ConstructOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/job_build_and_infer_ctx.cpp#L580</em>）</p> </li>
+<li> <p style="text-align:left">CheckAndConstructOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/operator/operator.cpp#L1216</em>）</p> </li>
+<li> <p style="text-align:left">NewObj（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/operator/operator.cpp#L51</em>）</p> </li>
+</ul>
+ <p style="text-align:left"><br> OperatorConf中，多种op配置共享op_type字段（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/operator/op_conf.proto#L412</em>），protobuf oneof的op_type_case常量作为注册NewObj的key。</p> 
+ <p style="text-align:left">系统预定义的op在oneflow/core/operator（<em>https://github.com/Oneflow-Inc/oneflow/tree/release/v0.8.0/oneflow/core/operator</em>）下，例如UserOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/operator/user_op.h#L24</em>）。</p> 
+ <p style="text-align:justify">AddAndInferOp将返回的Operator保存到LazyJobBuildAndInferCtx的字典中。后续的函数调用，主要是进行推导并修改静态图Job，使得各个节点构成一个DAG。</p> 
+ <p style="text-align:justify">JobBuildAndInferCtx相关的类关系如下：</p> 
+ <p style="text-align:justify"><img alt="0820ba8658ba6b061b7efe19c14ef22f.png" src="https://images2.imgbox.com/c3/c2/WpplFhXn_o.png"></p> 
+ <p style="text-align:justify"><strong>5.2.2 lazy tensor 和 eager tensor 的区别</strong></p> 
+ <p style="text-align:left">LazyInterpreter::ApplyImpl的最后，会调用BuildTensor（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L518</em>）构造一个lazy tensor，作为build_graph_input_arg的返回值（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L216</em>）。所以__build_io返回的lazy_args（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L854</em>）是lazy tensor，它将替代eager的args（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L828</em>）（也就是用户输入的input）参与后续的计算图构建。</p> 
+ <p style="text-align:justify">那么lazy tensor和eager tensor的区别是什么呢？eager tensor是要即时计算的，所以需要真实数据；而lazy tensor仅在静态图编译阶段用于推导，只需要描述性质的元信息。静态图编译是在lazy模式下运行，只是使用lazy tensor 做计算机构图和校验。</p> 
+ <p style="text-align:justify">后面会看到，静态图的运行期已经没有tensor的概念。运行期看到的只是更广义的Regst存储，可能代表tensor/blob，也可能是其它控制信息。静态图运行时的输入，是直接读取外部 eager tensor的内存数据到到regst；输出应该是op写到regst，通过blob构造eager tensor。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>5.3 build: 将UserOp和FeedVariableOp添加到逻辑图</strong></p> 
+ <p style="text-align:left">__build_graph中的self.build()（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L861</em>）会调用GraphMyLinear.build()，以及ModuleMyLinear.forward()。因为是在lazy模式下运行，matmul和add都会调用UserOpExpr重载版本的LazyInterpreter::ApplyImpl（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L832</em>），进而调用AddAndInferConsistentOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L940</em>）进行构图操作。</p> 
+ <p style="text-align:left">需要说明的是，在引用Module的Parameter属性时（如weight/bias），会触发FeedVariableOp的构图操作（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L226</em>）、调用对应版本的LazyInterpreter::ApplyImpl（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L527</em>）。这个是怎么执行的呢？</p> 
+ <p style="text-align:left">__build_graph中，在进入lazy模式之前，先调用了_create_states_builder（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L843</em>）。其中self._state()（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L667</em>）返回所有Module的所有Parameter（包括子Module）。</p> 
+ <p style="text-align:left">state_block的类型是TensorBlock（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L631</em>）。所有的state_block的lazy_origin_builder().method（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L647</em>）都被设置为调用build_graph_state（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L683-L688</em>）。</p> 
+ <p style="text-align:left">给build_graph_state（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L220</em>）设置个断点能让整个调用过程显形，主要的调用栈如下：</p> 
+ <pre class="has"><code class="language-ruby">-&gt; out = graph_mylinear(input)
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/graph.py(221)__call__()
+-&gt; self._compile(*args, **kwargs)
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/graph.py(741)_compile()
+-&gt; _, eager_outputs = self.build_graph(*args, **kwargs)
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/graph.py(759)build_graph()
+-&gt; outputs = self.__build_graph(*args, **kwargs)
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/graph.py(864)__build_graph()
+-&gt; outputs = self.build(*lazy_args, **lazy_kwargs)
+  /mnt/project/machine-learning/oneflow/oneflow/test.py(21)build()
+-&gt; return self.model(input)
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/block.py(234)__call__()
+-&gt; result = self.__block_forward(*args, **kwargs)
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/block.py(266)__block_forward()
+-&gt; result = self._origin.__class__.forward(self, *args, **kwargs)
+  /mnt/project/machine-learning/oneflow/oneflow/test.py(11)forward()
+-&gt; return flow.matmul(input, self.weight) + self.bias
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/block.py(483)__getattr__()
+-&gt; p_state = self._get_from_states(name, "_parameters")
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/block.py(521)_get_from_states()
+-&gt; _s_block.try_build()
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/block.py(679)try_build()
+-&gt; self._lazy_origin_builder.try_build(self)
+  /usr/local/lib64/python3.6/site-packages/oneflow/nn/graph/block.py(627)try_build()
+-&gt; self.result = self.method()
+&gt; /usr/local/lib64/python3.6/site-packages/oneflow/framework/graph_build_util.py(227)build_graph_state()
+-&gt; op_name, var_conf_str, ["in_0"], ["out_0"]</code></pre> 
+ <p style="text-align:left">这个调用过程比较容易困扰的是，执行对象会在Grpah、GraphMyLinear、ModuleMyLinear、ModuleBlock之间切换。</p> 
+ <p style="text-align:left">前面在讨论Graph的构造时已经提过，执行self.model(input)时，Graph.__getattr__返回的属性model是ModuleBlock对象，所以实际调用的是ModuleBlock.__call__。</p> 
+ <p style="text-align:left">在这个函数内调用__block_forward（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L234</em>），其中的_origin（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L266</em>）是ModuleMyLinear，进入到它的forward方法，执行到flow.matmul(input, self.weight) + self.bias时，matmul 会被LazyOpInterpreter 所执行，在 LazyOpInterpreter 中调用 AddAndInferConsistentOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L503</em>）</p> 
+ <p style="text-align:left">，在 Job 中添加一个 matmul operator。同理后面的加法会在 job 中添加一个 add operator。</p> 
+ <p style="text-align:left">self.weight 和 self.bias 会触发调用ModuleBlock.__getattr__，进而调用_get_from_states（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L483</em>），调用TensorBlock.try_build()（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/block.py#L521</em>）。这里执行的就是进入lazy模式之前设置的build_graph_state（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/framework/graph_build_util.py#L220</em>）。从而增加一个FeedVariableOp到计算图（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L527</em>）。为什么设置和调用会距离这么远呢？主要是为了让参数尽量和消费参数的 Operator 在一个作用域下，所以实现成了惰性求值来达到延迟计算的目的。</p> 
+ <p style="text-align:left">再后面的步骤就是调用__build_io（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L869-L875</em>）插入FetchOutputOp（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/op_interpreter/lazy_op_interpreter.cpp#L589</em>）。也就是说，获取model的output也是一个op。</p> 
+ <p style="text-align:left">到目前为止，前向计算图就构建完成了。它的json表示可以参考附录。net.op是计算图的节点，通过input等属性可以看出节点之间的连接关系。</p> 
+ <p style="text-align:left">示例代码的前向计算图如下。从这个图可以看到，input、output、weights等都是op。</p> 
+ <p style="text-align:justify"><img alt="daa1b8f1e66b6e63587631b427c33760.png" src="https://images2.imgbox.com/70/62/VdZaLG0Y_o.png"></p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>5.4 逻辑图优化</strong></p> 
+ <p style="text-align:left">在__build_graph中会调用CurJobBuildAndInferCtx_Complete对静态图进行多轮优化（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L923</em>），对应的C++函数是LazyJobBuildAndInferCtx::Complete()（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/job_build_and_infer_ctx.cpp#L975</em>）。</p> 
+ <p style="text-align:justify">这之后生成的Job是full_job。本文的示例代码比较简单，并不是典型的计算场景，其forwar和ful计算图的拓扑是一样的。实际大部的图优化都实现在这个阶段，如 Op fusion、AMP、ZeRO、常量折叠等等。</p> 
+ <p style="text-align:justify">到这里，逻辑图构建的主体部分就结束了。</p> 
+ <p style="text-align:left">随后会构建一个CNNGraph对象（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L947</em>），对应的C++类型是NNGraph（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.h#L33</em>）。这个对象将负责构建物理计算图Plan。它也是整个运行时的拥有者和维护者。这个对象析构时，整个运行时也会有序终止并释放资源。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>5.5 物理图的编译</strong></p> 
+ <p style="text-align:left">接下来就是执行finish_complie_and_init_runtime（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L742</em>），其中的核心调用是self._c_nn_graph.complie_and_init_runtime()（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/python/oneflow/nn/graph/graph.py#L802</em>），对应的C++函数是NNGraph::CompileAndInitRuntime（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.cpp#L265</em>）。</p> 
+ <p style="text-align:left">在这个函数中，JobCompleter().Complete()（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.cpp#L280</em>）会继续对逻辑图做几轮修改优化，补全 Runtime 执行所需要的附加信息，Compiler().Compile()（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.cpp#L285</em>）将逻辑图转为分设备的物理图，并继续对Plan进行修改优化。</p> 
+ <p style="text-align:left">Plan的编译是在master节点进行的（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.cpp#L282</em>）。master节点会将Plan通过gRPC推送给各个worker节点（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.cpp#L308</em>），worker节点从master拉取物理计算图（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.cpp#L310</em>）。</p> 
+ <p style="text-align:left">之后调用NewRuntimeBuffers创建Buffer对象（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.cpp#L322</em>），Buffer应该是主要用于进程内的信息同步。</p> 
+ <p style="text-align:justify">然后就准备初始化运行时了。</p> 
+ <p style="text-align:justify">示例代码生成的compiled_job和物理图Plan的json参见附录。</p> 
+ <p style="text-align:justify">最终生成的compiled逻辑图如下。框架自动插入了很多系统控制节点。</p> 
+ <p style="text-align:center"><img alt="8f0b572fdacaa177d5038eaadc5d2faf.png" src="https://images2.imgbox.com/7a/2c/x9kFwc9e_o.png"></p> 
+ <p style="text-align:justify"><br><strong>5.6 Plan的结构</strong></p> 
+ <p style="text-align:justify">示例代码输出的Plan json数据见附录。</p> 
+ <p style="text-align:justify">Plan在逻辑上和compiled_job是等价的。这里主要关注task/op之间的关系。</p> 
+ <p style="text-align:justify">Plan.task中的每个元素是一个task，其中的exec_sequence.exec_node对应job中的op，通常只有一个op（数组可以支持sub graph）。</p> 
+ <p style="text-align:justify">exec_node.kernel_conf.op_attribute描述了op信息。其中op_conf包含op name信息。</p> 
+ <p style="text-align:justify">kernel_conf.op_attribute.op_conf就是Job中的OperatorConf。</p> 
+ <p style="text-align:justify">kernel_conf.op_attribute.arg_signature.bn_in_op2lbi体现了task/op之间的连接关系。</p> 
+ <p style="text-align:justify">bn_in_op就是blob name in op，即op输入的blob name。</p> 
+ <p style="text-align:justify">以System-AutoTick-DstSubsetTick_21为例</p> 
+ <pre class="has"><code class="language-json">{
+  "out": {
+    "op_name": "System-AutoTick-DstSubsetTick_21",
+    "blob_name": "out"
+  },
+  "in_0": {
+    "op_name": "System-EagerCriticalSection-Interface-End-Tick-19",
+    "blob_name": "out"
+  },
+  "in_1": {
+    "op_name": "System-AutoTick-SrcSubsetTick_20",
+    "blob_name": "out"
+  }
+}</code></pre> 
+ <p style="text-align:justify">exec_node.bn_in_op2regst_desc_id在task层面体现了连接关系。这个map中的key表示输入输出，value是register id。</p> 
+ <pre class="has"><code class="language-json">{
+"out": "29",
+"in_0": "27",
+"in_1": "28"
+}</code></pre> 
+ <p style="text-align:justify">task.produced_regst_desc描述了对应task生产的register，consumer_task_id是消费者，</p> 
+ <p style="text-align:justify">produced_regst_desc.out.regst_desc_type.data_regst_desc.lbi2blob_desc.lbi就是这个register的logic blob id。</p> 
+ <p style="text-align:justify">task.consumed_regst_desc_id描述了对应task消费的register信息</p> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>6 </strong></p> 
+ <p style="text-align:center"><strong>运行时的初始化</strong></p> 
+ <p style="text-align:left">NNGraph::CompileAndInitRuntime中，new Runtime这行代码会初始化运行时（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/framework/nn_graph.cpp#L331</em>）。主要做的事情包括：</p> 
+ <ul>
+<li> <p style="text-align:justify">创建Thread</p> </li>
+<li> <p style="text-align:justify">通知Thread创建Actor，Actor会创建Regst和Kernel</p> </li>
+<li> <p style="text-align:justify">给没有输入的source_tasks发送启动信号kStart</p> </li>
+</ul>
+ <h3></h3> 
+ <p style="text-align:justify"><strong>6.1 Runtime创建Thread</strong></p> 
+ <p style="text-align:left">在Runtime的构造函数中，DumpThreadIdsFromPlan（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/runtime.cpp#L65</em>）会将Plan中属于当前进程的task的thread id存入thread_ids_变量。AddThreads创建这些Thread对象（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/runtime.cpp#L69</em>）。</p> 
+ <p style="text-align:left">Thread在构造时会创建一个物理线程（ <em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/thread/thread.cpp#L39</em>），线程执行的是PollMsgChannel方法（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/thread/thread.cpp#L44</em>），Thread就是在这里持续等待需要处理的新消息。</p> 
+ <p style="text-align:left">Thread只处理两类命令消息：线程终止消息，创建Actor的消息。其它消息交给Actor::ProcessMsg处理（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/thread/thread.cpp#L83</em>）。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>6.2 Runtime通知Thread创建Actor</strong></p> 
+ <p style="text-align:left">在Runtime的构造函数中，tasks被分为两类：source_tasks和other_tasks。在示例代码中，source_tasks（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/runtime.cpp#L84-L85</em>）是没有输入边的task。</p> 
+ <p style="text-align:left">从代码逻辑看，在Plan proto中，task的consumed_regst_desc_id字段是一个map。如果这个map的所有key都是in_ctrl（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/runtime.cpp#L54</em>），这个task就是source_tasks。</p> 
+ <p style="text-align:left">一些source_tasks的示例如下：</p> 
+ <ul>
+<li> <p style="text-align:justify">System-Src-WaitAndSendIds_16</p> </li>
+<li> <p style="text-align:justify">System-AutoTick-AppendDeviceTick_9</p> </li>
+<li> <p style="text-align:justify">System-EagerCriticalSection-Interface-End-Tick-19</p> </li>
+<li> <p style="text-align:justify">System-EagerCriticalSection-Interface-End-Tick-25</p> </li>
+</ul>
+ <p style="text-align:left">Runtime调用HandoutTasks函数（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/runtime.cpp#L100-L101</em>）会给ActorMsgBus发送构建Actor的kConstructActor消息（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/runtime.cpp#L49</em>）。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>6.3 ActorMsgBus和Thread的消息处理</strong></p> 
+ <p style="text-align:left">从接口看，ActorMsgBus （<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor_message_bus.cpp#L24</em>）负责消息的发送（Actor通过ActorMsgBus发送消息），Thread::PollMsgChannel（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/thread/thread.cpp#L60</em>） 负责消息的接收和处理。</p> 
+ <p style="text-align:justify">相关实体的协作关系如下</p> 
+ <ul>
+<li> <p style="text-align:justify">Actor是自调度的基本单元，接受消息然后工作，工作完后再继续发送消息。</p> 
+   <ul>
+<li> <p style="text-align:justify">actor_id就是task_id，是在编译Plan时就确定的。task是编译时概念，actor是对等的运行时概念。</p> </li>
+<li> <p style="text-align:left">task_id有特定的编码格式（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/graph/task_id.cpp#L21-L29</em>），从中可以解析出machine_id（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/graph/task_id.cpp#L73</em>）和thread_id（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/graph/task_id.cpp#L77</em>）。</p> </li>
+<li> <p style="text-align:justify">在跨网络的整个物理图Plan中，actor id相当于地址，通过它可以定位唯一的actor实体。</p> </li>
+</ul>
+</li>
+<li> <p style="text-align:left">Actor 通过 ActorMsgBus::SendMsg（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor_message_bus.cpp#L24</em>） 发送 ActorMsg（<em>https://github.com/Oneflow-Inc/oneflow/blob/4856d691051accd72f13f4139d281e411977b297/oneflow/core/lazy/actor/actor_message.h#L34</em>） 消息。</p> 
+   <ul>
+<li> <p style="text-align:left">ActorMsg包含源和目的actor id（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor_message.h#L84-L85</em>）。</p> </li>
+<li> <p style="text-align:left">如果是进程内通讯（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor_message_bus.cpp#L26</em>），将通过 ActorMsgBus::SendMsgWithoutCommNet （<em>https://github.com/Oneflow-Inc/oneflow/blob/4856d691051accd72f13f4139d281e411977b297/oneflow/core/lazy/actor/actor_message_bus.cpp#L49</em>）把 ActorMsg 朝目的 actor 所在的 thread 入队消息（<em>https://github.com/Oneflow-Inc/oneflow/blob/4856d691051accd72f13f4139d281e411977b297/oneflow/core/thread/thread.h#L40</em>）。</p> </li>
+<li> <p style="text-align:left">Thread::EnqueueActorMsg 会判断当前 thread 是否是 actor thread，如果是则入本地队列，否则则入 actor thead 的 channel 队列。</p> </li>
+<li> <p style="text-align:left">如果ActorMsg是跨进程消息，ActorMsgBus通过CommNet发送消息（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor_message_bus.cpp#L42-L44</em>），接收方的CommNet应该会根据actor id获得线程id，从ThreadMgr查到Thread，将消息交给Thread处理。</p> </li>
+</ul>
+</li>
+<li> <p style="text-align:left">Thread::PollMsgChannel（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/thread/thread.cpp#L60</em>） 负责消息的接收和处理。</p> 
+   <ul>
+<li> <p style="text-align:left">如果线程本地队列local_msg_queue_为空，则从thread的channel队列中取出全部ActorMsg放入本地队列（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/thread/thread.cpp#L63</em>）。</p> </li>
+<li> <p style="text-align:left">从本地队列中取出一个ActorMsg，然后开始处理。</p> </li>
+<li> <p style="text-align:left">处理一些特殊的kCmdMsg消息（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/thread/thread.cpp#L67-L79</em>），然后普通消息交给Actor自行处理（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/thread/thread.cpp#L83</em>）。</p> </li>
+</ul>
+</li>
+<li> <p style="text-align:left">Actor收到消息后，会判断是否满足了Act的条件，如果满足，则会执行Act，从而调用LaunchKernel执行计算，Act执行结束后通过ActorMsgBus发消息通知上下游Actor。</p> </li>
+</ul>
+ <p style="text-align:left">这些对象之间的消息传递关系如下图所示</p> 
+ <p style="text-align:justify"><img alt="806204607cdd45cecd5502258a28a0f2.png" src="https://images2.imgbox.com/75/bf/0fzSpuPp_o.png"></p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>6.4 激活source Actor</strong></p> 
+ <p style="text-align:justify">目前的实现中，Actor全部是自调度的，只能接受来自其他Actor的消息。Actor中有一类比较特殊的source actors，它们与source tasks对应。</p> 
+ <p style="text-align:justify">source actors 没有上游 actor，它们会朝下游actor发送消息从而激活所有的Actor运行。</p> 
+ <p style="text-align:left">source actors 本身是如何执行的呢？它们在接受到 kStart 消息后就会一直 Act 直到进入退出流程。但是其 kernel 会阻塞在 Buffer（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/common/buffer.h#L26</em>） 处，一直等待其他线程往 buffer 中添加数据后，阻塞会被激活，然后 kernel 执行读取，kernel 完成后，actor 的 Act 结束，往下游发送消息。</p> 
+ <p style="text-align:justify">source actors 由于会发生阻塞，所以其必须有单独的 actor thread。</p> 
+ <p style="text-align:justify">Runtime 初始化的的最后一步就是朝各 source actors 发送 kStart 消息用以激活它们，但 source actors 只有接受到 buffer 的数据后才会往下执行，然后朝下游 actors 发送消息，使所有的 actors 都执行起来。</p> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>7 </strong></p> 
+ <p style="text-align:center"><strong>Actor</strong></p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>7.1 Actor的创建</strong></p> 
+ <p style="text-align:left">Thread在创建Actor时，会先尝试创建为LightActor（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/thread/thread.cpp#L104</em>），如果不成功，再尝试用预先注册的工厂创建Actor。</p> 
+ <p style="text-align:left">有几种TaskType可以用于LightActor（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/light_actor.cpp#L677-L689</em>）：</p> 
+ <ul>
+<li> <p style="text-align:justify">kNormalForward，比如matmul、add等user op。</p> </li>
+<li> <p style="text-align:justify">kCopyHd</p> </li>
+<li> <p style="text-align:justify">kTick</p> </li>
+<li> <p style="text-align:justify">kCollectiveBoxingGeneric</p> </li>
+</ul>
+ <p style="text-align:left">目前大约有20多种Actor的子类型。其它Actor类型根据TaskType（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/job/task.proto#L8</em>）预先注册。例如WaitAndSendIdsActor。</p> 
+ <p style="text-align:justify">示例代码的各个节点对应的actor类型参见附录。</p> 
+ <p style="text-align:justify">Actor相关的类关系如下（包含关系只是表示可以访问到相关信息，并不意味着创建或着拥有该类型对象）</p> 
+ <p style="text-align:justify"><img alt="2a41b458ec9cc328534b4029eee0af92.png" src="https://images2.imgbox.com/c0/9c/oPsb1fJF_o.png"></p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>7.2 Actor的初始化</strong></p> 
+ <p style="text-align:left">Actor的构造函数一般都是空的，构建之后需要执行Init（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L129</em>）函数进行初始化。</p> 
+ <p style="text-align:justify">LightActor继承自ActorBase，不是Actor的子类，有自己的Init函数实现。这里只讨论Actor的初始化。</p> 
+ <p style="text-align:left">在Actor::Init（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L129</em>）中，首先调用ConstructKernel（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L138</em>）创建kernel实例。和Operator类似，kernel也是以OpTypeCase作为注册的key，例如WaitAndSendIdsKernel（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/kernel/wait_and_send_ids_kernel.cpp#L51</em>）。一个Actor通常只有一个kernel。</p> 
+ <p style="text-align:left">之后调用NewRegsts创建Regst（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L152</em>）。Tensor是用户侧的概念。对应的运行时概念是Regst（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/register/register.h#L24</em>），它持有Kernel需要读写的内存。Regst的概念比Tensor更宽泛，比如框架自动添加的控制Op也会用到Regst。</p> 
+ <p style="text-align:left">Actor将自己创建的Regst保存到produced_regsts_（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L153</em>）。</p> 
+ <p style="text-align:left">TakeOverNaiveConsumed（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L182</em>）只记录需要消费的regst id，但并不push到consumed_regsts_。</p> 
+ <p style="text-align:left">TakeOverNaiveProduced（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L183</em>）既记录生产的regst id，也push到naive_produced_rs_（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L249</em>）。这种区别是为了首次执行计算时，actor能顺利执行。后面分析Actor的消息处理时会再回过头来讨论一下。</p> 
+ <p style="text-align:justify">调用InitBnInOp2BlobInfo会初始化BlobInfo（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L184</em>）。</p> 
+ <p style="text-align:left">之后就是调用VirtualActorInit（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.cpp#L185</em>），这里允许各个Actor子类定制自己的初始化逻辑。通常会调用OF_SET_MSG_HANDLER宏（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.0/oneflow/core/lazy/actor/actor.h#L76-L80</em>）设置Actor的消息处理函数。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>7.3 Actor的消息处理</strong></p> 
+ <p style="text-align:left">LightActor 首先会根据消息类型分别处理 kRegstMsg 和 kEordMsg 消息。HandleRegstMsg（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/lazy/actor/light_actor.cpp#L424</em>） 中根据 RegstMsg 的 type (kProduced 或 kComsumed) 来分别处理各种读写状态计数。</p> 
+ <p style="text-align:left">然后判断读写计数是否达到了判断条件，如果达到了意味着满足了读写 regst 的条件，然后就 执行 ActOnce（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/lazy/actor/light_actor.cpp#L451</em>）。</p> 
+ <p style="text-align:left">LightActor::ActOnce 会在第一次执行时去 InitBnInOp2Blob 和 InitActMsg。InitBnInOp2Blob 初始化 resgt 中的 bn 与 Blob 的映射关系，为 kernel 提供通过 bn 访问 Blob 的功能。InitActMsg 会初始化好所有需要发送的消息避免后继发消息时重复的构建消息。</p> 
+ <p style="text-align:left">然后就是 LaunchKernel，接着会 ResetState 重置 regst 状态。</p> 
+ <p style="text-align:left">LaunchKernel 后就会把之前构建好的消息发送出去，同步消息会直接入队 thread 消息队列，异步消息通过 callback 发送到 ActorMsgBus。</p> 
+ <p style="text-align:left">普通 Actor::ProcessMsg 会调用 msg handler 来处理消息，最常见的 msg handler 就是 Actor::HandlerNormal（<em>https://github.com/Oneflow-Inc/oneflow/blob/release/v0.8.1/oneflow/core/lazy/actor/actor.cpp#L329</em>）。</p> 
+ <p style="text-align:left">Actor::HandlerNormal 中流程跟 LightActor 中类似，会根据不同的 regst 类型来分别处理，Actor 中对 regst 的状态管理方式与 LightActor 不同，LightActor 中的方式更加高效，Actor 中能处理一些特殊情况。</p> 
+ <p style="text-align:left">消息处理完毕后，就会调用 ActUntilFail，ActUntilFail 会判断 IsReadReady 和 IsWriteReady 来决定是否可以进行 Act。</p> 
+ <p style="text-align:left">最常见的 NaiveActor::Act() 就是执行 AsyncLaunchKernel。</p> 
+ <p style="text-align:left">Act 完成后，就开始朝上下游发送 regst 消息。</p> 
+ <p style="text-align:left">还有一些特殊的 Actor，我们以WaitAndSendIdsActor为例，观察一下这类Actor的消息处理机制。</p> 
+ <p style="text-align:left">之所以选择这个例子，一是这个Actor比较简单；二是这是一个典型的source task，想看一下计算图是怎么被触发启动计算的。</p> 
+ <p style="text-align:left">Thread收到的消息如果不是kStopThread或kConstructActor，就调用Actor::ProcessMsg（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/thread/thread.cpp#L83</em>），将消息转给Actor处理。</p> 
+ <p style="text-align:left">ProcessMsg函数只是简单的将消息转给handler处理（<em>https://github.com/Oneflow-Inc/oneflow/blob/b6bf3f8843679111eb1edf79deefce814d250f4e/oneflow/core/lazy/actor/actor.h#L38</em>）。</p> 
+ <p style="text-align:left">WaitAndSendIdsActor::VirtualActorInit中，handler被设置为HandlerWaitToStart（<em>https://github.com/Oneflow-Inc/oneflow/blob/22f70a1719f371a54512633bb92086580d9c3c89/oneflow/core/lazy/actor/wait_and_send_ids_actor.cpp#L53</em>）。</p> 
+ <p style="text-align:left">Runtime的构造函数中，发送的第一批消息是给source_tasks的kStart消息，这个消息就由HandlerWaitToStart函数处理。</p> 
+ <p style="text-align:left">HandlerWaitToStart校验消息类型后，将handler设置为HandlerNormal（<em>https://github.com/Oneflow-Inc/oneflow/blob/b17a9cd6b930b5817c63623fb682bd708377a93b/oneflow/core/job/runtime.cpp#L109</em>）（这也是大部分Actor的默认handler），然后调用ProcessMsg（<em>https://github.com/Oneflow-Inc/oneflow/blob/22f70a1719f371a54512633bb92086580d9c3c89/oneflow/core/lazy/actor/wait_and_send_ids_actor.cpp#L74</em>），实际就是调用新设置的handler HandlerNormal。</p> 
+ <p style="text-align:left">HandlerNormal中，如果是kCmdMsg，只允许是kStart（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L377</em>）。通过消息类型校验后，会直接调用ActUntilFail（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L378</em>）。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>7.4 Act执行的条件</strong></p> 
+ <p style="text-align:justify">LightActor 和 Actor 判断能否进行 Act 采用了不同的策略，LightActor 的效率更高，Actor 能处理一些特殊情况。</p> 
+ <p style="text-align:justify">对于 LightActor，当在读的register计数 total_reading_cnt_ 归 0，可消费的register计数 ready_consumed_ 增加到 max_ready_consumed_，前者表示所有的消费者已经读取当前 LightActor 的 Regst，后者表示当前 LightActor 消费的所有 Regst 已经到达（由上游发送的 Regst 消息）。</p> 
+ <p style="text-align:left">对于 Actor，Actor::ActUntilFail中，Act方法（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L424</em>）是各个子类自己实现的，一般主要是启动kernel计算。</p> 
+ <p style="text-align:justify">但是在执行Act之前，需要先确认：</p> 
+ <ul>
+<li> <p style="text-align:justify">Act执行依赖的数据是否都已经就绪？（IsReadReady）</p> </li>
+<li> <p style="text-align:justify">Act生产出来的数据，消费方是否已经用完、并收到ack消息确认？（IsWriteReady）</p> </li>
+</ul>
+ <p style="text-align:justify">Actor有4个与此相关的成员变量</p> 
+ <ul>
+<li> <p style="text-align:justify">RegstSlot naive_produced_rs_;</p> </li>
+<li> <p style="text-align:justify">RegstSlot inplace_produced_rs_;</p> </li>
+<li> <p style="text-align:justify">RegstSlot naive_consumed_rs_;</p> </li>
+<li> <p style="text-align:justify">RegstSlot inplace_consumed_rs_;</p> </li>
+</ul>
+ <p style="text-align:justify">xx_produced_rs_存储的是当前Actor的下游consumer返回的、已经使用完毕的ack regst信息。（当前Actor生产的Regst存储在produced_regsts_中。）</p> 
+ <p style="text-align:justify">运行时在初始化的过程中，所有Actor都没有运行过，任何Actor都不可能收到ack消息，所以在Actor初始化时，要预先填充xx_produced_rs_，这样才能保证Actor在首次运行前是WriteReady的，才能顺利启动执行。</p> 
+ <p style="text-align:justify">xx_consumed_rs_存储的是上游依赖发来的数据。它不需要预先填充。因为source_tasks没有输入依赖，自然就是ReadReady的；而xx_produced_rs_在初始化时的预先填充又保证它是WriteReady的，所以source_tasks可以直接运行。source_tasks的输出消息发给下游，下游也会变为ReadReady，而下游在初始化后也保证是WriteReady的。整个Actor系统就可以这样运转起来了。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>7.5 Actor上下游之间的通知机制</strong></p> 
+ <p style="text-align:justify">Act执行完毕后，需要将结果数据发给下游consumer。以 WaitAndSendIds 的 Naive Produced 为例，ActUntilFail中的调用流程如下：</p> 
+ <ul><li> <p style="text-align:left">AsyncSendNaiveProducedRegstMsgToConsumer（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L427</em>）</p> 
+   <ul>
+<li> <p style="text-align:left">VirtualAsyncSendNaiveProducedRegstMsgToConsumer（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L441</em>）</p> 
+     <ul><li> <p style="text-align:left">HandleProducedNaiveDataRegstToConsumer（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L446</em>）</p> 
+       <ul>
+<li> <p style="text-align:left">HandleRegstToConsumer（https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L577）</p> 
+         <ul>
+<li> <p style="text-align:left">EnqueueAsyncMsg（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L523</em>）</p> 
+           <ul>
+<li> <p style="text-align:left">如果目标线程是当前线程，ActorMsgBus::SendMsg（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L662</em>）</p> </li>
+<li> <p style="text-align:left">否则，将消息加入async_msg_queue_（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L664</em>）</p> </li>
+</ul>
+</li>
+<li> <p style="text-align:left">增加 total_reading_cnt_（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L526</em>）（这个变量表示已经发消息给下游、但未收到的ack数量）</p> </li>
+</ul>
+</li>
+<li> <p style="text-align:left">naive_produced_rs_.PopFrontRegsts（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L581</em>）</p> </li>
+</ul>
+</li></ul>
+</li>
+<li> <p style="text-align:justify">AsyncSendProducedCtrlRegstMsgToConsumer</p> </li>
+</ul>
+</li></ul>
+ <p style="text-align:left">注意naive_produced_rs_.PopFrontRegsts（<em>https://github.com/Oneflow-Inc/oneflow/blob/06a6af1c7f760ba4b12d2dfb8f73d7fda5c7dbab/oneflow/core/lazy/actor/register_slot.cpp#L53</em>）会将Regst指针从队列中删掉，相应的可用（<em>https://github.com/Oneflow-Inc/oneflow/blob/06a6af1c7f760ba4b12d2dfb8f73d7fda5c7dbab/oneflow/core/lazy/actor/register_slot.cpp#L49</em>）register计数减1（<em>https://github.com/Oneflow-Inc/oneflow/blob/06a6af1c7f760ba4b12d2dfb8f73d7fda5c7dbab/oneflow/core/lazy/actor/register_slot.cpp#L49</em>）。</p> 
+ <p style="text-align:left">而在Actor::HandlerNormal中处理收到的kRegstMsg消息（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L340</em>）时，如果是consumer发来的ack消息，会调用TryUpdtStateAsProducedRegst（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L355</em>），将Regst再添加到 naive_produced_rs_ 中（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L654</em>），以保证当前Actor在收到所有ack后是WriteReady的；同时递减在读的 register 计数total_reading_cnt_。</p> 
+ <p style="text-align:justify">Actor对依赖的上游消息的处理是类似的。通过以下函数调用给上游发送ack消息、通知 register 已经用完，可以继续更新了：</p> 
+ <ul>
+<li> <p style="text-align:left">AsyncSendNaiveConsumedRegstMsgToProducer（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L431</em>）</p> </li>
+<li> <p style="text-align:left">AsyncRetInplaceConsumedRegstIfNoConsumer（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L432</em>）在Actor::HandlerNormal中收到kRegstMsg消息后，将消息添加到consumed_rs_（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L344</em>），以保证当前Actor在收到所有依赖数据后是ReadReady的。</p> </li>
+</ul>
+ <p style="text-align:left">LightActor有自己的消息处理机制（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/light_actor.cpp#L299</em>），大致原理应该是差不多的。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>7.6 Act执行的动作</strong></p> 
+ <p style="text-align:left">根据上述讨论，Actor收到kRegstMsg后也会进入ActUntilFail执行。如果读写都是Ready，就执行Act（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L424</em>）。以WaitAndSendIdsActor为例，主要调用链路如下：</p> 
+ <ul>
+<li> <p style="text-align:left">AsyncLaunchKernel（<em>https://github.com/Oneflow-Inc/oneflow/blob/22f70a1719f371a54512633bb92086580d9c3c89/oneflow/core/lazy/actor/wait_and_send_ids_actor.cpp#L58</em>）</p> </li>
+<li> <p style="text-align:left">ek.kernel-&gt;Launch（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L562</em>），启动Kernel计算</p> </li>
+<li> <p style="text-align:left">Forward（<em>https://github.com/Oneflow-Inc/oneflow/blob/eae9ff38f074479d79ce24b0f6e0594f82126171/oneflow/core/kernel/kernel.cpp#L52</em>）</p> </li>
+<li> <p style="text-align:left">ForwardDataContent（<em>https://github.com/Oneflow-Inc/oneflow/blob/eae9ff38f074479d79ce24b0f6e0594f82126171/oneflow/core/kernel/kernel.cpp#L65</em>）</p> </li>
+<li> <p style="text-align:left">buffer-&gt;Pull（<em>https://github.com/Oneflow-Inc/oneflow/blob/b17a9cd6b930b5817c63623fb682bd708377a93b/oneflow/core/kernel/wait_and_send_ids_kernel.cpp#L40</em>）</p> </li>
+<li> <p style="text-align:left">给regst的存储地址mut_dptr赋值（<em>https://github.com/Oneflow-Inc/oneflow/blob/b17a9cd6b930b5817c63623fb682bd708377a93b/oneflow/core/kernel/wait_and_send_ids_kernel.cpp#L47</em>）</p> </li>
+</ul>
+ <p style="text-align:left"><br> buffer-&gt;Pull会等待条件变量的通知（<em>https://github.com/Oneflow-Inc/oneflow/blob/49f60e682518436dfeb37344a15902a959e0e4f2/oneflow/core/common/buffer.h#L60</em>）。现在，看上去所有Actor都已准备就绪，只等发令枪一响就开跑了。</p> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>8 </strong></p> 
+ <p style="text-align:center"><strong>启动静态图的计算</strong></p> 
+ <p style="text-align:left">Graph.__run（<em>https://github.com/Oneflow-Inc/oneflow/blob/81edd938826a7ea903174d682348847658b64653/python/oneflow/nn/graph/graph.py#L226</em>）会扣动发令枪的板机，启动计算图的一轮计算。</p> 
+ <p style="text-align:justify">主要调用流程如下：</p> 
+ <ul>
+<li> <p style="text-align:left">RunLazyNNGraph（<em>https://github.com/Oneflow-Inc/oneflow/blob/81edd938826a7ea903174d682348847658b64653/python/oneflow/nn/graph/graph.py#L1076</em>）</p> </li>
+<li> <p style="text-align:left">builder-&gt;LaunchLazyJob（<em>https://github.com/Oneflow-Inc/oneflow/blob/8f672eea116cae4a73bb7309e7496b08d7ec9a32/oneflow/core/framework/nn_graph.cpp#L568</em>）</p> </li>
+<li> <p style="text-align:left">LaunchLazyJobInstructionType（<em>https://github.com/Oneflow-Inc/oneflow/blob/8f672eea116cae4a73bb7309e7496b08d7ec9a32/oneflow/core/framework/instructions_builder.cpp#L179</em>）</p> </li>
+<li> <p style="text-align:left">Buffer::Push（<em>https://github.com/Oneflow-Inc/oneflow/blob/8f672eea116cae4a73bb7309e7496b08d7ec9a32/oneflow/core/framework/instructions_builder.cpp#L179</em>）</p> </li>
+</ul>
+ <p style="text-align:justify">这里的Buffer::Push就是WaitAndSendIdsKernel在等待的起跑信号。</p> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>9 </strong></p> 
+ <p style="text-align:center"><strong>运行时的退出机制</strong></p> 
+ <p style="text-align:justify">整个运行时包含很多对象和资源，安全有序的退出是庞杂而又细致的工作。这里仅以WaitAndSendIds为例，从一个侧面观察一下运行时的退出机制。</p> 
+ <p style="text-align:left">运行时的退出始于NNGraph对象的析构（<em>https://github.com/Oneflow-Inc/oneflow/blob/8f672eea116cae4a73bb7309e7496b08d7ec9a32/oneflow/core/framework/nn_graph.cpp#L76</em>）。</p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>9.1 Actor的退出</strong></p> 
+ <ul>
+<li> <p style="text-align:left">NNGraph在析构时，会关闭所有的Buffer对象（<em>https://github.com/Oneflow-Inc/oneflow/blob/8f672eea116cae4a73bb7309e7496b08d7ec9a32/oneflow/core/framework/nn_graph.cpp#L82</em>）。</p> </li>
+<li> <p style="text-align:left">Buffer在关闭时，会设置is_closed_ = true并通知所有监听者（<em>https://github.com/Oneflow-Inc/oneflow/blob/49f60e682518436dfeb37344a15902a959e0e4f2/oneflow/core/common/buffer.h#L81</em>）。但是Pull会继续处理完已经提交的计算。</p> 
+   <ul><li> <p style="text-align:justify">所以，Buffer应该是主要用于进程内的通信和异步协调的一个类。</p> </li></ul>
+</li>
+<li> <p style="text-align:left">WaitAndSendIdsKernel这时候正在等待新一轮计算开始（<em>https://github.com/Oneflow-Inc/oneflow/blob/b17a9cd6b930b5817c63623fb682bd708377a93b/oneflow/core/kernel/wait_and_send_ids_kernel.cpp#L40</em>），结果收到Pull返回的kBufferStatusErrorClosed（<em>https://github.com/Oneflow-Inc/oneflow/blob/49f60e682518436dfeb37344a15902a959e0e4f2/oneflow/core/common/buffer.h#L61</em>）。</p> </li>
+<li> <p style="text-align:left">WaitAndSendIdsActor::IsCustomizedReadReady以后就一直返回false（<em>https://github.com/Oneflow-Inc/oneflow/blob/22f70a1719f371a54512633bb92086580d9c3c89/oneflow/core/lazy/actor/wait_and_send_ids_actor.cpp#L68</em>），IsReadReady也返回false（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L533</em>）。</p> 
+   <ul><li> <p style="text-align:left">这之后，ActUntilFail只会执行异步消息发送（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L437</em>）（不再进入while循环）</p> </li></ul>
+</li>
+<li> <p style="text-align:left">WaitAndSendIdsActor::HandlerNormal仍然会处理其它Actor发来的消息（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L340</em>）。但因为IsCustomizedReadReady返回false，会进入AsyncSendEORDMsgForAllProducedRegstDesc（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L394</em>）执行。它会给每个下游发送kEordMsg消息（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L614</em>）。</p> </li>
+<li> <p style="text-align:left">Actor在收到上游发来的kEordMsg消息后，递减remaining_eord_cnt_（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L331</em>）。</p> 
+   <ul><li> <p style="text-align:left">remaining_eord_cnt_被初始化为Actor的输入regst的数量（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L171</em>）。</p> </li></ul>
+</li>
+<li> <p style="text-align:left">total_reading_cnt_是当前Actor生产的、已经发给consumer、但尚未收到ack的消息数量。</p> 
+   <ul><li> <p style="text-align:left">Actor目前仍可以正常接收consumer发来的ack消息。</p> </li></ul>
+</li>
+<li> <p style="text-align:left">当上述2个变量都为0时（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L395</em>），意味着所有上游都发出了kEordMsg消息，也收到了所有下游的ack消息。Actor就给Thread返回1（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L397</em>）。</p> 
+   <ul><li> <p style="text-align:left">如果上述两个变量有不为0的，就修改handler，由HandlerZombie（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/lazy/actor/actor.cpp#L399</em>）处理后续收到的消息。</p> </li></ul>
+</li>
+<li> <p style="text-align:left">Thread收到Actor返回的1后（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/thread/thread.cpp#L84</em>），将它从自己的存储中删除（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/thread/thread.cpp#L89</em>），并递减运行Actor的数量。</p> </li>
+</ul>
+ <h3></h3> 
+ <p style="text-align:left"><strong>9.2 Thread的退出</strong></p> 
+ <ul>
+<li> <p style="text-align:left">NNGraph重置runtime_导致运行时对象被析构（<em>https://github.com/Oneflow-Inc/oneflow/blob/8f672eea116cae4a73bb7309e7496b08d7ec9a32/oneflow/core/framework/nn_graph.cpp#L83</em>）。</p> </li>
+<li> <p style="text-align:left">Runtime删除所有Thread（<em>https://github.com/Oneflow-Inc/oneflow/blob/b17a9cd6b930b5817c63623fb682bd708377a93b/oneflow/core/job/runtime.cpp#L117</em>）。</p> </li>
+<li> <p style="text-align:left">ThreadMgr给所有Thread发送kStopThread消息（<em>https://github.com/Oneflow-Inc/oneflow/blob/c8c6d351fa28c5ebce948d69c06670a783f83f74/oneflow/core/thread/thread_manager.cpp#L64</em>）。同时，重置指针导致Thread析构（<em>https://github.com/Oneflow-Inc/oneflow/blob/c8c6d351fa28c5ebce948d69c06670a783f83f74/oneflow/core/thread/thread_manager.cpp#L66</em>）。</p> </li>
+<li> <p style="text-align:left">Thread的物理线程退出PollMsgChannel循环（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/thread/thread.cpp#L68</em>）。</p> </li>
+<li> <p style="text-align:left">Thread等待物理线程结束，关闭channel（<em>https://github.com/Oneflow-Inc/oneflow/blob/55b822e4d3c88757d11077d7546981309125c73f/oneflow/core/thread/thread.cpp#L52</em>）。</p> </li>
+</ul>
+ <h2></h2> 
+ <p style="text-align:center"><strong>10 </strong></p> 
+ <p style="text-align:center"><strong>分布式场景的静态图</strong></p> 
+ <p style="text-align:justify">分布式的compile_job、物理图Plan和单机场景有明显变化。</p> 
+ <p style="text-align:justify">比如，每个进程都有一套WaitAndSendIds等控制节点。这也容易理解，因为每个节点都要执行__run和Buffer::Push/Pull，都要启动本进程的Actors执行计算。</p> 
+ <p style="text-align:justify">matmul和broadcast_add等user op也会在两个节点进行计算。<br>  </p> 
+ <p style="text-align:center"><img alt="082db878a0d43766c79782d31502d43f.png" src="https://images2.imgbox.com/4f/bd/GOYoNkEV_o.png"></p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>10.1 示例代码</strong></p> 
+ <p style="text-align:left">启动方式参考Global Tensor的官方文档。</p> 
+ <pre class="has"><code class="language-ruby">import oneflow as flow
+import oneflow.nn as nn
+
+
+P0 = flow.placement("cpu", ranks=[0, 1])
+a0_sbp = flow.sbp.split(0)
+
+
+class ModuleMyLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.weight = nn.Parameter(flow.randn(in_features, out_features,
+            placement=P0, sbp=flow.sbp.broadcast))
+        self.bias = nn.Parameter(flow.randn(1, out_features,
+            placement=P0, sbp=flow.sbp.broadcast))
+
+
+    def forward(self, input):
+        return flow.matmul(input, self.weight) + self.bias
+
+
+linear_model = ModuleMyLinear(4, 3)
+
+
+class GraphMyLinear(nn.Graph):
+    def __init__(self):
+        super().__init__()
+        # ModuleBlock
+        self.model = linear_model
+
+
+    def build(self, input):
+        # ModuleBlock.__call__
+        return self.model(input)
+
+
+graph_mylinear = GraphMyLinear()
+input = flow.randn(5, 4, placement=P0, sbp=flow.sbp.split(1))
+out = graph_mylinear(input)
+print(out)</code></pre> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>11 </strong></p> 
+ <p style="text-align:center"><strong>附录</strong></p> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>11.1 断点</strong></p> 
+ <p style="text-align:justify"><strong>11.1.1 Python断点示例</strong></p> 
+ <pre class="has"><code class="language-kotlin"># python3 -m pdb test.py
+break test.py:25
+break oneflow/nn/graph/graph.py:221
+break oneflow/nn/graph/graph.py:741
+break oneflow/nn/graph/graph.py:745
+break oneflow/nn/graph/graph.py:759
+break oneflow/nn/graph/graph.py:828
+break oneflow/nn/graph/graph.py:777
+break oneflow/nn/graph/graph.py:1066
+break oneflow/nn/graph/graph.py:1133
+break oneflow/framework/graph_build_util.py:227</code></pre> 
+ <p style="text-align:justify"><strong>11.1.2 C++断点示例</strong></p> 
+ <p style="text-align:justify">启动命令</p> 
+ <pre class="has"><code class="language-properties">source /mnt/oneflow/build/source.sh
+gdb --args python3 /mnt/oneflow/test.py
+# set breakpoints
+# run</code></pre> 
+ <p style="text-align:justify">断点示例</p> 
+ <pre class="has"><code class="language-cpp">set breakpoint pending on
+break oneflow::ActorMsg::BuildEordMsg
+break oneflow/core/common/buffer.h:80
+break oneflow::(anonymous namespace)::CheckAndConstructOp
+break oneflow::WaitAndSendIdsActor::Act
+break oneflow::WaitAndSendIdsActor::HandlerWaitToStart
+break oneflow/core/lazy/actor/light_actor.cpp:452
+break oneflow/core/lazy/actor/light_actor.cpp:485
+break oneflow::ForeignInputKernel::ForwardDataContent
+break oneflow::vm::LaunchLazyJobInstructionType::Compute</code></pre> 
+ <h3></h3> 
+ <p style="text-align:justify"><strong>11.2 静态图的json表示</strong></p> 
+ <ul>
+<li> <p style="text-align:justify">forward（https://quip.com/OMc4A0HOOr0C）</p> </li>
+<li> <p style="text-align:justify">full（https://quip.com/JLaMAHGBLXmK）</p> </li>
+<li> <p style="text-align:justify">compiled（https://quip.com/tXjuAiS3J0Ab）</p> </li>
+<li> <p style="text-align:justify">plan（https://quip.com/a0DMAAIte6PQ）</p> </li>
+</ul>
+ <h3></h3> 
+ <p style="text-align:justify"><strong>11.3 actor type</strong></p> 
+ <p style="text-align:justify">naive_actor</p> 
+ <pre class="has"><code class="language-sql">System-AutoTick-AppendDeviceTick_9
+System-AutoTick-DstSubsetTick_12
+System-AutoTick-DstSubsetTick_21
+System-AutoTick-DstSubsetTick_27
+System-AutoTick-Prepend-DeviceTick_7
+System-AutoTick-SrcSubsetTick_20
+System-AutoTick-SrcSubsetTick_26
+System-AutoTick-SrcSubsetTick_8
+System-AutoTick-Tick_11
+System-AutoTick-Tick_13
+System-EagerCriticalSection-Callback-23
+System-EagerCriticalSection-Callback-29
+System-EagerCriticalSection-Interface-Begin-Tick-18
+System-EagerCriticalSection-Interface-Begin-Tick-24
+System-EagerCriticalSection-Interface-End-Tick-19
+System-EagerCriticalSection-Interface-End-Tick-25
+System-EagerCriticalSection-Wait-22
+System-EagerCriticalSection-Wait-28</code></pre> 
+ <p style="text-align:justify">light_actor</p> 
+ <pre class="has"><code class="language-css">_GraphMyLinear_0_input.0.0_2
+_GraphMyLinear_0_output.0.0_2
+model.bias
+model-broadcast_add-1
+model-matmul-0
+model.weight
+System-AutoTick-SinkTick_15
+System-SyncAllRanksSinkTick_14</code></pre> 
+ <p style="text-align:justify">wait_and_send_ids_actor</p> 
+ <pre class="has"><code class="language-go">‍‍‍
+System-Src-WaitAndSendIds_16</code></pre> 
+ <p style="text-align:justify">call_back_notify_actor</p> 
+ <pre class="has"><code class="language-go">‍‍‍
+System-Sink-CallbackNotify_17</code></pre> 
+ <h2></h2> 
+ <p style="text-align:center"><strong>12 </strong></p> 
+ <p style="text-align:center"><strong>参考资料</strong></p> 
+ <ul>
+<li> <p style="text-align:left">oneflow v0.8.0（https://github.com/Oneflow-Inc/oneflow/tree/release/v0.8.0）</p> </li>
+<li> <p style="text-align:left">OneFlow框架的系统设计（上篇）（https://zhuanlan.zhihu.com/p/337851255）</p> </li>
+<li> <p style="text-align:left">OneFlow框架的系统设计（中篇）（https://zhuanlan.zhihu.com/p/338699487）</p> </li>
+<li> <p style="text-align:left">OneFlow框架的系统设计（下篇）（https://zhuanlan.zhihu.com/p/339208452）</p> </li>
+<li> <p style="text-align:left">一个Job在OneFlow中的执行过程—上篇（https://zhuanlan.zhihu.com/p/344531540）</p> </li>
+<li> <p style="text-align:left">一个Job在OneFlow中的执行过程—中篇（https://zhuanlan.zhihu.com/p/355654002）</p> </li>
+<li> <p style="text-align:left">一个Job在OneFlow中的执行过程—下篇（https://zhuanlan.zhihu.com/p/363689736）</p> </li>
+<li> <p style="text-align:left">静态图模块 nn.Graph（https://docs.oneflow.org/master/basics/08_nn_graph.html）</p> </li>
+<li> <p style="text-align:left">OneFlow系统设计（https://docs.oneflow.org/v0.4.0/basics_topics/essentials_of_oneflow.html）</p> </li>
+<li> <p style="text-align:left">torch.nn.Module（https://pytorch.org/docs/1.10/generated/torch.nn.Module.html）</p> </li>
+</ul>
+ <p style="text-align:left">其他人都在看</p> 
+ <ul>
+<li> <p><a href="">OneFlow源码解析：自动微分机制</a></p> </li>
+<li> <p><a href="">ChatGPT的一小步，NLP范式转变的一大步</a></p> </li>
+<li> <p><a href="">李白：你的模型权重很不错，可惜被我没收了</a></p> </li>
+<li> <p><a href="">OpenAI掌门Sam Altman：AI下一个发展阶段</a></p> </li>
+<li> <p><a href="">32篇年度最佳AI论文;Python编译器Codon开源</a></p> </li>
+<li> <p><a href="">比快更快，开源Stable Diffusion刷新作图速度</a></p> </li>
+<li> <p><a href="">OneEmbedding:单卡</a><a href="">训练TB级推荐模型不是梦</a></p> </li>
+</ul>
+ <h2>欢迎Star、试用OneFlow最新版本：<a class="has-card" href="https://github.com/Oneflow-Inc/oneflow/" title="GitHub - Oneflow-Inc/oneflow: OneFlow is a deep learning framework designed to be user-friendly, scalable and efficient."><span class="link-card-box"><span class="link-title">GitHub - Oneflow-Inc/oneflow: OneFlow is a deep learning framework designed to be user-friendly, scalable and efficient.</span><span class="link-desc">OneFlow is a deep learning framework designed to be user-friendly, scalable and efficient. - GitHub - Oneflow-Inc/oneflow: OneFlow is a deep learning framework designed to be user-friendly, scalable and efficient.</span><span class="link-link"><img alt="" class="link-link-icon" src="https://images2.imgbox.com/13/32/zMob4EI6_o.png">https://github.com/Oneflow-Inc/oneflow/</span></span></a>
+</h2> 
+</div>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

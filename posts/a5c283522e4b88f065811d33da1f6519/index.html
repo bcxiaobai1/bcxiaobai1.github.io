@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>记一次 .NET 某医院门诊软件 卡死分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">记一次 .NET 某医院门诊软件 卡死分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_0"></a>一：背景</h2> 
+<h3>
+<a id="1__2"></a>1. 讲故事</h3> 
+<p>前几天有位朋友找到我，说他们的软件在客户那边卡死了，让我帮忙看下是怎么回事？我就让朋友在程序卡死的时候通过 <code>任务管理器</code> 抓一个 dump 下来，虽然默认抓的是 wow64 ，不过用 <code>soswow64.dll</code> 转还是可以的，参考命令如下：</p> 
+<pre><code class="prism language-C#">
+    .load C:softsoswow64soswow64.dll
+    !wow64exts.sw
+
+</code></pre> 
+<p>接下来就可以分析了哈。</p> 
+<h2>
+<a id="WinDbg__15"></a>二：WinDbg 分析</h2> 
+<h3>
+<a id="1__17"></a>1. 为什么会卡死</h3> 
+<p>首先用 <code>!t</code> 简单看一下主线程的 COM Apartment 模式，如果是 STA 那就是窗体程序，比如 WPF，WinForm 之类的，输出如下：</p> 
+<pre><code class="prism language-C#">
+0:000:x86&gt; !t
+ThreadCount:      39
+UnstartedThread:  0
+BackgroundThread: 12
+PendingThread:    0
+DeadThread:       26
+Hosted Runtime:   no
+                                                                         Lock  
+       ID OSID ThreadOBJ    State GC Mode     GC Alloc Context  Domain   Count Apt Exception
+   0    1 1928 01aee0b0   2026020 Preemptive  041D496C:00000000 01ae88a8 2     STA 
+   ...
+
+</code></pre> 
+<p>既然是窗体程序那就看主线程吧，使用 <code>~0s;!clrstack</code> 命令。</p> 
+<pre><code class="prism language-C#">
+0:000:x86&gt; !clrstack
+OS Thread Id: 0x1928 (0)
+Child SP       IP Call Site
+0177dff8 0167e1f8 [HelperMethodFrame_1OBJ: 0177dff8] System.Threading.SynchronizationContext.WaitHelper(IntPtr[], Boolean, Int32)
+0177e29c 6a6fc693 System.Windows.Threading.DispatcherSynchronizationContext.Wait(IntPtr[], Boolean, Int32)
+0177e2b0 71e36d54 System.Threading.SynchronizationContext.InvokeWaitMethodHelper(System.Threading.SynchronizationContext, IntPtr[], Boolean, Int32) [f:ddndpclrsrcBCLsystemthreadingsynchronizationcontext.cs @ 349]
+0177e4d8 73220076 [GCFrame: 0177e4d8] 
+0177e5f8 73220076 [GCFrame: 0177e5f8] 
+0177e6d8 73220076 [GCFrame: 0177e6d8] 
+0177e6f4 73220076 [HelperMethodFrame_1OBJ: 0177e6f4] System.Threading.Monitor.ReliableEnter(System.Object, Boolean ByRef)
+0177e770 18078b93 System.Speech.Internal.Synthesis.AudioDeviceOut.Abort()
+0177e79c 17270698 System.Speech.Internal.Synthesis.VoiceSynthesis.Abort()
+0177e7e8 065ec76b System.Speech.Synthesis.SpeechSynthesizer.SpeakAsyncCancelAll()
+0177e7f0 065ec728 xxx.xxx.Speek(System.String)
+...
+
+</code></pre> 
+<p>从卦中看是一个 <code>语音模块</code>，还有 Speek 功能，挺有意思。。。 还 Speek 啥呢？可以用 <code>!mdso</code> 看一下。</p> 
+<pre><code class="prism language-C#">
+0:000:x86&gt; !mdso
+Thread 0:
+Location          Object            Type
+------------------------------------------------------------
+0177e060  04176eb8  System.IntPtr[]
+...
+0177e7f8  03be9504  System.String  "请先登录验证身份"
+
+</code></pre> 
+<p>哈哈，上面只是花絮，继续看线程栈会发现代码卡在 <code>Monitor.ReliableEnter</code> 上，也就是等待 lock 锁，接下来用 kb 把 锁对象提取出来，即 clr!JITutil_MonReliableEnter 方法的第一个参数 <code>03be11b4</code>，输出如下：</p> 
+<pre><code class="prism language-C#">
+0:000:x86&gt; kb
+...
+17 0177e768 18078b93     03be11b4 00000000 00000000 clr!JITutil_MonReliableEnter+0xb5
+18 0177e794 17270698     0177e7bc 73252799 00000000 0x18078b93
+19 0177e7e0 065ec76b     0177e808 065ec728 00000000 0x17270698
+1a 0177e7e8 065ec728     00000000 03a0b318 03be9504 0x65ec76b
+1b 0177e808 1727e09f     00000000 03be0920 04158b98 0x65ec728
+1c 0177e824 69181324     04175c04 041199c0 00000001 0x1727e09f
+...
+
+0:000:x86&gt; !do 03be11b4
+Name:        System.Object
+MethodTable: 71f200f4
+EEClass:     71a715b0
+Size:        12(0xc) bytes
+File:        C:WindowsMicrosoft.NetassemblyGAC_32mscorlibv4.0_4.0.0.0__b77a5c561934e089mscorlib.dll
+Object
+Fields:
+None
+
+</code></pre> 
+<p>有了这个对象就可以用 <code>!syncblk</code> 命令观察同步块表，到底是哪个线程在持有不释放？</p> 
+<pre><code class="prism language-C#">
+0:000:x86&gt; !syncblk
+Index         SyncBlock MonitorHeld Recursion Owning Thread Info          SyncBlock Owner
+   96 11ac3ee0            3         1 11af0f28 35d4  13   03be11b4 System.Object
+-----------------------------
+Total           931
+CCW             39
+RCW             19
+ComClassFactory 2
+Free            802
+
+0:000:x86&gt; ~13s;!clrstack
+ntdll_76fc0000!NtWaitForSingleObject+0xc:
+7703159c c20c00          ret     0Ch
+OS Thread Id: 0x35d4 (13)
+Child SP       IP Call Site
+17f8f23c 0000002b [InlinedCallFrame: 17f8f23c] 
+17f8f238 1adf3269 DomainBoundILStubClass.IL_STUB_PInvoke(IntPtr)
+17f8f23c 1adf2e82 [InlinedCallFrame: 17f8f23c] System.Speech.Internal.Synthesis.SafeNativeMethods.waveOutClose(IntPtr)
+17f8f26c 1adf2e82 System.Speech.Internal.Synthesis.AudioDeviceOut.End()
+17f8f298 187a5cd6 System.Speech.Internal.Synthesis.VoiceSynthesis.SpeakText(System.Speech.Internal.Synthesis.SpeakInfo, System.Speech.Synthesis.Prompt, System.Collections.Generic.List`1&lt;System.Speech.Internal.Synthesis.LexiconEntry&gt;)
+17f8f304 17271669 System.Speech.Internal.Synthesis.VoiceSynthesis.ThreadProc()
+17f8f3b8 71e3710d System.Threading.ThreadHelper.ThreadStart_Context(System.Object) [f:ddndpclrsrcBCLsystemthreadingthread.cs @ 74]
+17f8f3c4 71e640c5 System.Threading.ExecutionContext.RunInternal(System.Threading.ExecutionContext, System.Threading.ContextCallback, System.Object, Boolean) [f:ddndpclrsrcBCLsystemthreadingexecutioncontext.cs @ 954]
+17f8f430 71e63fd6 System.Threading.ExecutionContext.Run(System.Threading.ExecutionContext, System.Threading.ContextCallback, System.Object, Boolean) [f:ddndpclrsrcBCLsystemthreadingexecutioncontext.cs @ 902]
+17f8f444 71e63f91 System.Threading.ExecutionContext.Run(System.Threading.ExecutionContext, System.Threading.ContextCallback, System.Object) [f:ddndpclrsrcBCLsystemthreadingexecutioncontext.cs @ 891]
+17f8f45c 71e37068 System.Threading.ThreadHelper.ThreadStart() [f:ddndpclrsrcBCLsystemthreadingthread.cs @ 111]
+17f8f5a0 73220076 [GCFrame: 17f8f5a0] 
+17f8f784 73220076 [DebuggerU2MCatchHandlerFrame: 17f8f784] 
+
+
+0:013:x86&gt; !t
+  ...
+  13   14 35d4 11af0f28     2b220 Preemptive  00000000:00000000 01ae88a8 2     MTA 
+  ...
+
+</code></pre> 
+<p>从卦中信息看：13号线程持有了 lock 锁，并且它非线程池线程，而是通过 <code>new Thread</code> 出来的，从线程栈看都是sdk函数，综合这些信息，应该是 <code>VoiceSynthesis</code> 创建出来的后台线程，下面的图也可以佐证。</p> 
+<p><img src="https://images2.imgbox.com/5d/c4/F0bYnnjg_o.png" alt=""></p> 
+<p>接下来继续看，从线程栈顶上可以观察到最后卡在了 <code>System.Speech.Internal.Synthesis.SafeNativeMethods.waveOutClose</code> 方法处，逆向之后的代码如下：</p> 
+<pre><code class="prism language-C#">
+    // System.Speech.Internal.Synthesis.AudioDeviceOut
+    internal override void End()
+    {
+        if (!_deviceOpen)
+        {
+            throw new InvalidOperationException();
+        }
+        lock (_noWriteOutLock)
+        {
+            _deviceOpen = false;
+            CheckForAbort();
+            if (_queueIn.Count != 0)
+            {
+                SafeNativeMethods.waveOutReset(_hwo);
+            }
+            MMSYSERR mMSYSERR = SafeNativeMethods.waveOutClose(_hwo);
+        }
+    }
+
+</code></pre> 
+<p>由于这是 Windows 的 VoiceSynthesis 模块封装底层函数，经过千锤百炼，理论上出问题的概率会非常小，除非上层有不合理的调用，这种概率会大一些。</p> 
+<h3>
+<a id="2__173"></a>2. 是上层不合理的调用吗</h3> 
+<p>这一块我也没玩过，网上搜一下 <code>waveOutReset</code> , <code>waveOutClose</code> ，看下有没有同病相怜的人，结果网上一搜一堆，比如下面这样：</p> 
+<p><img src="https://images2.imgbox.com/c1/94/JxaokIjw_o.png" alt=""><br> <img src="https://images2.imgbox.com/64/4a/7qGD8uBE_o.png" alt=""></p> 
+<p>不管怎么说，这一块如果处理不好容易出现死锁和卡死的情况，那是不是正如图中所说 <code>waveOutReset</code> 和 <code>waveOutClose</code> 没有匹配造成的呢？</p> 
+<p>这就取决于代码中的 <code>_queueIn</code> 集合，可以观察这两个函数的汇编代码提取出这个变量。</p> 
+<pre><code class="prism language-C#">
+0:013:x86&gt; !U /d 1adf2e82
+Normal JIT generated code
+System.Speech.Internal.Synthesis.AudioDeviceOut.End()
+...
+1adf2e30 8bf1            mov     esi,ecx
+...
+1adf2e69 8b4608          mov     eax,dword ptr [esi+8]
+1adf2e6c 83780c00        cmp     dword ptr [eax+0Ch],0
+1adf2e70 7408            je      1adf2e7a
+...
+
+0:013:x86&gt; !U /d 187a5cd6
+Normal JIT generated code
+System.Speech.Internal.Synthesis.VoiceSynthesis.SpeakText(System.Speech.Internal.Synthesis.SpeakInfo, System.Speech.Synthesis.Prompt, System.Collections.Generic.List`1&lt;System.Speech.Internal.Synthesis.LexiconEntry&gt;)
+...
+187a5cc8 8b45d0          mov     eax,dword ptr [ebp-30h]
+187a5ccb 8b486c          mov     ecx,dword ptr [eax+6Ch]
+187a5cd3 ff5014          call    dword ptr [eax+14h]
+&gt;&gt;&gt; 187a5cd6 58              pop     eax
+...
+
+
+0:013:x86&gt; kb 10
+ # ChildEBP RetAddr      Args to Child              
+...
+08 17f8f264 1adf2e82     03be11b4 00000001 00000000 0x1adf3269
+09 17f8f290 187a5cd6     187a5e16 03be0d24 043f3520 0x1adf2e82
+0a 17f8f2f4 17271669     040efa14 040ef9a4 732515d8 0x187a5cd6
+0b 17f8f3b0 71e3710d     03ff3e98 17f8f420 71e640c5 0x17271669
+...
+
+</code></pre> 
+<p>仔细观察上面的汇编代码：eax 来自于 esi，esi 来自于 ecx，ecx 最终来自于父函数中的 <code>ebp-30h</code> 的位置，串联起来的命令就是 <code>!do poi(poi(poi(17f8f2f4-30)+6c)+0x8)</code> ，接下来我们 do 一下。</p> 
+<pre><code class="prism language-C#">
+0:000:x86&gt; !do poi(poi(poi(17f8f2f4-30)+6c)+0x8)
+Name:        System.Collections.Generic.List`1[[System.Speech.Internal.Synthesis.AudioDeviceOut+InItem, System.Speech]]
+MethodTable: 16cf20ec
+EEClass:     71af6f8c
+Size:        24(0x18) bytes
+File:        C:WindowsMicrosoft.NetassemblyGAC_32mscorlibv4.0_4.0.0.0__b77a5c561934e089mscorlib.dll
+Fields:
+      MT    Field   Offset                 Type VT     Attr    Value Name
+71f2f320  4001891        4     System.__Canon[]  0 instance 03c74538 _items
+71f21bb4  4001892        c         System.Int32  1 instance        0 _size
+71f21bb4  4001893       10         System.Int32  1 instance     1900 _version
+71f200f4  4001894        8        System.Object  0 instance 00000000 _syncRoot
+71f2f320  4001895        4     System.__Canon[]  0   static  &lt;no information&gt;
+
+</code></pre> 
+<p>可以看到此时的 <code>_size=0</code> ，有可能就是因为上层不合理调用导致这里的 <code>_queueIn</code> 意外为 0 ，最终引发的卡死现象。</p> 
+<h3>
+<a id="3__242"></a>3. 真相大白</h3> 
+<p>一时之间也找不到上层哪里有不合理的调用，接下来的思路还是自己研读主线程和13号线程的调用栈，最后发现一个可疑的现象，截图如下：</p> 
+<p><img src="https://images2.imgbox.com/a9/2a/hGilXJMU_o.png" alt=""></p> 
+<p>通过仔细研读底层代码，Speek 会将消息丢到底层的queue队列中，后台线程会提取处理，这里的 <code>SpeakAsyncCancelAll</code> 是完全没必要的。</p> 
+<p>有了这个消息，就让朋友把这个函数去掉观察下试试，据朋友反馈说没有问题了。</p> 
+<p><img src="https://images2.imgbox.com/3a/31/muDAOBCu_o.png" alt=""></p> 
+<h2>
+<a id="_254"></a>三：总结</h2> 
+<p>这个案例中去掉了意外的 <code>speech.SpeakAsyncCancelAll();</code> 语句就搞定了，内部深层逻辑也没有再探究了，大概率就是意外的 _queueIn 为 0，让 <code>waveOutReset</code> 和 <code>waveOutClose</code> 方法没有匹配出现，造成了卡死现象。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

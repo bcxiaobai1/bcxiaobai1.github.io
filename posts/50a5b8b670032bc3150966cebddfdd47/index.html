@@ -1,0 +1,1022 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>[Android 13]开机动画原理分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">[Android 13]开机动画原理分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="Android_0"></a>Android开机动画</h1> 
+<blockquote> 
+ <p>hongxi.zhu 2023-6-12<br> Lineageos_20(Android T) on Pixel 2XL</p> 
+</blockquote> 
+<p></p> 
+<div class="toc"> 
+ <h3>目录</h3> 
+ <ul>
+<li><a href="#Android_0">Android开机动画</a></li>
+<li>
+<ul>
+<li><a href="#__5">一、 开机动画的启动</a></li>
+<li>
+<ul>
+<li><a href="#11_initrc_6">1.1 init.rc启动相应的进程</a></li>
+<li><a href="#12_surfaceflinger_74">1.2 surfaceflinger服务的启动</a></li>
+<li><a href="#13__141">1.3 开机动画进程的启动</a></li>
+<li>
+<ul>
+<li><a href="#131__175">1.3.1 检查是否禁用了开机动画</a></li>
+<li><a href="#132_BootAnimation_197">1.3.2 创建BootAnimation对象，预加载动画文件</a></li>
+<li><a href="#133_SF_465">1.3.3 等待SF服务的启动</a></li>
+<li><a href="#134__492">1.3.4 启动播放线程，播放动画</a></li>
+</ul> 
+   </li>
+</ul> 
+   </li>
+<li><a href="#_807">二、结束开机动画</a></li>
+<li>
+<ul>
+<li><a href="#21_system_server_808">2.1 system server进程</a></li>
+<li><a href="#22_SurfaceFlinger_870">2.2 SurfaceFlinger进程</a></li>
+</ul> 
+  </li>
+</ul> 
+ </li>
+</ul> 
+</div> 
+<p></p> 
+<h2>
+<a id="__5"></a>一、 开机动画的启动</h2> 
+<h3>
+<a id="11_initrc_6"></a>1.1 init.rc启动相应的进程</h3> 
+<p>开机动画跑起来除了需要自身进程的启动外，还肯定以来显示系统的相关进程，即一定需要SurfaceFlinger的进程的合成和送显，所以这里需要启动SurfaceFlinger服务和bootanim服务，两者是在init.rc中启动。rc的触发阶段和引用关系如下：</p> 
+<ul><li>system/core/rootdir/init.rc</li></ul> 
+<pre><code class="prism language-shell"><span class="token punctuation">..</span>.
+<span class="token function">import</span> /init.<span class="token variable">${ro.hardware}</span>.rc
+<span class="token function">import</span> /vendor/etc/init/hw/init.<span class="token variable">${ro.hardware}</span>.rc
+<span class="token punctuation">..</span>.
+
+<span class="token comment"># Mount filesystems and start core system services.  //在这个阶段就可以启动系统核心的服务了，包括SF等</span>
+on late-init
+	<span class="token punctuation">..</span>.
+    <span class="token comment"># Mount fstab in init.{$device}.rc by mount_all with '--late' parameter</span>
+    <span class="token comment"># to only mount entries with 'latemount'. This is needed if '--early' is</span>
+    <span class="token comment"># specified in the previous mount_all command on the fs stage.</span>
+    <span class="token comment"># With /system mounted and properties form /system + /factory available,</span>
+    <span class="token comment"># some services can be started.</span>
+    trigger late-fs
+	<span class="token punctuation">..</span>.
+</code></pre> 
+<ul><li>device/google/wahoo/init.hardware.rc</li></ul> 
+<pre><code class="prism language-shell">on late-fs
+    <span class="token comment"># Start devices by sysfs trigger</span>
+    start vendor.devstart_sh
+    <span class="token comment"># Start services for bootanim</span>
+    start vendor.power-hal-1-3
+    start surfaceflinger  <span class="token comment"># 先启动surfaceflinger</span>
+    start bootanim        <span class="token comment"># 然后是bootanim</span>
+    start vendor.hwcomposer-2-1
+    start vendor.configstore-hal
+    start vendor.gralloc-2-0
+	<span class="token punctuation">..</span>.
+</code></pre> 
+<p>这里说下有时候这个文件源码里名字和设备里的名字不一样，是因为这个文件编译时会改名并拷贝到<code>vendor/etc/init/hw/init.taimen.rc</code>，可以从<code>device.mk</code>看出，我的设备Pixel 2XL taimen派生于wahoo，会引用wahoo的device.mk</p> 
+<ul><li>device/google/wahoo/device.mk</li></ul> 
+<pre><code class="prism language-shell">  PRODUCT_COPY_FILES <span class="token operator">+=</span> <span class="token punctuation"></span>
+    <span class="token variable"><span class="token variable">$(</span>LOCAL_PATH<span class="token variable">)</span></span>/init.hardware.rc:<span class="token variable"><span class="token variable">$(</span>TARGET_COPY_OUT_VENDOR<span class="token variable">)</span></span>/etc/init/hw/init.<span class="token variable"><span class="token variable">$(</span>PRODUCT_HARDWARE<span class="token variable">)</span></span>.rc
+</code></pre> 
+<p>上面init.hardware.rc中start的<code>surfaceflinger</code>和<code>bootanim</code>是在它们各自的module下声明的<code>rc</code>文件，当build的时候，编译系统会解析<code>Android.bp</code>或者<code>Android.mk</code>获取对应的目标的rc文件，并将rc的内容<code>include</code>到主rc中。</p> 
+<ul><li>SurfaceFlinger服务的启动文件<br> frameworks/native/services/surfaceflinger/surfaceflinger.rc</li></ul> 
+<pre><code class="prism language-shell"><span class="token function">service</span> surfaceflinger /system/bin/surfaceflinger
+    class core animation
+    user system
+    group graphics drmrpc readproc
+    capabilities SYS_NICE
+    onrestart restart --only-if-running zygote
+    task_profiles HighPerformance
+    socket pdx/system/vr/display/client     stream 0666 system graphics u:object_r:pdx_display_client_endpoint_socket:s0
+    socket pdx/system/vr/display/manager    stream 0666 system graphics u:object_r:pdx_display_manager_endpoint_socket:s0
+    socket pdx/system/vr/display/vsync      stream 0666 system graphics u:object_r:pdx_display_vsync_endpoint_socket:s0
+</code></pre> 
+<ul><li>bootanim服务的启动文件<br> frameworks/base/cmds/bootanimation/bootanim.rc</li></ul> 
+<pre><code class="prism language-shell"><span class="token function">service</span> bootanim /system/bin/bootanimation
+    class core animation
+    user graphics
+    group graphics audio
+    disabled
+    oneshot
+    ioprio rt <span class="token number">0</span>
+    task_profiles MaxPerformance
+</code></pre> 
+<h3>
+<a id="12_surfaceflinger_74"></a>1.2 surfaceflinger服务的启动</h3> 
+<p>动画播放依赖于SF进程，所以它希望先启动（无法保证两者一定能有序的启动），SF进程启动后会加载它的<code>main</code>方法<br> frameworks/native/services/surfaceflinger/main_surfaceflinger.cpp</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">,</span> <span class="token keyword">char</span><span class="token operator">*</span><span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// instantiate surfaceflinger</span>
+    sp<span class="token operator">&lt;</span>SurfaceFlinger<span class="token operator">&gt;</span> flinger <span class="token operator">=</span> surfaceflinger<span class="token double-colon punctuation">::</span><span class="token function">createSurfaceFlinger</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// initialize before clients can connect</span>
+    flinger<span class="token operator">-&gt;</span><span class="token function">init</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 这里init会去设置开机动画相关的属性</span>
+
+    <span class="token comment">// publish surface flinger</span>
+    sp<span class="token operator">&lt;</span>IServiceManager<span class="token operator">&gt;</span> <span class="token function">sm</span><span class="token punctuation">(</span><span class="token function">defaultServiceManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    sm<span class="token operator">-&gt;</span><span class="token function">addService</span><span class="token punctuation">(</span><span class="token function">String16</span><span class="token punctuation">(</span><span class="token class-name">SurfaceFlinger</span><span class="token double-colon punctuation">::</span><span class="token function">getServiceName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> flinger<span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+                   IServiceManager<span class="token double-colon punctuation">::</span>DUMP_FLAG_PRIORITY_CRITICAL <span class="token operator">|</span> IServiceManager<span class="token double-colon punctuation">::</span>DUMP_FLAG_PROTO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// publish gui::ISurfaceComposer, the new AIDL interface</span>
+    sp<span class="token operator">&lt;</span>SurfaceComposerAIDL<span class="token operator">&gt;</span> composerAIDL <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">SurfaceComposerAIDL</span><span class="token punctuation">(</span>flinger<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    sm<span class="token operator">-&gt;</span><span class="token function">addService</span><span class="token punctuation">(</span><span class="token function">String16</span><span class="token punctuation">(</span><span class="token string">"SurfaceFlingerAIDL"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> composerAIDL<span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+                   IServiceManager<span class="token double-colon punctuation">::</span>DUMP_FLAG_PRIORITY_CRITICAL <span class="token operator">|</span> IServiceManager<span class="token double-colon punctuation">::</span>DUMP_FLAG_PROTO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">startDisplayService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// dependency on SF getting registered above</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// run surface flinger in this thread</span>
+    flinger<span class="token operator">-&gt;</span><span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//SurfaceFinger启动，并运行在主线程，通过消息机制循环等待任务</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>frameworks/native/services/surfaceflinger/SurfaceFlinger.cpp</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// Do not call property_set on main thread which will be blocked by init</span>
+<span class="token comment">// Use StartPropertySetThread instead.</span>
+<span class="token keyword">void</span> <span class="token class-name">SurfaceFlinger</span><span class="token double-colon punctuation">::</span><span class="token function">init</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">ALOGI</span><span class="token punctuation">(</span>  <span class="token string">"SurfaceFlinger's main thread ready to run. "</span>
+            <span class="token string">"Initializing graphics H/W..."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    mStartPropertySetThread <span class="token operator">=</span> <span class="token function">getFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">createStartPropertySetThread</span><span class="token punctuation">(</span>presentFenceReliable<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 开启一个子现场去设置开机动画相关的属性（主线程设置属性会造成block）</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>mStartPropertySetThread<span class="token operator">-&gt;</span><span class="token function">Start</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> NO_ERROR<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">ALOGE</span><span class="token punctuation">(</span><span class="token string">"Run StartPropertySetThread failed!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">ALOGV</span><span class="token punctuation">(</span><span class="token string">"Done initializing"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>frameworks/native/services/surfaceflinger/StartPropertySetThread.cpp</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> <span class="token class-name">StartPropertySetThread</span><span class="token double-colon punctuation">::</span><span class="token function">threadLoop</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// Set property service.sf.present_timestamp, consumer need check its readiness</span>
+    <span class="token function">property_set</span><span class="token punctuation">(</span>kTimestampProperty<span class="token punctuation">,</span> mTimestampPropertyValue <span class="token operator">?</span> <span class="token string">"1"</span> <span class="token operator">:</span> <span class="token string">"0"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// Clear BootAnimation exit flag</span>
+    <span class="token function">property_set</span><span class="token punctuation">(</span><span class="token string">"service.bootanim.exit"</span><span class="token punctuation">,</span> <span class="token string">"0"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//重置开机动画退出属性</span>
+    <span class="token function">property_set</span><span class="token punctuation">(</span><span class="token string">"service.bootanim.progress"</span><span class="token punctuation">,</span> <span class="token string">"0"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// 开机动画进度</span>
+    <span class="token comment">// Start BootAnimation if not started</span>
+    <span class="token function">property_set</span><span class="token punctuation">(</span><span class="token string">"ctl.start"</span><span class="token punctuation">,</span> <span class="token string">"bootanim"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//启动开机动画的属性，这里保险起见还是会去启动bootanim服务，但是bootanim服务有可能在前面已经被init进程拉起来了</span>
+    <span class="token comment">// Exit immediately</span>
+    <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>  <span class="token comment">//只执行一次，设置完就退出</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里主要是做了两个事：</p> 
+<ol>
+<li>重置开机动画的退出属性，开机动画进程会循环check这个属性，如果为<code>1</code>就结束播放并退出，这里先初始化为0</li>
+<li>设置开机动画启动属性，如果开机动画进程没有被前面的init进程拉起来，那么这里还会再次主动让属性服务拉起开机动画进程。</li>
+</ol> 
+<p>接下来就是进入启动开机动画进程的流程了。</p> 
+<h3>
+<a id="13__141"></a>1.3 开机动画进程的启动</h3> 
+<p>frameworks/base/cmds/bootanimation/bootanimation_main.cpp</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token function">setpriority</span><span class="token punctuation">(</span>PRIO_PROCESS<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> ANDROID_PRIORITY_DISPLAY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">bool</span> noBootAnimation <span class="token operator">=</span> <span class="token function">bootAnimationDisabled</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//检查是否禁用了开机动画</span>
+    <span class="token function">ALOGI_IF</span><span class="token punctuation">(</span>noBootAnimation<span class="token punctuation">,</span>  <span class="token string">"boot animation disabled"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>noBootAnimation<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+        sp<span class="token operator">&lt;</span>ProcessState<span class="token operator">&gt;</span> <span class="token function">proc</span><span class="token punctuation">(</span><span class="token class-name">ProcessState</span><span class="token double-colon punctuation">::</span><span class="token function">self</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">ProcessState</span><span class="token double-colon punctuation">::</span><span class="token function">self</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span><span class="token function">startThreadPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// create the boot animation object (may take up to 200ms for 2MB zip)</span>
+        sp<span class="token operator">&lt;</span>BootAnimation<span class="token operator">&gt;</span> boot <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">BootAnimation</span><span class="token punctuation">(</span>audioplay<span class="token double-colon punctuation">::</span><span class="token function">createAnimationCallbacks</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//创建动画对象，这个过程会去解析的动画文件，文件越大越耗时</span>
+
+        <span class="token function">waitForSurfaceFlinger</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//向servicemanager检查SF进程是否正常启动了, 死循环等待SF注册成功</span>
+
+        boot<span class="token operator">-&gt;</span><span class="token function">run</span><span class="token punctuation">(</span><span class="token string">"BootAnimation"</span><span class="token punctuation">,</span> PRIORITY_DISPLAY<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//开始跑动画逻辑</span>
+
+        <span class="token function">ALOGV</span><span class="token punctuation">(</span><span class="token string">"Boot animation set up. Joining pool."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">IPCThreadState</span><span class="token double-colon punctuation">::</span><span class="token function">self</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span><span class="token function">joinThreadPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>主要是：</p> 
+<ul>
+<li>检查是否禁用了开机动画，如果禁用了进程直接结束，不播放Android动画（也许厂商自己用其他方式实现）</li>
+<li>创建BootAnimation对象，加载并解析动画文件，加载时间根据文件大小有关（图片大小，数量）</li>
+<li>循环等待SurfaceFlinger服务的启动（没有SF也播放不了动画）</li>
+<li>启动动画线程(BootAnimation继承于Thread类，它本身就是一个thread)，开始播放动画</li>
+</ul> 
+<h4>
+<a id="131__175"></a>1.3.1 检查是否禁用了开机动画</h4> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> <span class="token function">bootAnimationDisabled</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">char</span> value<span class="token punctuation">[</span>PROPERTY_VALUE_MAX<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token function">property_get</span><span class="token punctuation">(</span><span class="token string">"debug.sf.nobootanimation"</span><span class="token punctuation">,</span> value<span class="token punctuation">,</span> <span class="token string">"0"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">atoi</span><span class="token punctuation">(</span>value<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">property_get</span><span class="token punctuation">(</span><span class="token string">"ro.boot.quiescent"</span><span class="token punctuation">,</span> value<span class="token punctuation">,</span> <span class="token string">"0"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">atoi</span><span class="token punctuation">(</span>value<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// Only show the bootanimation for quiescent boots if this system property is set to enabled</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">property_get_bool</span><span class="token punctuation">(</span><span class="token string">"ro.bootanim.quiescent.enabled"</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>主要受三个属性控制，三个属性优先级有前后。</p> 
+<h4>
+<a id="132_BootAnimation_197"></a>1.3.2 创建BootAnimation对象，预加载动画文件</h4> 
+<pre><code class="prism language-cpp"><span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">BootAnimation</span><span class="token punctuation">(</span>sp<span class="token operator">&lt;</span>Callbacks<span class="token operator">&gt;</span> callbacks<span class="token punctuation">)</span>
+        <span class="token operator">:</span> <span class="token function">Thread</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">mLooper</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token function">Looper</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">mClockEnabled</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">mTimeIsAccurate</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token function">mTimeFormat12Hour</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">mTimeCheckThread</span><span class="token punctuation">(</span><span class="token keyword">nullptr</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">mCallbacks</span><span class="token punctuation">(</span>callbacks<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    mSession <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">SurfaceComposerClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 获取SF在开机动画进程的代理，后面会使用该对象与SF跨进程通信</span>
+
+    std<span class="token double-colon punctuation">::</span>string powerCtl <span class="token operator">=</span> android<span class="token double-colon punctuation">::</span>base<span class="token double-colon punctuation">::</span><span class="token function">GetProperty</span><span class="token punctuation">(</span><span class="token string">"sys.powerctl"</span><span class="token punctuation">,</span> <span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>powerCtl<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// 判断是开机动画还是关机动画</span>
+        mShuttingDown <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        mShuttingDown <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">ALOGD</span><span class="token punctuation">(</span><span class="token string">"%sAnimationStartTiming start time: %"</span> PRId64 <span class="token string">"ms"</span><span class="token punctuation">,</span> mShuttingDown <span class="token operator">?</span> <span class="token string">"Shutdown"</span> <span class="token operator">:</span> <span class="token string">"Boot"</span><span class="token punctuation">,</span>
+            <span class="token function">elapsedRealtime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>上面的构造方法中仅仅中只是获取了SF的session代理对象, 真正的加载逻辑在这个对象的第一次引用回调方法中（在前面的sp指针实例化时被回调）。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">onFirstRef</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    status_t err <span class="token operator">=</span> mSession<span class="token operator">-&gt;</span><span class="token function">linkToComposerDeath</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">SLOGE_IF</span><span class="token punctuation">(</span>err<span class="token punctuation">,</span> <span class="token string">"linkToComposerDeath failed (%s) "</span><span class="token punctuation">,</span> <span class="token function">strerror</span><span class="token punctuation">(</span><span class="token operator">-</span>err<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>err <span class="token operator">==</span> NO_ERROR<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// Load the animation content -- this can be slow (eg 200ms)</span>
+        <span class="token comment">// called before waitForSurfaceFlinger() in main() to avoid wait</span>
+        <span class="token function">ALOGD</span><span class="token punctuation">(</span><span class="token string">"%sAnimationPreloadTiming start time: %"</span> PRId64 <span class="token string">"ms"</span><span class="token punctuation">,</span>
+                mShuttingDown <span class="token operator">?</span> <span class="token string">"Shutdown"</span> <span class="token operator">:</span> <span class="token string">"Boot"</span><span class="token punctuation">,</span> <span class="token function">elapsedRealtime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">preloadAnimation</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">ALOGD</span><span class="token punctuation">(</span><span class="token string">"%sAnimationPreloadStopTiming start time: %"</span> PRId64 <span class="token string">"ms"</span><span class="token punctuation">,</span>
+                mShuttingDown <span class="token operator">?</span> <span class="token string">"Shutdown"</span> <span class="token operator">:</span> <span class="token string">"Boot"</span><span class="token punctuation">,</span> <span class="token function">elapsedRealtime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>加载的逻辑主要是<code>preloadAnimation()</code>，这个过程主要是解析<code>bootanimation.zip</code>文件</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">preloadAnimation</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">findBootAnimationFile</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// 检索系统的几个预设定路径下是否存在bootanimation.zip文件</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>mZipFileName<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        mAnimation <span class="token operator">=</span> <span class="token function">loadAnimation</span><span class="token punctuation">(</span>mZipFileName<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// 加载动画文件</span>
+        <span class="token keyword">return</span> <span class="token punctuation">(</span>mAnimation <span class="token operator">!=</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>findBootAnimationFile</code>方法是去检索系统的几个预设定路径下是否存在bootanimation.zip文件, 如果存在赋值给mZipFileName, 几个预设定路径是：（寻找是根据系统是否加密、是否是深色主题进行选择，pixel 2xl的文件是 /product/media/下）</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">char</span> OEM_BOOTANIMATION_FILE<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"/oem/media/bootanimation.zip"</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">char</span> PRODUCT_BOOTANIMATION_DARK_FILE<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"/product/media/bootanimation-dark.zip"</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">char</span> PRODUCT_BOOTANIMATION_FILE<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"/product/media/bootanimation.zip"</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">char</span> SYSTEM_BOOTANIMATION_FILE<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"/system/media/bootanimation.zip"</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">char</span> APEX_BOOTANIMATION_FILE<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"/apex/com.android.bootani开始播放动画mation/etc/bootanimation.zip"</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">char</span> PRODUCT_ENCRYPTED_BOOTANIMATION_FILE<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"/product/media/bootanimation-encrypted.zip"</span><span class="token punctuation">;</span>
+<span class="token keyword">static</span> <span class="token keyword">const</span> <span class="token keyword">char</span> SYSTEM_ENCRYPTED_BOOTANIMATION_FILE<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"/system/media/bootanimation-encrypted.zip"</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><code>loadAnimation()</code>方法是去解析<code>bootanimation.zip</code>文件</p> 
+<pre><code class="prism language-cpp">BootAnimation<span class="token double-colon punctuation">::</span>Animation<span class="token operator">*</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">loadAnimation</span><span class="token punctuation">(</span><span class="token keyword">const</span> String8<span class="token operator">&amp;</span> fn<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>mLoadedFiles<span class="token punctuation">.</span><span class="token function">indexOf</span><span class="token punctuation">(</span>fn<span class="token punctuation">)</span> <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//mLoadedFiles是根据文件名是否加载过来防止加载动画zip包多次</span>
+        <span class="token function">SLOGE</span><span class="token punctuation">(</span><span class="token string">"File "%s" is already loaded. Cyclic ref is not allowed"</span><span class="token punctuation">,</span>
+            fn<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    ZipFileRO <span class="token operator">*</span>zip <span class="token operator">=</span> <span class="token class-name">ZipFileRO</span><span class="token double-colon punctuation">::</span><span class="token function">open</span><span class="token punctuation">(</span>fn<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//打开zip文件</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>zip <span class="token operator">==</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">SLOGE</span><span class="token punctuation">(</span><span class="token string">"Failed to open animation zip "%s": %s"</span><span class="token punctuation">,</span>
+            fn<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">strerror</span><span class="token punctuation">(</span>errno<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">ALOGD</span><span class="token punctuation">(</span><span class="token string">"%s is loaded successfully"</span><span class="token punctuation">,</span> fn<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    Animation <span class="token operator">*</span>animation <span class="token operator">=</span>  <span class="token keyword">new</span> Animation<span class="token punctuation">;</span>
+    animation<span class="token operator">-&gt;</span>fileName <span class="token operator">=</span> fn<span class="token punctuation">;</span>
+    animation<span class="token operator">-&gt;</span>zip <span class="token operator">=</span> zip<span class="token punctuation">;</span>
+    animation<span class="token operator">-&gt;</span>clockFont<span class="token punctuation">.</span>map <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+    mLoadedFiles<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>animation<span class="token operator">-&gt;</span>fileName<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//整个zip也用一个Animation来描述</span>
+
+    <span class="token function">parseAnimationDesc</span><span class="token punctuation">(</span><span class="token operator">*</span>animation<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//解析‘desc.txt’文件，根据这个文件创建每个part的Animation对象</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">preloadZip</span><span class="token punctuation">(</span><span class="token operator">*</span>animation<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//加载每一个part对应的图片，并填充到animation.part.frames</span>
+        <span class="token function">releaseAnimation</span><span class="token punctuation">(</span>animation<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    mLoadedFiles<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>fn<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> animation<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>解析<code>desc.txt</code>文件</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">parseAnimationDesc</span><span class="token punctuation">(</span>Animation<span class="token operator">&amp;</span> animation<span class="token punctuation">)</span>  <span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// Parse the description file</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span><span class="token punctuation">;</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> endl <span class="token operator">=</span> <span class="token function">strstr</span><span class="token punctuation">(</span>s<span class="token punctuation">,</span> <span class="token string">"n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>endl <span class="token operator">==</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+        String8 <span class="token function">line</span><span class="token punctuation">(</span>s<span class="token punctuation">,</span> endl <span class="token operator">-</span> s<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> l <span class="token operator">=</span> line<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> fps <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> width <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> height <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> count <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> pause <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> progress <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> framesToFadeCount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> colorTransitionStart <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> colorTransitionEnd <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">char</span> path<span class="token punctuation">[</span>ANIM_ENTRY_NAME_MAX<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token keyword">char</span> color<span class="token punctuation">[</span><span class="token number">7</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"000000"</span><span class="token punctuation">;</span> <span class="token comment">// default to black if unspecified</span>
+        <span class="token keyword">char</span> clockPos1<span class="token punctuation">[</span>TEXT_POS_LEN_MAX <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">""</span><span class="token punctuation">;</span>
+        <span class="token keyword">char</span> clockPos2<span class="token punctuation">[</span>TEXT_POS_LEN_MAX <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">""</span><span class="token punctuation">;</span>
+        <span class="token keyword">char</span> dynamicColoringPartNameBuffer<span class="token punctuation">[</span>ANIM_ENTRY_NAME_MAX<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token keyword">char</span> pathType<span class="token punctuation">;</span>
+        <span class="token comment">// start colors default to black if unspecified</span>
+        <span class="token keyword">char</span> start_color_0<span class="token punctuation">[</span><span class="token number">7</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"000000"</span><span class="token punctuation">;</span>
+        <span class="token keyword">char</span> start_color_1<span class="token punctuation">[</span><span class="token number">7</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"000000"</span><span class="token punctuation">;</span>
+        <span class="token keyword">char</span> start_color_2<span class="token punctuation">[</span><span class="token number">7</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"000000"</span><span class="token punctuation">;</span>
+        <span class="token keyword">char</span> start_color_3<span class="token punctuation">[</span><span class="token number">7</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"000000"</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">int</span> nextReadPos<span class="token punctuation">;</span>
+
+        <span class="token keyword">int</span> topLineNumbers <span class="token operator">=</span> <span class="token function">sscanf</span><span class="token punctuation">(</span>l<span class="token punctuation">,</span> <span class="token string">"%d %d %d %d"</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>width<span class="token punctuation">,</span> <span class="token operator">&amp;</span>height<span class="token punctuation">,</span> <span class="token operator">&amp;</span>fps<span class="token punctuation">,</span> <span class="token operator">&amp;</span>progress<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>topLineNumbers <span class="token operator">==</span> <span class="token number">3</span> <span class="token operator">||</span> topLineNumbers <span class="token operator">==</span> <span class="token number">4</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">//解析第一行，获取width/height/fps参数</span>
+            <span class="token comment">// SLOGD("&gt; w=%d, h=%d, fps=%d, progress=%d", width, height, fps, progress);</span>
+            animation<span class="token punctuation">.</span>width <span class="token operator">=</span> width<span class="token punctuation">;</span>
+            animation<span class="token punctuation">.</span>height <span class="token operator">=</span> height<span class="token punctuation">;</span>
+            animation<span class="token punctuation">.</span>fps <span class="token operator">=</span> fps<span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>topLineNumbers <span class="token operator">==</span> <span class="token number">4</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//如果配置了progress，一般不会配置</span>
+              animation<span class="token punctuation">.</span>progressEnabled <span class="token operator">=</span> <span class="token punctuation">(</span>progress <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+              animation<span class="token punctuation">.</span>progressEnabled <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">sscanf</span><span class="token punctuation">(</span>l<span class="token punctuation">,</span> <span class="token string">"dynamic_colors %"</span> <span class="token function">STRTO</span><span class="token punctuation">(</span>ANIM_PATH_MAX<span class="token punctuation">)</span> <span class="token string">"s #%6s #%6s #%6s #%6s %d %d"</span><span class="token punctuation">,</span>
+            dynamicColoringPartNameBuffer<span class="token punctuation">,</span>加载每一个part对应的图片，并填充到animation<span class="token punctuation">.</span>part<span class="token punctuation">.</span>frames
+            start_color_0<span class="token punctuation">,</span> start_color_1<span class="token punctuation">,</span> start_color_2<span class="token punctuation">,</span> start_color_3<span class="token punctuation">,</span>
+            <span class="token operator">&amp;</span>colorTransitionStart<span class="token punctuation">,</span> <span class="token operator">&amp;</span>colorTransitionEnd<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//动态颜色，我们一般不配置，所以不会走这里</span>
+            animation<span class="token punctuation">.</span>dynamicColoringEnabled <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+            <span class="token function">parseColor</span><span class="token punctuation">(</span>start_color_0<span class="token punctuation">,</span> animation<span class="token punctuation">.</span>startColors<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">parseColor</span><span class="token punctuation">(</span>start_color_1<span class="token punctuation">,</span> animation<span class="token punctuation">.</span>startColors<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">parseColor</span><span class="token punctuation">(</span>start_color_2<span class="token punctuation">,</span> animation<span class="token punctuation">.</span>startColors<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">parseColor</span><span class="token punctuation">(</span>start_color_3<span class="token punctuation">,</span> animation<span class="token punctuation">.</span>startColors<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            animation<span class="token punctuation">.</span>colorTransitionStart <span class="token operator">=</span> colorTransitionStart<span class="token punctuation">;</span>
+            animation<span class="token punctuation">.</span>colorTransitionEnd <span class="token operator">=</span> colorTransitionEnd<span class="token punctuation">;</span>
+            dynamicColoringPartName <span class="token operator">=</span> std<span class="token double-colon punctuation">::</span><span class="token function">string</span><span class="token punctuation">(</span>dynamicColoringPartNameBuffer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">sscanf</span><span class="token punctuation">(</span>l<span class="token punctuation">,</span> <span class="token string">"%c %d %d %"</span> <span class="token function">STRTO</span><span class="token punctuation">(</span>ANIM_PATH_MAX<span class="token punctuation">)</span> <span class="token string">"s%n"</span><span class="token punctuation">,</span>
+                          <span class="token operator">&amp;</span>pathType<span class="token punctuation">,</span> <span class="token operator">&amp;</span>count<span class="token punctuation">,</span> <span class="token operator">&amp;</span>pause<span class="token punctuation">,</span> path<span class="token punctuation">,</span> <span class="token operator">&amp;</span>nextReadPos<span class="token punctuation">)</span> <span class="token operator">&gt;=</span> <span class="token number">4</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//解析第二行开始的part部分</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>pathType <span class="token operator">==</span> <span class="token char">'f'</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token function">sscanf</span><span class="token punctuation">(</span>l <span class="token operator">+</span> nextReadPos<span class="token punctuation">,</span> <span class="token string">" %d #%6s %16s %16s"</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>framesToFadeCount<span class="token punctuation">,</span> color<span class="token punctuation">,</span> clockPos1<span class="token punctuation">,</span>
+                       clockPos2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token function">sscanf</span><span class="token punctuation">(</span>l <span class="token operator">+</span> nextReadPos<span class="token punctuation">,</span> <span class="token string">" #%6s %16s %16s"</span><span class="token punctuation">,</span> color<span class="token punctuation">,</span> clockPos1<span class="token punctuation">,</span> clockPos2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// SLOGD("&gt; type=%c, count=%d, pause=%d, path=%s, framesToFadeCount=%d, color=%s, "</span>
+            <span class="token comment">//       "clockPos1=%s, clockPos2=%s",</span>
+            <span class="token comment">//       pathType, count, pause, path, framesToFadeCount, color, clockPos1, clockPos2);</span>
+            Animation<span class="token double-colon punctuation">::</span>Part part<span class="token punctuation">;</span> 
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>path <span class="token operator">==</span> dynamicColoringPartName<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// Part is specified to use dynamic coloring.</span>
+                part<span class="token punctuation">.</span>useDynamicColoring <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+                part<span class="token punctuation">.</span>postDynamicColoring <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+                postDynamicColoring <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>   <span class="token comment">//我们一般只配置pathType、count、pause，其他的都是空</span>
+                <span class="token comment">// Part does not use dynamic coloring.</span>
+                part<span class="token punctuation">.</span>useDynamicColoring <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+                part<span class="token punctuation">.</span>postDynamicColoring <span class="token operator">=</span>  postDynamicColoring<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            part<span class="token punctuation">.</span>playUntilComplete <span class="token operator">=</span> pathType <span class="token operator">==</span> <span class="token char">'c'</span><span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>framesToFadeCount <span class="token operator">=</span> framesToFadeCount<span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>count <span class="token operator">=</span> count<span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>pause <span class="token operator">=</span> pause<span class="token punctuation">;</span>加载
+            part<span class="token punctuation">.</span>path <span class="token operator">=</span> path<span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>audioData <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>  <span class="token comment">//新版本还加入了开机动画每个part可以添加对应的音频文件，但是一般不配置，且不是在这里加载</span>
+            part<span class="token punctuation">.</span>animation <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>  <span class="token comment">//这里每个part下面一般不会再嵌套动画文件了，所以它已经是节点了</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">parseColor</span><span class="token punctuation">(</span>color<span class="token punctuation">,</span> part<span class="token punctuation">.</span>backgroundColor<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//color和backgroundcolor没有特殊配置使用默认的black</span>
+                <span class="token function">SLOGE</span><span class="token punctuation">(</span><span class="token string">"&gt; invalid color '#%s'"</span><span class="token punctuation">,</span> color<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                part<span class="token punctuation">.</span>backgroundColor<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0.0f</span><span class="token punctuation">;</span>
+                part<span class="token punctuation">.</span>backgroundColor<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0.0f</span><span class="token punctuation">;</span>
+                part<span class="token punctuation">.</span>backgroundColor<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0.0f</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token function">parsePosition</span><span class="token punctuation">(</span>clockPos1<span class="token punctuation">,</span> clockPos2<span class="token punctuation">,</span> <span class="token operator">&amp;</span>part<span class="token punctuation">.</span>clockPosX<span class="token punctuation">,</span> <span class="token operator">&amp;</span>part<span class="token punctuation">.</span>clockPosY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            animation<span class="token punctuation">.</span>parts<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>part<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//将part加入animation对象中，这样就能拿到他的fps/type/count/pause, 但是frames数据还没有填充</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">strcmp</span><span class="token punctuation">(</span>l<span class="token punctuation">,</span> <span class="token string">"$SYSTEM"</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//一种特殊情况，不会走这里</span>
+            <span class="token comment">// SLOGD("&gt; SYSTEM");</span>
+            Animation<span class="token double-colon punctuation">::</span>Part part<span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>playUntilComplete <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>framesToFadeCount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>count <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>pause <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>audioData <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+            part<span class="token punctuation">.</span>animation <span class="token operator">=</span> <span class="token function">loadAnimation</span><span class="token punctuation">(</span><span class="token function">String8</span><span class="token punctuation">(</span>SYSTEM_BOOTANIMATION_FILE<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>part<span class="token punctuation">.</span>animation <span class="token operator">!=</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span>
+                animation<span class="token punctuation">.</span>parts<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>part<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        s <span class="token operator">=</span> <span class="token operator">++</span>endl<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>解析完<code>desc.txt</code>，已经将配置文件中每个part对应到每个实际的part文件夹，但是真正的图片，还没有去加载，接下来<code>preloadZip</code>加载每一个part对应的图片，并填充到<code>animation.part.frames</code></p> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">preloadZip</span><span class="token punctuation">(</span>Animation<span class="token operator">&amp;</span> animation<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// read all the data structures</span>
+    <span class="token keyword">const</span> size_t pcount <span class="token operator">=</span> animation<span class="token punctuation">.</span>parts<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>cookie <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+    ZipFileRO<span class="token operator">*</span> zip <span class="token operator">=</span> animation<span class="token punctuation">.</span>zip<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>zip<span class="token operator">-&gt;</span><span class="token function">startIteration</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>cookie<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    ZipEntryRO entry<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> name<span class="token punctuation">[</span>ANIM_ENTRY_NAME_MAX<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>entry <span class="token operator">=</span> zip<span class="token operator">-&gt;</span><span class="token function">nextEntry</span><span class="token punctuation">(</span>cookie<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//遍历整个zip下的文件树，一般我们都不会嵌套多层，叶子节点就是每个part文件夹下的文件</span>
+        <span class="token keyword">const</span> <span class="token keyword">int</span> foundEntryName <span class="token operator">=</span> zip<span class="token operator">-&gt;</span><span class="token function">getEntryFileName</span><span class="token punctuation">(</span>entry<span class="token punctuation">,</span> name<span class="token punctuation">,</span> ANIM_ENTRY_NAME_MAX<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>foundEntryName <span class="token operator">&gt;</span> ANIM_ENTRY_NAME_MAX <span class="token operator">||</span> foundEntryName <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">SLOGE</span><span class="token punctuation">(</span><span class="token string">"Error fetching entry file name"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">continue</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">const</span> String8 <span class="token function">entryName</span><span class="token punctuation">(</span>name<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">const</span> String8 <span class="token function">path</span><span class="token punctuation">(</span>entryName<span class="token punctuation">.</span><span class="token function">getPathDir</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">const</span> String8 <span class="token function">leaf</span><span class="token punctuation">(</span>entryName<span class="token punctuation">.</span><span class="token function">getPathLeaf</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>leaf<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span>size_t j <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> pcount<span class="token punctuation">;</span> j<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//遍历每个part</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>path <span class="token operator">==</span> animation<span class="token punctuation">.</span>parts<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">.</span>path<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">uint16_t</span> method<span class="token punctuation">;</span>
+                    <span class="token comment">// supports only stored png files</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>zip<span class="token operator">-&gt;</span><span class="token function">getEntryInfo</span><span class="token punctuation">(</span>entry<span class="token punctuation">,</span> <span class="token operator">&amp;</span>method<span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">if</span> <span class="token punctuation">(</span>method <span class="token operator">==</span> ZipFileRO<span class="token double-colon punctuation">::</span>kCompressStored<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//从直接可以知道bootanimation.zip必须使用存储方式打包，不能压缩，否则将不能播放</span>
+                            FileMap<span class="token operator">*</span> map <span class="token operator">=</span> zip<span class="token operator">-&gt;</span><span class="token function">createEntryFileMap</span><span class="token punctuation">(</span>entry<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token keyword">if</span> <span class="token punctuation">(</span>map<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                                Animation<span class="token double-colon punctuation">::</span>Part<span class="token operator">&amp;</span> <span class="token function">part</span><span class="token punctuation">(</span>animation<span class="token punctuation">.</span>parts<span class="token punctuation">.</span><span class="token function">editItemAt</span><span class="token punctuation">(</span>j<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                <span class="token keyword">if</span> <span class="token punctuation">(</span>leaf <span class="token operator">==</span> <span class="token string">"audio.wav"</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// 如果是音频文件</span>
+                                    <span class="token comment">// a part may have at most one audio file</span>
+                                    part<span class="token punctuation">.</span>audioData <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">uint8_t</span> <span class="token operator">*</span><span class="token punctuation">)</span>map<span class="token operator">-&gt;</span><span class="token function">getDataPtr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                    part<span class="token punctuation">.</span>audioLength <span class="token operator">=</span> map<span class="token operator">-&gt;</span><span class="token function">getDataLength</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>leaf <span class="token operator">==</span> <span class="token string">"trim.txt"</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//一般不会使用trim</span>
+                                    part<span class="token punctuation">.</span>trimData<span class="token punctuation">.</span><span class="token function">setTo</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">char</span> <span class="token keyword">const</span><span class="token operator">*</span><span class="token punctuation">)</span>map<span class="token operator">-&gt;</span><span class="token function">getDataPtr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                                        map<span class="token operator">-&gt;</span><span class="token function">getDataLength</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                                    Animation<span class="token double-colon punctuation">::</span>Frame frame<span class="token punctuation">;</span>
+                                    frame<span class="token punctuation">.</span>name <span class="token operator">=</span> leaf<span class="token punctuation">;</span>
+                                    frame<span class="token punctuation">.</span>map <span class="token operator">=</span> map<span class="token punctuation">;</span>
+                                    frame<span class="token punctuation">.</span>trimWidth <span class="token operator">=</span> animation<span class="token punctuation">.</span>width<span class="token punctuation">;</span>
+                                    frame<span class="token punctuation">.</span>trimHeight <span class="token operator">=</span> animation<span class="token punctuation">.</span>height<span class="token punctuation">;</span>
+                                    frame<span class="token punctuation">.</span>trimX <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+                                    frame<span class="token punctuation">.</span>trimY <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+                                    part<span class="token punctuation">.</span>frames<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>frame<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 将part下面的图片添加到part的frames</span>
+                                <span class="token punctuation">}</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token function">SLOGE</span><span class="token punctuation">(</span><span class="token string">"bootanimation.zip is compressed; must be only stored"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    zip<span class="token operator">-&gt;</span><span class="token function">endIteration</span><span class="token punctuation">(</span>cookie<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>到这里动画文件的预加载就完成了，这时候需要check SF是否已经正常启动。</p> 
+<h4>
+<a id="133_SF_465"></a>1.3.3 等待SF服务的启动</h4> 
+<p>frameworks/base/cmds/bootanimation/BootAnimationUtil.cpp</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token function">waitForSurfaceFlinger</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// TODO: replace this with better waiting logic in future, b/35253872</span>
+    <span class="token keyword">int64_t</span> waitStartTime <span class="token operator">=</span> <span class="token function">elapsedRealtime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    sp<span class="token operator">&lt;</span>IServiceManager<span class="token operator">&gt;</span> sm <span class="token operator">=</span> <span class="token function">defaultServiceManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">const</span> String16 <span class="token function">name</span><span class="token punctuation">(</span><span class="token string">"SurfaceFlinger"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">const</span> <span class="token keyword">int</span> SERVICE_WAIT_SLEEP_MS <span class="token operator">=</span> <span class="token number">100</span><span class="token punctuation">;</span>
+    <span class="token keyword">const</span> <span class="token keyword">int</span> LOG_PER_RETRIES <span class="token operator">=</span> <span class="token number">10</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> retry <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>sm<span class="token operator">-&gt;</span><span class="token function">checkService</span><span class="token punctuation">(</span>name<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        retry<span class="token operator">++</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>retry <span class="token operator">%</span> LOG_PER_RETRIES<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">ALOGW</span><span class="token punctuation">(</span><span class="token string">"Waiting for SurfaceFlinger, waited for %"</span> PRId64 <span class="token string">" ms"</span><span class="token punctuation">,</span>
+                  <span class="token function">elapsedRealtime</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> waitStartTime<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token function">usleep</span><span class="token punctuation">(</span>SERVICE_WAIT_SLEEP_MS <span class="token operator">*</span> <span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span><span class="token punctuation">;</span>
+    <span class="token keyword">int64_t</span> totalWaited <span class="token operator">=</span> <span class="token function">elapsedRealtime</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> waitStartTime<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>totalWaited <span class="token operator">&gt;</span> SERVICE_WAIT_SLEEP_MS<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">ALOGI</span><span class="token punctuation">(</span><span class="token string">"Waiting for SurfaceFlinger took %"</span> PRId64 <span class="token string">" ms"</span><span class="token punctuation">,</span> totalWaited<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>向ServiceMananger询问SF是否注册，如果没注册死循环，每秒问一次，启动了就开始播放动画</p> 
+<h4>
+<a id="134__492"></a>1.3.4 启动播放线程，播放动画</h4> 
+<p>前面的<code>main</code>方法的<code>boot-&gt;run("BootAnimation", PRIORITY_DISPLAY);</code>会先走BootAnimation线程的<code>readyToRun</code>, 然后才执行真正的线程循环体<code>threadLoop</code>，先看下<code>readyToRun</code></p> 
+<ul><li>readyToRun</li></ul> 
+<pre><code class="prism language-cpp">status_t <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">readyToRun</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    mDisplayToken <span class="token operator">=</span> <span class="token class-name">SurfaceComposerClient</span><span class="token double-colon punctuation">::</span><span class="token function">getInternalDisplayToken</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//获取DisplayToken， 用于获取Display(屏幕)的参数</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>mDisplayToken <span class="token operator">==</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span>
+        <span class="token keyword">return</span> NAME_NOT_FOUND<span class="token punctuation">;</span>
+
+    DisplayMode displayMode<span class="token punctuation">;</span>
+    <span class="token keyword">const</span> status_t error <span class="token operator">=</span>
+            <span class="token class-name">SurfaceComposerClient</span><span class="token double-colon punctuation">::</span><span class="token function">getActiveDisplayMode</span><span class="token punctuation">(</span>mDisplayToken<span class="token punctuation">,</span> <span class="token operator">&amp;</span>displayMode<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//获取DisplayMode，用于获取分辨率等信息</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    resolution <span class="token operator">=</span> <span class="token function">limitSurfaceSize</span><span class="token punctuation">(</span>resolution<span class="token punctuation">.</span>width<span class="token punctuation">,</span> resolution<span class="token punctuation">.</span>height<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// create the native surface</span>
+    sp<span class="token operator">&lt;</span>SurfaceControl<span class="token operator">&gt;</span> control <span class="token operator">=</span> <span class="token function">session</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span><span class="token function">createSurface</span><span class="token punctuation">(</span><span class="token function">String8</span><span class="token punctuation">(</span><span class="token string">"BootAnimation"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            resolution<span class="token punctuation">.</span><span class="token function">getWidth</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> resolution<span class="token punctuation">.</span><span class="token function">getHeight</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> PIXEL_FORMAT_RGB_565<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//创建Surface并返回一个surfacecontrol对象，动画需要他通过opengl绘制到surface上</span>
+
+    SurfaceComposerClient<span class="token double-colon punctuation">::</span>Transaction t<span class="token punctuation">;</span>  <span class="token comment">//创建与SF通信的事务</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	
+    <span class="token comment">// Scale forced resolution to physical resolution</span>
+    Rect <span class="token function">forcedRes</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> resolution<span class="token punctuation">.</span>width<span class="token punctuation">,</span> resolution<span class="token punctuation">.</span>height<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    Rect <span class="token function">physRes</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> displayMode<span class="token punctuation">.</span>resolution<span class="token punctuation">.</span>width<span class="token punctuation">,</span> displayMode<span class="token punctuation">.</span>resolution<span class="token punctuation">.</span>height<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    t<span class="token punctuation">.</span><span class="token function">setDisplayProjection</span><span class="token punctuation">(</span>mDisplayToken<span class="token punctuation">,</span> ui<span class="token double-colon punctuation">::</span>ROTATION_0<span class="token punctuation">,</span> forcedRes<span class="token punctuation">,</span> physRes<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//设置屏幕的投影参数</span>
+
+    t<span class="token punctuation">.</span><span class="token function">setLayer</span><span class="token punctuation">(</span>control<span class="token punctuation">,</span> <span class="token number">0x40000000</span><span class="token punctuation">)</span> <span class="token comment">//将Layer和SurfaceControl绑定</span>
+        <span class="token punctuation">.</span><span class="token function">apply</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//提交事务</span>
+
+    sp<span class="token operator">&lt;</span>Surface<span class="token operator">&gt;</span> s <span class="token operator">=</span> control<span class="token operator">-&gt;</span><span class="token function">getSurface</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//获取一个surface</span>
+
+	<span class="token comment">//初始化opengl and egl</span>
+    <span class="token comment">// initialize opengl and egl</span>
+    EGLDisplay display <span class="token operator">=</span> <span class="token function">eglGetDisplay</span><span class="token punctuation">(</span>EGL_DEFAULT_DISPLAY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">eglInitialize</span><span class="token punctuation">(</span>display<span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    EGLConfig config <span class="token operator">=</span> <span class="token function">getEglConfig</span><span class="token punctuation">(</span>display<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    EGLSurface surface <span class="token operator">=</span> <span class="token function">eglCreateWindowSurface</span><span class="token punctuation">(</span>display<span class="token punctuation">,</span> config<span class="token punctuation">,</span> s<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// Initialize egl context with client version number 2.0.</span>
+    EGLint contextAttributes<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>EGL_CONTEXT_CLIENT_VERSION<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">,</span> EGL_NONE<span class="token punctuation">}</span><span class="token punctuation">;</span>
+    EGLContext context <span class="token operator">=</span> <span class="token function">eglCreateContext</span><span class="token punctuation">(</span>display<span class="token punctuation">,</span> config<span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">,</span> contextAttributes<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    EGLint w<span class="token punctuation">,</span> h<span class="token punctuation">;</span>
+    <span class="token function">eglQuerySurface</span><span class="token punctuation">(</span>display<span class="token punctuation">,</span> surface<span class="token punctuation">,</span> EGL_WIDTH<span class="token punctuation">,</span> <span class="token operator">&amp;</span>w<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">eglQuerySurface</span><span class="token punctuation">(</span>display<span class="token punctuation">,</span> surface<span class="token punctuation">,</span> EGL_HEIGHT<span class="token punctuation">,</span> <span class="token operator">&amp;</span>h<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">eglMakeCurrent</span><span class="token punctuation">(</span>display<span class="token punctuation">,</span> surface<span class="token punctuation">,</span> surface<span class="token punctuation">,</span> context<span class="token punctuation">)</span> <span class="token operator">==</span> EGL_FALSE<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> NO_INIT<span class="token punctuation">;</span>
+
+    mDisplay <span class="token operator">=</span> display<span class="token punctuation">;</span>
+    mContext <span class="token operator">=</span> context<span class="token punctuation">;</span>
+    mSurface <span class="token operator">=</span> surface<span class="token punctuation">;</span>
+    mInitWidth <span class="token operator">=</span> mWidth <span class="token operator">=</span> w<span class="token punctuation">;</span>
+    mInitHeight <span class="token operator">=</span> mHeight <span class="token operator">=</span> h<span class="token punctuation">;</span>
+    mFlingerSurfaceControl <span class="token operator">=</span> control<span class="token punctuation">;</span>
+    mFlingerSurface <span class="token operator">=</span> s<span class="token punctuation">;</span>
+    mTargetInset <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	
+    <span class="token function">projectSceneToWindow</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 裁剪窗口、转化坐标</span>
+
+    <span class="token comment">// Register a display event receiver</span>
+    mDisplayEventReceiver <span class="token operator">=</span> std<span class="token double-colon punctuation">::</span><span class="token generic-function"><span class="token function">make_unique</span><span class="token generic class-name"><span class="token operator">&lt;</span>DisplayEventReceiver<span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    status_t status <span class="token operator">=</span> mDisplayEventReceiver<span class="token operator">-&gt;</span><span class="token function">initCheck</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">SLOGE_IF</span><span class="token punctuation">(</span>status <span class="token operator">!=</span> NO_ERROR<span class="token punctuation">,</span> <span class="token string">"Initialization of DisplayEventReceiver failed with status: %d"</span><span class="token punctuation">,</span>
+            status<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    mLooper<span class="token operator">-&gt;</span><span class="token function">addFd</span><span class="token punctuation">(</span>mDisplayEventReceiver<span class="token operator">-&gt;</span><span class="token function">getFd</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> Looper<span class="token double-colon punctuation">::</span>EVENT_INPUT<span class="token punctuation">,</span>
+            <span class="token keyword">new</span> <span class="token function">DisplayEventCallback</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> NO_ERROR<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<ul><li>threadLoop</li></ul> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">threadLoop</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">bool</span> result<span class="token punctuation">;</span>
+    <span class="token function">initShaders</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//初始化opengl着色器</span>
+
+    <span class="token comment">// We have no bootanimation file, so we use the stock android logo</span>
+    <span class="token comment">// animation.</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>mZipFileName<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">ALOGD</span><span class="token punctuation">(</span><span class="token string">"No animation file"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        result <span class="token operator">=</span> <span class="token function">android</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//当我们没有定制bootanimation.zip（不存在这个文件）时，系统会去播放assets下面那两张图片，一个android字样的闪烁动画</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        result <span class="token operator">=</span> <span class="token function">movie</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//当存在bootanimation.zip时，走这个分支</span>
+    <span class="token punctuation">}</span>
+
+    mCallbacks<span class="token operator">-&gt;</span><span class="token function">shutdown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">eglMakeCurrent</span><span class="token punctuation">(</span>mDisplay<span class="token punctuation">,</span> EGL_NO_SURFACE<span class="token punctuation">,</span> EGL_NO_SURFACE<span class="token punctuation">,</span> EGL_NO_CONTEXT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">eglDestroyContext</span><span class="token punctuation">(</span>mDisplay<span class="token punctuation">,</span> mContext<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">eglDestroySurface</span><span class="token punctuation">(</span>mDisplay<span class="token punctuation">,</span> mSurface<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    mFlingerSurface<span class="token punctuation">.</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    mFlingerSurfaceControl<span class="token punctuation">.</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">eglTerminate</span><span class="token punctuation">(</span>mDisplay<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">eglReleaseThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">IPCThreadState</span><span class="token double-colon punctuation">::</span><span class="token function">self</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span><span class="token function">stopProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> result<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>我们主要看下<code>movie</code>的情况，这个名字也是很直白，开机动画的实现是图片逐帧动画，和电影的那种原理相同</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">movie</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// mCallbacks-&gt;init() may get called recursively,</span>
+    <span class="token comment">// this loop is needed to get the same results</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">const</span> Animation<span class="token double-colon punctuation">::</span>Part<span class="token operator">&amp;</span> part <span class="token operator">:</span> mAnimation<span class="token operator">-&gt;</span>parts<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>part<span class="token punctuation">.</span>animation <span class="token operator">!=</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            mCallbacks<span class="token operator">-&gt;</span><span class="token function">init</span><span class="token punctuation">(</span>part<span class="token punctuation">.</span>animation<span class="token operator">-&gt;</span>parts<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 初始化每一个part的音频（一般没音频）</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    mCallbacks<span class="token operator">-&gt;</span><span class="token function">init</span><span class="token punctuation">(</span>mAnimation<span class="token operator">-&gt;</span>parts<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token comment">//配置Blend</span>
+    <span class="token comment">// Blend required to draw time on top of animation frames.</span>
+    <span class="token function">glBlendFunc</span><span class="token punctuation">(</span>GL_SRC_ALPHA<span class="token punctuation">,</span> GL_ONE_MINUS_SRC_ALPHA<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">glDisable</span><span class="token punctuation">(</span>GL_DITHER<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">glDisable</span><span class="token punctuation">(</span>GL_SCISSOR_TEST<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">glDisable</span><span class="token punctuation">(</span>GL_BLEND<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 开启2D纹理的配置</span>
+    <span class="token function">glEnable</span><span class="token punctuation">(</span>GL_TEXTURE_2D<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">glBindTexture</span><span class="token punctuation">(</span>GL_TEXTURE_2D<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">glTexParameteri</span><span class="token punctuation">(</span>GL_TEXTURE_2D<span class="token punctuation">,</span> GL_TEXTURE_WRAP_S<span class="token punctuation">,</span> GL_CLAMP_TO_EDGE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">glTexParameteri</span><span class="token punctuation">(</span>GL_TEXTURE_2D<span class="token punctuation">,</span> GL_TEXTURE_WRAP_T<span class="token punctuation">,</span> GL_CLAMP_TO_EDGE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">glTexParameteri</span><span class="token punctuation">(</span>GL_TEXTURE_2D<span class="token punctuation">,</span> GL_TEXTURE_MIN_FILTER<span class="token punctuation">,</span> GL_LINEAR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">glTexParameteri</span><span class="token punctuation">(</span>GL_TEXTURE_2D<span class="token punctuation">,</span> GL_TEXTURE_MAG_FILTER<span class="token punctuation">,</span> GL_LINEAR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">bool</span> clockFontInitialized <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>mClockEnabled<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//一般不配置显示这个时钟，不走这里</span>
+        clockFontInitialized <span class="token operator">=</span>
+            <span class="token punctuation">(</span><span class="token function">initFont</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>mAnimation<span class="token operator">-&gt;</span>clockFont<span class="token punctuation">,</span> CLOCK_FONT_ASSET<span class="token punctuation">)</span> <span class="token operator">==</span> NO_ERROR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        mClockEnabled <span class="token operator">=</span> clockFontInitialized<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">initFont</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>mAnimation<span class="token operator">-&gt;</span>progressFont<span class="token punctuation">,</span> PROGRESS_FONT_ASSET<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//初始化字体。用于绘制始终和进度，一般不配置</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token function">playAnimation</span><span class="token punctuation">(</span><span class="token operator">*</span>mAnimation<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//真正的播放</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token function">releaseAnimation</span><span class="token punctuation">(</span>mAnimation<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    mAnimation <span class="token operator">=</span> <span class="token keyword">nullptr</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>最终的播放逻辑在<code>playAnimation</code>中</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">bool</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">playAnimation</span><span class="token punctuation">(</span><span class="token keyword">const</span> Animation<span class="token operator">&amp;</span> animation<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">const</span> size_t pcount <span class="token operator">=</span> animation<span class="token punctuation">.</span>parts<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    nsecs_t frameDuration <span class="token operator">=</span> <span class="token function">s2ns</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">/</span> animation<span class="token punctuation">.</span>fps<span class="token punctuation">;</span>
+
+    <span class="token function">SLOGD</span><span class="token punctuation">(</span><span class="token string">"%sAnimationShownTiming start time: %"</span> PRId64 <span class="token string">"ms"</span><span class="token punctuation">,</span> mShuttingDown <span class="token operator">?</span> <span class="token string">"Shutdown"</span> <span class="token operator">:</span> <span class="token string">"Boot"</span><span class="token punctuation">,</span>
+            <span class="token function">elapsedRealtime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">int</span> fadedFramesCount <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> lastDisplayedProgress <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> colorTransitionStart <span class="token operator">=</span> animation<span class="token punctuation">.</span>colorTransitionStart<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> colorTransitionEnd <span class="token operator">=</span> animation<span class="token punctuation">.</span>colorTransitionEnd<span class="token punctuation">;</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>size_t i<span class="token operator">=</span><span class="token number">0</span> <span class="token punctuation">;</span> i<span class="token operator">&lt;</span>pcount <span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">const</span> Animation<span class="token double-colon punctuation">::</span>Part<span class="token operator">&amp;</span> <span class="token function">part</span><span class="token punctuation">(</span>animation<span class="token punctuation">.</span>parts<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">const</span> size_t fcount <span class="token operator">=</span> part<span class="token punctuation">.</span>frames<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// Handle animation package</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>part<span class="token punctuation">.</span>animation <span class="token operator">!=</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//如果存在嵌套动画文件，就递归去播放，一般没有</span>
+            <span class="token function">playAnimation</span><span class="token punctuation">(</span><span class="token operator">*</span>part<span class="token punctuation">.</span>animation<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">exitPending</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">continue</span><span class="token punctuation">;</span> <span class="token comment">//to next part</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// process the part not only while the count allows but also if already fading</span>
+        <span class="token comment">//如果part的count = 0 或者 还没有循环到part的count次数，就继续循环</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> r<span class="token operator">=</span><span class="token number">0</span> <span class="token punctuation">;</span> <span class="token operator">!</span>part<span class="token punctuation">.</span>count <span class="token operator">||</span> r<span class="token operator">&lt;</span>part<span class="token punctuation">.</span>count <span class="token operator">||</span> fadedFramesCount <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">;</span> r<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">shouldStopPlayingPart</span><span class="token punctuation">(</span>part<span class="token punctuation">,</span> fadedFramesCount<span class="token punctuation">,</span> lastDisplayedProgress<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">break</span><span class="token punctuation">;</span> <span class="token comment">//每次循环进入播放part时检查是否应该退出，判断是否boot完成且part的repeat-type不是c,即p时才能退出</span>
+			<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+            mCallbacks<span class="token operator">-&gt;</span><span class="token function">playPart</span><span class="token punctuation">(</span>i<span class="token punctuation">,</span> part<span class="token punctuation">,</span> r<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//播放part里面的音频，一般没音频</span>
+
+            <span class="token function">glClearColor</span><span class="token punctuation">(</span>
+                    part<span class="token punctuation">.</span>backgroundColor<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+                    part<span class="token punctuation">.</span>backgroundColor<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+                    part<span class="token punctuation">.</span>backgroundColor<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+                    <span class="token number">1.0f</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token function">ALOGD</span><span class="token punctuation">(</span><span class="token string">"Playing files = %s/%s, Requested repeat = %d, playUntilComplete = %s"</span><span class="token punctuation">,</span>
+                    animation<span class="token punctuation">.</span>fileName<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> part<span class="token punctuation">.</span>path<span class="token punctuation">.</span><span class="token function">string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> part<span class="token punctuation">.</span>count<span class="token punctuation">,</span>
+                    part<span class="token punctuation">.</span>playUntilComplete <span class="token operator">?</span> <span class="token string">"true"</span> <span class="token operator">:</span> <span class="token string">"false"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token comment">// For the last animation, if we have progress indicator from</span>
+            <span class="token comment">// the system, display it.</span>
+            <span class="token keyword">int</span> currentProgress <span class="token operator">=</span> android<span class="token double-colon punctuation">::</span>base<span class="token double-colon punctuation">::</span><span class="token function">GetIntProperty</span><span class="token punctuation">(</span>PROGRESS_PROP_NAME<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">bool</span> displayProgress <span class="token operator">=</span> animation<span class="token punctuation">.</span>progressEnabled <span class="token operator">&amp;&amp;</span>
+                <span class="token punctuation">(</span>i <span class="token operator">==</span> <span class="token punctuation">(</span>pcount <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> currentProgress <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">for</span> <span class="token punctuation">(</span>size_t j<span class="token operator">=</span><span class="token number">0</span> <span class="token punctuation">;</span> j<span class="token operator">&lt;</span>fcount <span class="token punctuation">;</span> j<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">shouldStopPlayingPart</span><span class="token punctuation">(</span>part<span class="token punctuation">,</span> fadedFramesCount<span class="token punctuation">,</span> lastDisplayedProgress<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">break</span><span class="token punctuation">;</span>  <span class="token comment">// 每次循环进入播放每一个图片时检查是否应该退出，判断是否boot完成且part的repeat-type不是c,即p时才能退出</span>
+				<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+                <span class="token function">processDisplayEvents</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//轮询是否有display的回调事件</span>
+
+                <span class="token keyword">const</span> <span class="token keyword">double</span> ratio_w <span class="token operator">=</span> <span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span><span class="token keyword">double</span><span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span>mWidth<span class="token punctuation">)</span> <span class="token operator">/</span> mInitWidth<span class="token punctuation">;</span>
+                <span class="token keyword">const</span> <span class="token keyword">double</span> ratio_h <span class="token operator">=</span> <span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span><span class="token keyword">double</span><span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span>mHeight<span class="token punctuation">)</span> <span class="token operator">/</span> mInitHeight<span class="token punctuation">;</span>
+                <span class="token keyword">const</span> <span class="token keyword">int</span> animationX <span class="token operator">=</span> <span class="token punctuation">(</span>mWidth <span class="token operator">-</span> animation<span class="token punctuation">.</span>width <span class="token operator">*</span> ratio_w<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">;</span>
+                <span class="token keyword">const</span> <span class="token keyword">int</span> animationY <span class="token operator">=</span> <span class="token punctuation">(</span>mHeight <span class="token operator">-</span> animation<span class="token punctuation">.</span>height <span class="token operator">*</span> ratio_h<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">;</span>
+
+                <span class="token keyword">const</span> Animation<span class="token double-colon punctuation">::</span>Frame<span class="token operator">&amp;</span> <span class="token function">frame</span><span class="token punctuation">(</span>part<span class="token punctuation">.</span>frames<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//拿到具体part中的某张图片</span>
+                nsecs_t lastFrame <span class="token operator">=</span> <span class="token function">systemTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>r <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">glBindTexture</span><span class="token punctuation">(</span>GL_TEXTURE_2D<span class="token punctuation">,</span> frame<span class="token punctuation">.</span>tid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">//如果是第一次播放图片（第一张图片）</span>
+                    <span class="token function">glGenTextures</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>frame<span class="token punctuation">.</span>tid<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//生成纹理</span>
+                    <span class="token function">glBindTexture</span><span class="token punctuation">(</span>GL_TEXTURE_2D<span class="token punctuation">,</span> frame<span class="token punctuation">.</span>tid<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//将图片的句柄和纹理绑定</span>
+                    <span class="token keyword">int</span> w<span class="token punctuation">,</span> h<span class="token punctuation">;</span>
+                    <span class="token comment">// Set decoding option to alpha unpremultiplied so that the R, G, B channels</span>
+                    <span class="token comment">// of transparent pixels are preserved.</span>
+                    <span class="token function">initTexture</span><span class="token punctuation">(</span>frame<span class="token punctuation">.</span>map<span class="token punctuation">,</span> <span class="token operator">&amp;</span>w<span class="token punctuation">,</span> <span class="token operator">&amp;</span>h<span class="token punctuation">,</span> <span class="token boolean">false</span> <span class="token comment">/* don't premultiply alpha */</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//初始化纹理</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token keyword">const</span> <span class="token keyword">int</span> trimWidth <span class="token operator">=</span> frame<span class="token punctuation">.</span>trimWidth <span class="token operator">*</span> ratio_w<span class="token punctuation">;</span>
+                <span class="token keyword">const</span> <span class="token keyword">int</span> trimHeight <span class="token operator">=</span> frame<span class="token punctuation">.</span>trimHeight <span class="token operator">*</span> ratio_h<span class="token punctuation">;</span>
+                <span class="token keyword">const</span> <span class="token keyword">int</span> trimX <span class="token operator">=</span> frame<span class="token punctuation">.</span>trimX <span class="token operator">*</span> ratio_w<span class="token punctuation">;</span>
+                <span class="token keyword">const</span> <span class="token keyword">int</span> trimY <span class="token operator">=</span> frame<span class="token punctuation">.</span>trimY <span class="token operator">*</span> ratio_h<span class="token punctuation">;</span>
+                <span class="token keyword">const</span> <span class="token keyword">int</span> xc <span class="token operator">=</span> animationX <span class="token operator">+</span> trimX<span class="token punctuation">;</span>
+                <span class="token keyword">const</span> <span class="token keyword">int</span> yc <span class="token operator">=</span> animationY <span class="token operator">+</span> trimY<span class="token punctuation">;</span>
+                <span class="token function">glClear</span><span class="token punctuation">(</span>GL_COLOR_BUFFER_BIT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">// specify the y center as ceiling((mHeight - frame.trimHeight) / 2)</span>
+                <span class="token comment">// which is equivalent to mHeight - (yc + frame.trimHeight)</span>
+                <span class="token keyword">const</span> <span class="token keyword">int</span> frameDrawY <span class="token operator">=</span> mHeight <span class="token operator">-</span> <span class="token punctuation">(</span>yc <span class="token operator">+</span> trimHeight<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token keyword">float</span> fade <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+				<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+                <span class="token function">glUseProgram</span><span class="token punctuation">(</span>mImageShader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token function">glUniform1i</span><span class="token punctuation">(</span>mImageTextureLocation<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token function">glUniform1f</span><span class="token punctuation">(</span>mImageFadeLocation<span class="token punctuation">,</span> fade<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>animation<span class="token punctuation">.</span>dynamicColoringEnabled<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">glUniform1f</span><span class="token punctuation">(</span>mImageColorProgressLocation<span class="token punctuation">,</span> colorProgress<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token function">glEnable</span><span class="token punctuation">(</span>GL_BLEND<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token function">drawTexturedQuad</span><span class="token punctuation">(</span>xc<span class="token punctuation">,</span> frameDrawY<span class="token punctuation">,</span> trimWidth<span class="token punctuation">,</span> trimHeight<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token function">glDisable</span><span class="token punctuation">(</span>GL_BLEND<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+				<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+                <span class="token function">handleViewport</span><span class="token punctuation">(</span>frameDuration<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//处理视口的区域的变化</span>
+
+                <span class="token function">eglSwapBuffers</span><span class="token punctuation">(</span>mDisplay<span class="token punctuation">,</span> mSurface<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//交换显示buffer,显示出来</span>
+
+                nsecs_t now <span class="token operator">=</span> <span class="token function">systemTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                nsecs_t delay <span class="token operator">=</span> frameDuration <span class="token operator">-</span> <span class="token punctuation">(</span>now <span class="token operator">-</span> lastFrame<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//SLOGD("%lld, %lld", ns2ms(now - lastFrame), ns2ms(delay));</span>
+                lastFrame <span class="token operator">=</span> now<span class="token punctuation">;</span>
+
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>delay <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">struct</span> <span class="token class-name">timespec</span> spec<span class="token punctuation">;</span>
+                    spec<span class="token punctuation">.</span>tv_sec  <span class="token operator">=</span> <span class="token punctuation">(</span>now <span class="token operator">+</span> delay<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">1000000000</span><span class="token punctuation">;</span>
+                    spec<span class="token punctuation">.</span>tv_nsec <span class="token operator">=</span> <span class="token punctuation">(</span>now <span class="token operator">+</span> delay<span class="token punctuation">)</span> <span class="token operator">%</span> <span class="token number">1000000000</span><span class="token punctuation">;</span>
+                    <span class="token keyword">int</span> err<span class="token punctuation">;</span>
+                    <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span>
+                        err <span class="token operator">=</span> <span class="token function">clock_nanosleep</span><span class="token punctuation">(</span>CLOCK_MONOTONIC<span class="token punctuation">,</span> TIMER_ABSTIME<span class="token punctuation">,</span> <span class="token operator">&amp;</span>spec<span class="token punctuation">,</span> <span class="token keyword">nullptr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span>err <span class="token operator">==</span> EINTR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                <span class="token function">checkExit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//每一个帧显示完检查下是否需要退出,具体就是去查询boot是否完成，如果boot完成SF会设置某个系统属性，那么就会设置线程的请求退出的标志</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token function">usleep</span><span class="token punctuation">(</span>part<span class="token punctuation">.</span>pause <span class="token operator">*</span> <span class="token function">ns2us</span><span class="token punctuation">(</span>frameDuration<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//播放完本次part了，如果pause ！= 0 就需要延时（pause * frame时长）的时间再接着往下播放当前part的下一个循环或者下一个part</span>
+
+			<span class="token comment">//这里的判断很重要，从前面part的for循环和退出判断可知，当part的repeat-type为c时，且count = 0时，</span>
+			<span class="token comment">//即使boot完成了也不会退出循环，会进行播放，但是什么时候退出呢，答案就是下面的判断，如果boot完成了（exitPending() = true）且part = 0, 即part的配置为（c 0 x）时会结束循环，</span>
+			<span class="token comment">//所以可知当配置了part repeat为c时，那么这个part至少会播放一次，如果一个zip里有多个c-part时，</span>
+			<span class="token comment">//每个c-part都至少播放一次，无论它的count是0还是非0,即使boot完成。</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">exitPending</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>part<span class="token punctuation">.</span>count <span class="token operator">&amp;&amp;</span> mCurrentInset <span class="token operator">&gt;=</span> mTargetInset <span class="token operator">&amp;&amp;</span>
+                <span class="token operator">!</span>part<span class="token punctuation">.</span><span class="token function">hasFadingPhase</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>lastDisplayedProgress <span class="token operator">!=</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> lastDisplayedProgress <span class="token operator">!=</span> <span class="token number">100</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    android<span class="token double-colon punctuation">::</span>base<span class="token double-colon punctuation">::</span><span class="token function">SetProperty</span><span class="token punctuation">(</span>PROGRESS_PROP_NAME<span class="token punctuation">,</span> <span class="token string">"100"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span> <span class="token comment">// exit the infinite non-fading part when it has been played at least once</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// Free textures created for looping parts now that the animation is done.</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">const</span> Animation<span class="token double-colon punctuation">::</span>Part<span class="token operator">&amp;</span> part <span class="token operator">:</span> animation<span class="token punctuation">.</span>parts<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>part<span class="token punctuation">.</span>count <span class="token operator">!=</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">const</span> size_t fcount <span class="token operator">=</span> part<span class="token punctuation">.</span>frames<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span>size_t j <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> fcount<span class="token punctuation">;</span> j<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">const</span> Animation<span class="token double-colon punctuation">::</span>Frame<span class="token operator">&amp;</span> <span class="token function">frame</span><span class="token punctuation">(</span>part<span class="token punctuation">.</span>frames<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token function">glDeleteTextures</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>frame<span class="token punctuation">.</span>tid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">ALOGD</span><span class="token punctuation">(</span><span class="token string">"%sAnimationShownTiming End time: %"</span> PRId64 <span class="token string">"ms"</span><span class="token punctuation">,</span> mShuttingDown <span class="token operator">?</span> <span class="token string">"Shutdown"</span> <span class="token operator">:</span> <span class="token string">"Boot"</span><span class="token punctuation">,</span>
+            <span class="token function">elapsedRealtime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">checkExit</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// Allow surface flinger to gracefully request shutdown  //从这里我们也可以知道是SF直接设置这个属性让开机动画退出</span>
+    <span class="token keyword">char</span> value<span class="token punctuation">[</span>PROPERTY_VALUE_MAX<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token function">property_get</span><span class="token punctuation">(</span>EXIT_PROP_NAME<span class="token punctuation">,</span> value<span class="token punctuation">,</span> <span class="token string">"0"</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//service.bootanim.exit = 1，则调用requestExit()</span>
+    <span class="token keyword">int</span> exitnow <span class="token operator">=</span> <span class="token function">atoi</span><span class="token punctuation">(</span>value<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>exitnow<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">requestExit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//这个是Thread类的方法，调用这个方法后exitPending() = true</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">bool</span> <span class="token class-name">BootAnimation</span><span class="token double-colon punctuation">::</span><span class="token function">shouldStopPlayingPart</span><span class="token punctuation">(</span><span class="token keyword">const</span> Animation<span class="token double-colon punctuation">::</span>Part<span class="token operator">&amp;</span> part<span class="token punctuation">,</span>
+                                          <span class="token keyword">const</span> <span class="token keyword">int</span> fadedFramesCount<span class="token punctuation">,</span>
+                                          <span class="token keyword">const</span> <span class="token keyword">int</span> lastDisplayedProgress<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// stop playing only if it is time to exit and it's a partial part which has been faded out</span>
+    <span class="token keyword">return</span> <span class="token function">exitPending</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>part<span class="token punctuation">.</span>playUntilComplete <span class="token operator">&amp;&amp;</span> fadedFramesCount <span class="token operator">&gt;=</span> part<span class="token punctuation">.</span>framesToFadeCount <span class="token operator">&amp;&amp;</span>
+        <span class="token punctuation">(</span>lastDisplayedProgress <span class="token operator">==</span> <span class="token number">0</span> <span class="token operator">||</span> lastDisplayedProgress <span class="token operator">==</span> <span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//part.playUntilComplete就是part的repeat type -&gt;c或者p</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_807"></a>二、结束开机动画</h2> 
+<h3>
+<a id="21_system_server_808"></a>2.1 system server进程</h3> 
+<p>开机动画的结束是开机过程中，系统完成开机完成，即将显示Home应用时调用的，具体是在<code>performEnableScreen</code>方法中<br> framework/base/services/core/java/com/android/server/wm/WindowManagerService.java</p> 
+<pre><code class="prism language-java">    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">performEnableScreen</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>mGlobalLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">ProtoLog</span><span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>WM_DEBUG_BOOT<span class="token punctuation">,</span> <span class="token string">"performEnableScreen: mDisplayEnabled=%b"</span>
+                            <span class="token operator">+</span> <span class="token string">" mForceDisplayEnabled=%b"</span> <span class="token operator">+</span> <span class="token string">" mShowingBootMessages=%b"</span>
+                            <span class="token operator">+</span> <span class="token string">" mSystemBooted=%b mOnlyCore=%b. %s"</span><span class="token punctuation">,</span> mDisplayEnabled<span class="token punctuation">,</span>
+                    mForceDisplayEnabled<span class="token punctuation">,</span> mShowingBootMessages<span class="token punctuation">,</span> mSystemBooted<span class="token punctuation">,</span> mOnlyCore<span class="token punctuation">,</span>
+                    <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span><span class="token string">"here"</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">fillInStackTrace</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    		
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>mBootAnimationStopped<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">Trace</span><span class="token punctuation">.</span><span class="token function">asyncTraceBegin</span><span class="token punctuation">(</span>TRACE_TAG_WINDOW_MANAGER<span class="token punctuation">,</span> <span class="token string">"Stop bootanim"</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">// stop boot animation</span>
+                <span class="token comment">// formerly we would just kill the process, but we now ask it to exit so it</span>
+                <span class="token comment">// can choose where to stop the animation.</span>
+                <span class="token class-name">SystemProperties</span><span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token string">"service.bootanim.exit"</span><span class="token punctuation">,</span> <span class="token string">"1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//设置开机动画退出属性，开机动画播放线程循环中会去check这个属性是否设置为1,然后请求退出循环</span>
+                mBootAnimationStopped <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>mForceDisplayEnabled <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token function">checkBootAnimationCompleteLocked</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">ProtoLog</span><span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>WM_DEBUG_BOOT<span class="token punctuation">,</span> <span class="token string">"performEnableScreen: Waiting for anim complete"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            	<span class="token comment">//跨进程通知SF去处理让开机动画退出</span>
+                <span class="token class-name">IBinder</span> surfaceFlinger <span class="token operator">=</span> <span class="token class-name">ServiceManager</span><span class="token punctuation">.</span><span class="token function">getService</span><span class="token punctuation">(</span><span class="token string">"SurfaceFlinger"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>surfaceFlinger <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">ProtoLog</span><span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>WM_ERROR<span class="token punctuation">,</span> <span class="token string">"******* TELLING SURFACE FLINGER WE ARE BOOTED!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token class-name">Parcel</span> data <span class="token operator">=</span> <span class="token class-name">Parcel</span><span class="token punctuation">.</span><span class="token function">obtain</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    data<span class="token punctuation">.</span><span class="token function">writeInterfaceToken</span><span class="token punctuation">(</span><span class="token string">"android.ui.ISurfaceComposer"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    surfaceFlinger<span class="token punctuation">.</span><span class="token function">transact</span><span class="token punctuation">(</span><span class="token class-name">IBinder</span><span class="token punctuation">.</span>FIRST_CALL_TRANSACTION<span class="token punctuation">,</span> <span class="token comment">// BOOT_FINISHED</span>
+                            data<span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//注意这个IBinder.FIRST_CALL_TRANSACTION，这是system server第一次和SF binder通信，SF当收到是这个FLAG时处理通知关闭开机动画</span>
+                    data<span class="token punctuation">.</span><span class="token function">recycle</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">RemoteException</span> ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">ProtoLog</span><span class="token punctuation">.</span><span class="token function">e</span><span class="token punctuation">(</span>WM_ERROR<span class="token punctuation">,</span> <span class="token string">"Boot completed: SurfaceFlinger is dead!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token class-name">EventLogTags</span><span class="token punctuation">.</span><span class="token function">writeWmBootAnimationDone</span><span class="token punctuation">(</span><span class="token class-name">SystemClock</span><span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">Trace</span><span class="token punctuation">.</span><span class="token function">asyncTraceEnd</span><span class="token punctuation">(</span>TRACE_TAG_WINDOW_MANAGER<span class="token punctuation">,</span> <span class="token string">"Stop bootanim"</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            mDisplayEnabled <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+            <span class="token class-name">ProtoLog</span><span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>WM_DEBUG_SCREEN_ON<span class="token punctuation">,</span> <span class="token string">"******************** ENABLING SCREEN!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token comment">// Enable input dispatch.</span>
+            mInputManagerCallback<span class="token punctuation">.</span><span class="token function">setEventDispatchingLw</span><span class="token punctuation">(</span>mEventDispatchingEnabled<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//开始使能input dispatch 可以开始分发事件</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            mActivityManager<span class="token punctuation">.</span><span class="token function">bootAnimationComplete</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 告知AMS开机动画已经完成</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">RemoteException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">}</span>
+
+        mPolicy<span class="token punctuation">.</span><span class="token function">enableScreenAfterBoot</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// Make sure the last requested orientation has been applied.</span>
+        <span class="token function">updateRotationUnchecked</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="22_SurfaceFlinger_870"></a>2.2 SurfaceFlinger进程</h3> 
+<p>WMS跨进程调用到<code>SurfaceFlinger::onTransact</code>中处理<br> frameworks/native/services/surfaceflinger/SurfaceFlinger.cpp</p> 
+<pre><code class="prism language-cpp">status_t <span class="token class-name">SurfaceFlinger</span><span class="token double-colon punctuation">::</span><span class="token function">onTransact</span><span class="token punctuation">(</span><span class="token keyword">uint32_t</span> code<span class="token punctuation">,</span> <span class="token keyword">const</span> Parcel<span class="token operator">&amp;</span> data<span class="token punctuation">,</span> Parcel<span class="token operator">*</span> reply<span class="token punctuation">,</span>
+                                    <span class="token keyword">uint32_t</span> flags<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">const</span> status_t error <span class="token operator">=</span> <span class="token function">CheckTransactCodeCredentials</span><span class="token punctuation">(</span>code<span class="token punctuation">)</span><span class="token punctuation">;</span> error <span class="token operator">!=</span> OK<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> error<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    status_t err <span class="token operator">=</span> <span class="token class-name">BnSurfaceComposer</span><span class="token double-colon punctuation">::</span><span class="token function">onTransact</span><span class="token punctuation">(</span>code<span class="token punctuation">,</span> data<span class="token punctuation">,</span> reply<span class="token punctuation">,</span> flags<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//由SurfaceFlinger父类处理    ...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>frameworks/native/libs/gui/include/gui/ISurfaceComposer.h</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">class</span> <span class="token class-name">BnSurfaceComposer</span><span class="token operator">:</span> <span class="token base-clause"><span class="token keyword">public</span> <span class="token class-name">BnInterface</span><span class="token operator">&lt;</span><span class="token class-name">ISurfaceComposer</span><span class="token operator">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token keyword">enum</span> <span class="token class-name">ISurfaceComposerTag</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// Note: BOOT_FINISHED must remain this value, it is called from</span>
+        <span class="token comment">// Java by ActivityManagerService.</span>
+        BOOT_FINISHED <span class="token operator">=</span> IBinder<span class="token double-colon punctuation">::</span>FIRST_CALL_TRANSACTION<span class="token punctuation">,</span>  <span class="token comment">//远程调用的FLAG, 实际上是BOOT_FINISHED</span>
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">virtual</span> status_t <span class="token function">onTransact</span><span class="token punctuation">(</span><span class="token keyword">uint32_t</span> code<span class="token punctuation">,</span> <span class="token keyword">const</span> Parcel<span class="token operator">&amp;</span> data<span class="token punctuation">,</span>
+            Parcel<span class="token operator">*</span> reply<span class="token punctuation">,</span> <span class="token keyword">uint32_t</span> flags <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>frameworks/native/libs/gui/ISurfaceComposer.cpp</p> 
+<pre><code class="prism language-cpp">status_t <span class="token class-name">BnSurfaceComposer</span><span class="token double-colon punctuation">::</span><span class="token function">onTransact</span><span class="token punctuation">(</span>  <span class="token comment">//由上面可知，在父类中处理BOOT_FINISHED</span>
+    <span class="token keyword">uint32_t</span> code<span class="token punctuation">,</span> <span class="token keyword">const</span> Parcel<span class="token operator">&amp;</span> data<span class="token punctuation">,</span> Parcel<span class="token operator">*</span> reply<span class="token punctuation">,</span> <span class="token keyword">uint32_t</span> flags<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">switch</span><span class="token punctuation">(</span>code<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+        <span class="token keyword">case</span> BOOT_FINISHED<span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">CHECK_INTERFACE</span><span class="token punctuation">(</span>ISurfaceComposer<span class="token punctuation">,</span> data<span class="token punctuation">,</span> reply<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">bootFinished</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//父类中的纯虚函数需要子类实现，所以会调用SF子类的实现</span>
+            <span class="token keyword">return</span> NO_ERROR<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+</code></pre> 
+<p>frameworks/native/services/surfaceflinger/SurfaceFlinger.cpp<br> 父类中的纯虚函数需要子类实现，所以会调用SF的实现</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">SurfaceFlinger</span><span class="token double-colon punctuation">::</span><span class="token function">bootFinished</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// stop boot animation</span>
+    <span class="token comment">// formerly we would just kill the process, but we now ask it to exit so it</span>
+    <span class="token comment">// can choose where to stop the animation.</span>
+    <span class="token function">property_set</span><span class="token punctuation">(</span><span class="token string">"service.bootanim.exit"</span><span class="token punctuation">,</span> <span class="token string">"1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//设置service.bootanim.exit -&gt; 1 告知开机动画进程退出</span>
+
+    <span class="token keyword">const</span> <span class="token keyword">int</span> LOGTAG_SF_STOP_BOOTANIM <span class="token operator">=</span> <span class="token number">60110</span><span class="token punctuation">;</span>
+    <span class="token function">LOG_EVENT_LONG</span><span class="token punctuation">(</span>LOGTAG_SF_STOP_BOOTANIM<span class="token punctuation">,</span>
+                   <span class="token function">ns2ms</span><span class="token punctuation">(</span><span class="token function">systemTime</span><span class="token punctuation">(</span>SYSTEM_TIME_MONOTONIC<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    sp<span class="token operator">&lt;</span>IBinder<span class="token operator">&gt;</span> <span class="token function">input</span><span class="token punctuation">(</span><span class="token function">defaultServiceManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-&gt;</span><span class="token function">getService</span><span class="token punctuation">(</span><span class="token function">String16</span><span class="token punctuation">(</span><span class="token string">"inputflinger"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>到这里退出开机动画的时间点和动作就了解清楚了。开机动画基本已经分析结束。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

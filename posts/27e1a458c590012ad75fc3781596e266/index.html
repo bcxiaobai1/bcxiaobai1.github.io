@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Ai实现FPS游戏自动瞄准 yolov5fps自瞄 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Ai实现FPS游戏自动瞄准 yolov5fps自瞄</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>大家好 我是<span style="color:#956fe7">毕加锁</span> (锁!)</p> 
+<p>今天来分享一个Yolov5 FPS跟枪的源码解析和原理讲解。代码比较粗糙 各位有什么优化的方式可以留言指出，可以一起交流学习。 </p> 
+<p><br><strong><span style="color:#0d0016">需要了解的东西和可能会遇到的问题</span></strong><br><span style="color:#fe2c24">1.xy坐标点与当前鼠标的xy坐标点距离计算</span></p> 
+<p><br><span style="color:#fe2c24">2.获取窗口句柄，本文使用的是根据窗口名称获取句柄</span></p> 
+<p><br><span style="color:#fe2c24">3.推理方式：本文使用的是GPU(为啥呢？速度快噻，因为我3060显卡噻~)。</span></p> 
+<p><br><span style="color:#fe2c24">4.屏幕宽高获取和敌人坐标获取和计算哪个是最近的敌人并控制鼠标去敌人身上和头上。（为什么说是身体和头部呢，因为还有一个方式，就是只需要敌人身体坐标就可以计算得出敌人头部坐标）干货噢~</span></p> 
+<p><br><span style="color:#fe2c24">5.还有鼠标按键状态获取。</span></p> 
+<p><br> 正文开始吧，我们就从头开始代码解析吧。<br><strong>先来一个两个xy坐标的距离计算</strong></p> 
+<pre><code>
+class Point():
+    def __init__(self, x1, y1, x2, y2):
+        self.x1 = x1
+        self.y1 = y1
+        self.x2 = x2
+        self.y2 = y2
+
+
+class Line(Point):
+    def __init__(self, x1, y1, x2, y2):
+        super().__init__(x1, y1, x2, y2)
+
+    def getlen(self):
+        changdu = math.sqrt(math.pow((self.x1 - self.x2), 2) + math.pow((self.y1 - self.y2), 2))
+        return changdu</code></pre> 
+<p><br> 上面这段代码的使用方式如下</p> 
+<p></p> 
+<pre><code>L1 = Line(x1, y1, x2, y2)  #传入两个xy坐标
+L1.getlen() #return出两个坐标点的直线距离</code></pre> 
+<p><br> 接下来直接上全代码解析 各位可以把类和方法分离出去</p> 
+<pre><code># 这里是导入依赖，需要这些库
+import math
+import sys
+import time
+
+import torch
+import win32api
+import win32con
+import win32gui
+from PyQt5.QtWidgets import QApplication
+from pynput.mouse import Controller
+import mouse
+
+#这里这俩class就是文章上面说的那个传入两个坐标点，计算直线距离的
+class Point():
+    def __init__(self, x1, y1, x2, y2):
+        self.x1 = x1
+        self.y1 = y1
+        self.x2 = x2
+        self.y2 = y2
+class Line(Point):
+    def __init__(self, x1, y1, x2, y2):
+        super().__init__(x1, y1, x2, y2)
+
+    def getlen(self):
+        changdu = math.sqrt(math.pow((self.x1 - self.x2), 2) + math.pow((self.y1 - self.y2), 2))
+        return changdu
+
+#第一步：我们获取到某FPS游戏的窗口句柄
+hwnd = win32gui.FindWindow(None, "穿越火线")
+#这个方法是获取上面句柄窗口的窗口截图，用的是PyQt截图，有速度更快更好的方式的话可以换上
+#截图完毕后保存在根目录的cfbg.bmp文件
+def screen_record():
+    app = QApplication(sys.argv)
+    screen = QApplication.primaryScreen()
+    img = screen.grabWindow(hwnd).toImage()
+    img.save("cfbg.bmp")
+
+
+#这里就是调用我们那yolo模型来进行推理啦，我设置的是cuda，也就是英伟达的GPU，因为cpu太慢了。
+#如果自己的不能使用GPU推理的话把下面这两行改改，改成cpu的就可以了。
+device = torch.device("cuda")
+model = torch.hub.load('F:/yolov5-master', 'custom', 'F:/yolov5-master/yolov5n6.pt',
+                       source='local', force_reload=False)  # 加载本地模型
+# 这里是定义屏幕宽高[其实这俩就是游戏所对应的分辨率，比如：游戏里1920*1080这里就是1920*1080]
+game_width = 1024
+game_height = 768
+# 这边就是开始实时进行游戏窗口推理了
+#无限循环 -&gt; 截取屏幕 -&gt; 推理模型获取到每个敌人坐标 -&gt; 计算每个敌人中心坐标 -&gt; 挑选距离准星最近的敌人 -&gt; 如果左键是按下状态则控制鼠标移动到敌人的身体或者头部(本文计算方式是移动到头部)
+while True:
+    # 截取屏幕
+    screen_record()
+    # 使用模型
+    model = model.to(device)
+    img = 'cfbg.bmp' 
+    # 开始推理
+    results = model(img)
+    # 过滤模型
+    xmins = results.pandas().xyxy[0]['xmin']
+    ymins = results.pandas().xyxy[0]['ymin']
+    xmaxs = results.pandas().xyxy[0]['xmax']
+    ymaxs = results.pandas().xyxy[0]['ymax']
+    class_list = results.pandas().xyxy[0]['class']
+    confidences = results.pandas().xyxy[0]['confidence']
+    newlist = []
+    for xmin, ymin, xmax, ymax, classitem, conf in zip(xmins, ymins, xmaxs, ymaxs, class_list, confidences):
+        if classitem == 0 and conf &gt; 0.5:
+            newlist.append([int(xmin), int(ymin), int(xmax), int(ymax), conf])
+    # 循环遍历每个敌人的坐标信息传入距离计算方法获取每个敌人距离鼠标的距离
+    if len(newlist) &gt; 0:
+        # 存放距离数据
+        cdList = []
+        xyList = []
+        for listItem in newlist:
+            # 当前遍历的人物中心坐标
+            xindex = int(listItem[2] - (listItem[2] - listItem[0]) / 2)
+            yindex = int(listItem[3] - (listItem[3] - listItem[1]) / 2)
+            mouseModal = Controller()
+            x, y = mouseModal.position
+            L1 = Line(x, y, xindex, yindex)
+            # 获取到距离并且存放在cdList集合中
+            cdList.append(int(L1.getlen()))
+            xyList.append([xindex, yindex, listItem[0], listItem[1], listItem[2], listItem[3]])
+        # 这里就得到了距离最近的敌人位置了
+        minCD = min(cdList)
+        # 如果敌人距离鼠标坐标小于150则自动进行瞄准，这里可以改大改小，小的话跟枪会显得自然些
+        if minCD &lt; 150:
+            for cdItem, xyItem in zip(cdList, xyList):
+                if cdItem == minCD:
+                    # 锁头算法：使用win32api获取左键按下状态，如果按下则开始自动跟枪
+                    if win32api.GetAsyncKeyState(0x01):
+                        # 控制鼠标移动到某个点：看不懂计算方式的话看文章下面讲解吧O(∩_∩)O
+                        win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(xyItem[0] - game_width // 2),int(xyItem[1] - (game_height - (xyItem[3] - xyItem[5])) // 2), 0, 0)
+                    break</code></pre> 
+<p>好了，我们来讲解下这行代码<br><span style="color:#fe2c24">win32api.mouse_event(鼠标行为：这里用的是MOVE相对移动, x坐标,y坐标, 0, 0)</span><br> 第一个参数，先设定鼠标的行为：使用相对移动，为什么不用绝对移动呢，因为绝对移动在游戏里是无效的<br> 第二个参数，x轴相对移动的距离：敌人x坐标 - (屏幕宽度 / 2)<br> 第三个参数，y轴相对移动的距离：敌人y坐标 - (屏幕高度 - (敌人最大y坐标 - 敌人最小y坐标) / 2)<br> 第一第二个参数相对来说比较好理解，但是可能有人对于第三个y的相对移动的计算方式有点懵，我画了个图，希望可以看明白。</p> 
+<p><br><strong>实例图   图比较简陋 勿喷</strong></p> 
+<p><img alt="" height="548" src="https://images2.imgbox.com/48/5d/5uIYjAi4_o.jpg" width="1080"><br>  </p> 
+<p><strong>在其他fps游戏，我们只需要修改窗口名称参数和分辨率参数即可。</strong></p> 
+<p>以上就是Yolov5 FPS跟枪的源码解析和原理讲解了 感谢大家支持</p> 
+<p>我是毕加锁 期待你的关注</p> 
+<p><img alt="" height="182" src="https://images2.imgbox.com/6d/e0/h6734RmE_o.jpg" width="186"></p> 
+<p> </p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

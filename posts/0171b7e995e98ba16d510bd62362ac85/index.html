@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>如何用Redis实现延迟队列 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">如何用Redis实现延迟队列</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <div class="kdocs-document"> 
+ <h2 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">背景</span></h2> 
+ <hr> 
+ <p style="text-align:left">前段时间有个小项目需要使用延迟任务，谈到延迟任务，我脑子第一时间一闪而过的就是使用消息队列来做，比如RabbitMQ的死信队列又或者RocketMQ的延迟队列，但是奈何这是一个小项目，并没有引入MQ，我也不太想因为一个延迟任务就引入MQ，增加系统复杂度，所以这个方案直接就被pass了。</p> 
+ <p style="text-align:left">虽然基于MQ这个方式走不通了，但是这个项目中使用到Redis，所以我就想是否能够使用Redis来代替MQ实现延迟队列的功能，于是我就查了一下有没有现成可用的方案，别说，还真给我查到了两种方案，并且我还仔细研究对比了这两个方案，发现要想很好的实现延迟队列，并不简单。</p> 
+ <h2 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">监听过期key</span></h2> 
+ <hr> 
+ <p style="text-align:left">基于监听过期key的方式来实现延迟队列是我查到的第一个方案，为了弄懂这个方案实现的细节，我还特地去扒了扒官网，还真有所收获</p> 
+ <h4 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">1、Redis发布订阅模式</span></h4> 
+ <p style="text-align:left">一谈到发布订阅模式，其实一想到的就是MQ，只不过Redis也实现了一套，并且跟MQ贼像，如图：</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:429px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:39.16084%;height:0"> 
+    <img src="https://images2.imgbox.com/4f/76/wTje1qXN_o.png" style="margin-left:;width:429px;margin-top:-39.16084%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">图中的channel的概念跟MQ中的topic的概念差不多，你可以把channel理解成MQ中的topic。</p> 
+ <p style="text-align:left">生产者在消息发送时需要到指定发送到哪个channel上，消费者订阅这个channel就能获取到消息。</p> 
+ <h4 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">2、keyspace notifications</span></h4> 
+ <p style="text-align:left">在Redis中，有很多默认的channel，只不过向这些channel发送消息的生产者不是我们写的代码，而是Redis本身。当消费者监听这些channel时，就可以感知到Redis中数据的变化。</p> 
+ <p style="text-align:left">这个功能Redis官方称为keyspace notifications，字面意思就是键空间通知。</p> 
+ <p style="text-align:left">这些默认的channel被分为两类：</p> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">以</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">__keyspace@&lt;db&gt;__:</span></span><span class="kdocs-bold" style="font-weight:bold">为前缀，后面跟的是key的名称，表示监听跟这个key有关的事件。</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">举个例子，现在有个消费者监听了</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">__keyspace@0__:sanyou</span></span><span class="kdocs-bold" style="font-weight:bold">这个channel，sanyou就是Redis中的一个普通key，那么当sanyou这个key被删除或者发生了其它事件，那么消费者就会收到sanyou这个key删除或者其它事件的消息</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">以</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">__keyevent@&lt;db&gt;__:</span></span><span class="kdocs-bold" style="font-weight:bold">为前缀，后面跟的是消息事件类型，表示监听某个事件</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">同样举个例子，现在有个消费者监听了</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">__keyevent@0__:expired</span></span><span class="kdocs-bold" style="font-weight:bold">这个channel，代表了监听key的过期事件。那么当某个Redis的key过期了（expired），那么消费者就能收到这个key过期的消息。如果把expired换成del，那么监听的就是删除事件。具体支持哪些事件，可从官网查。</span></p></li></ul> 
+ <p style="text-align:left">上述db是指具体的数据库，Redis不是默认分为16个库么，序号从0-15，所以db就是0到15的数字，示例中的0就是指0对应的数据库。</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:325px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:64.61538%;height:0"> 
+    <img src="https://images2.imgbox.com/ad/3b/uyQqhRzg_o.png" style="margin-left:;width:325px;margin-top:-64.61538%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <h4 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">3、延迟队列实现原理</span></h4> 
+ <p style="text-align:left">通过对上面的两个概念了解之后，应该就对监听过期key的实现原理一目了然了，其实就是当这个key过期之后，Redis会发布一个key过期的事件到<span class="kdocs-fontSize" style="font-size:9pt">__keyevent@&lt;db&gt;__:expired</span>这个channel，只要我们的服务监听这个channel，那么就能知道过期的Key，从而就算实现了延迟队列功能。</p> 
+ <p style="text-align:left">所以这种方式实现延迟队列就只需要两步：</p> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">发送延迟任务，key是延迟消息本身，过期时间就是延迟时间</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">监听</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">__keyevent@&lt;db&gt;__:expired</span></span><span class="kdocs-bold" style="font-weight:bold">这个channel，处理延迟任务</span></p></li></ul> 
+ <h4 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">4、demo</span></h4> 
+ <p style="text-align:left">好了，基本概念和核心原理都说完了之后，又到了show me the code环节。</p> 
+ <p style="text-align:left">好巧不巧，Spring已经实现了监听<span class="kdocs-fontSize" style="font-size:9pt">__keyevent@*__:expired</span>这个channel这个功能，<span class="kdocs-fontSize" style="font-size:9pt">__keyevent@*__:expired</span>中的<span class="kdocs-fontSize" style="font-size:9pt">*</span>代表通配符的意思，监听所有的数据库。</p> 
+ <p style="text-align:left">所以demo写起来就很简单了，只需3步即可</p> 
+ <p style="text-align:left">引入pom</p> 
+ <pre class="kdocs-java"><code class="language-java">&lt;dependency&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-data-redis&lt;/artifactId&gt;
+    &lt;version&gt;2.2.5.RELEASE&lt;/version&gt;&lt;/dependency&gt;&lt;dependency&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-web&lt;/artifactId&gt;
+    &lt;version&gt;2.2.5.RELEASE&lt;/version&gt;&lt;/dependency&gt;</code></pre> 
+ <p style="text-align:left">配置类</p> 
+ <pre class="kdocs-java"><code class="language-java">@Configurationpublic class RedisConfiguration {
+
+    @Bean
+    public RedisMessageListenerContainer redisMessageListenerContainer(RedisConnectionFactory connectionFactory) {
+        RedisMessageListenerContainer redisMessageListenerContainer = new RedisMessageListenerContainer();
+        redisMessageListenerContainer.setConnectionFactory(connectionFactory);
+        return redisMessageListenerContainer;
+    }
+
+    @Bean
+    public KeyExpirationEventMessageListener redisKeyExpirationListener(RedisMessageListenerContainer redisMessageListenerContainer) {
+        return new KeyExpirationEventMessageListener(redisMessageListenerContainer);
+    }
+
+}</code></pre> 
+ <p style="text-align:left">KeyExpirationEventMessageListener实现了对<span class="kdocs-fontSize" style="font-size:9pt">__keyevent@*__:expired</span>channel的监听</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:740px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:36.216217%;height:0"> 
+    <img src="https://images2.imgbox.com/06/e3/YLj11xbI_o.png" style="margin-left:;width:740px;margin-top:-36.216217%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">当KeyExpirationEventMessageListener收到Redis发布的过期Key的消息的时候，会发布RedisKeyExpiredEvent事件</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:740px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:64.324326%;height:0"> 
+    <img src="https://images2.imgbox.com/cc/e4/ntjMpnHr_o.png" style="margin-left:;width:740px;margin-top:-64.324326%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">所以我们只需要监听RedisKeyExpiredEvent事件就可以拿到过期消息的Key，也就是延迟消息。</p> 
+ <p style="text-align:left">对RedisKeyExpiredEvent事件的监听实现MyRedisKeyExpiredEventListener</p> 
+ <pre class="kdocs-java"><code class="language-java">@Component
+public class MyRedisKeyExpiredEventListener implements ApplicationListener&lt;RedisKeyExpiredEvent&gt; {
+
+    @Override
+    public void onApplicationEvent(RedisKeyExpiredEvent event) {
+        byte[] body = event.getSource();
+        System.out.println("获取到延迟消息：" + new String(body));
+    }
+
+}</code></pre> 
+ <p style="text-align:left">整个工程目录也简单</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:643px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:45.25661%;height:0"> 
+    <img src="https://images2.imgbox.com/eb/0a/11LZlxVs_o.png" style="margin-left:;width:643px;margin-top:-45.25661%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">代码写好，启动应用</p> 
+ <p style="text-align:left">之后我直接通过Redis命令设置消息，就没通过代码发送消息了，消息的key为sanyou，值为task，值不重要，过期时间为5s</p> 
+ <pre class="kdocs-java"><code class="language-java">set sanyou task 
+expire sanyou 5
+</code></pre> 
+ <p style="text-align:left"></p> 
+ <p style="text-align:left">如果上面都理论都正确，不出意外的话，5s后MyRedisKeyExpiredEventListener应该可以监听到sanyou这个key过期的消息，也就相当于拿到了延迟任务，控制台会打印出<span class="kdocs-fontSize" style="font-size:9pt">获取到延迟消息：sanyou</span>。</p> 
+ <p style="text-align:left">于是我满怀希望，静静地等待了5s。。</p> 
+ <p style="text-align:left">5、4、3、2、1，时间一到，我查看控制台，但是控制台并没有按照预期打印出上面那句话。</p> 
+ <p style="text-align:left">为什么会没打印出？难道是代码写错了？正当我准备检查代码的时候，官网的一段话道出了真实原因。</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:740px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:61.756756%;height:0"> 
+    <img src="https://images2.imgbox.com/51/07/Za90OaAa_o.png" style="margin-left:;width:740px;margin-top:-61.756756%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">我给大家翻译一下上面这段话讲的内容。</p> 
+ <p style="text-align:left">上面这段话主要讨论的是key过期事件的时效性问题，首先提到了Redis过期key的两种清除策略，就是面试八股文常背的两种：</p> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">惰性清除。当这个key过期之后，访问时，这个Key才会被清除</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">定时清除。后台会定期检查一部分key，如果有key过期了，就会被清除</span></p></li></ul> 
+ <p style="text-align:left">再后面那段话是核心，意思是说，key的过期事件发布时机并不是当这个key的过期时间到了之后就发布，而是这个key在Redis中被清理之后，也就是真正被删除之后才会发布。</p> 
+ <p style="text-align:left">到这我终于明白了，上面的例子中即使我设置了5s的过期时间，但是当5s过去之后，只要两种清除策略都不满足，没人访问sanyou这个key，后台的定时清理的任务也没扫描到sanyou这个key，那么就不会发布key过期的事件，自然而然也就监听不到了。</p> 
+ <p style="text-align:left">至于后台的定时清理的任务什么时候能扫到，这个没有固定时间，可能一到过期时间就被扫到，也可能等一定时间才会被扫到，这就可能会造成了客户端从发布到监听到的消息时间差会大于等于过期时间，从而造成一定时间消息的延迟，这就着实有点坑了。。</p> 
+ <h4 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">5、坑</span></h4> 
+ <p style="text-align:left">除了上面测试demo的时候遇到的坑之外，在我深入研究之后，还发现了一些更离谱的坑。</p> 
+ <p style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">丢消息太频繁</span></p> 
+ <p style="text-align:left">Redis的丢消息跟MQ不一样，因为MQ都会有消息的持久化机制，可能只有当机器宕机了，才会丢点消息，但是Redis丢消息就很离谱，比如说你的服务在重启的时候就消息会丢消息。</p> 
+ <p style="text-align:left">Redis实现的发布订阅模式，消息是没有持久化机制，当消息发布到某个channel之后，如果没有客户端订阅这个channel，那么这个消息就丢了，并不会像MQ一样进行持久化，等有消费者订阅的时候再给消费者消费。</p> 
+ <p style="text-align:left">所以说，假设服务重启期间，某个生产者或者是Redis本身发布了一条消息到某个channel，由于服务重启，没有监听这个channel，那么这个消息自然就丢了。</p> 
+ <p style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">消息消费只有广播模式</span></p> 
+ <p style="text-align:left">Redis的发布订阅模式消息消费只有广播模式一种。</p> 
+ <p style="text-align:left">所谓的广播模式就是多个消费者订阅同一个channel，那么每个消费者都能消费到发布到这个channel的所有消息。</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:436px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:45.183487%;height:0"> 
+    <img src="https://images2.imgbox.com/73/75/9x1E6hm8_o.png" style="margin-left:;width:436px;margin-top:-45.183487%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">如图，生产者发布了一条消息，内容为sanyou，那么两个消费者都可以同时收到sanyou这条消息。</p> 
+ <p style="text-align:left">所以，如果通过监听channel来获取延迟任务，那么一旦服务实例有多个的话，还得保证消息不能重复处理，额外地增加了代码开发量。</p> 
+ <p style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">接收到所有key的某个事件</span></p> 
+ <p style="text-align:left">这个不属于Redis发布订阅模式的问题，而是Redis本身事件通知的问题。</p> 
+ <p style="text-align:left">当消费者监听了以<span class="kdocs-fontSize" style="font-size:9pt">__keyevent@&lt;db&gt;__:</span>开头的消息，那么会导致所有的key发生了事件都会被通知给消费者。</p> 
+ <p style="text-align:left">举个例子，某个消费者监听了<span class="kdocs-fontSize" style="font-size:9pt">__keyevent@*__:expired</span>这个channel，那么只要key过期了，不管这个key是张三还会李四，消费者都能收到。</p> 
+ <p style="text-align:left">所以如果你只想消费某一类消息的key，那么还得自行加一些标记，比如消息的key加个前缀，消费的时候判断一下带前缀的key就是需要消费的任务。</p> 
+ <p style="text-align:left">所以，综上能够得出一个非常重要的结论，那就是监听Redis过期Key这种方式实现延迟队列，<span class="kdocs-bold" style="font-weight:bold">不稳定，坑贼多！</span></p> 
+ <p style="text-align:left">那有没有比较靠谱的延迟队列的实现方案呢？这就不得不提到我研究的第二种方案了。</p> 
+ <h2 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">Redisson实现延迟队列</span></h2> 
+ <hr> 
+ <p style="text-align:left">Redisson他是Redis的儿子（Redis son），基于Redis实现了非常多的功能，其中最常使用的就是Redis分布式锁的实现，但是除了实现Redis分布式锁之外，它还实现了延迟队列的功能。</p> 
+ <p style="text-align:left">先来个demo，后面再来说说这种实现的原理。</p> 
+ <h4 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">1、demo</span></h4> 
+ <p style="text-align:left">引入pom</p> 
+ <pre class="kdocs-java"><code class="language-java">&lt;dependency&gt;
+    &lt;groupId&gt;org.redisson&lt;/groupId&gt;
+    &lt;artifactId&gt;redisson&lt;/artifactId&gt;
+    &lt;version&gt;3.13.1&lt;/version&gt;&lt;/dependency&gt;</code></pre> 
+ <p style="text-align:left">封装了一个RedissonDelayQueue类</p> 
+ <pre class="kdocs-java"><code class="language-java">@Component@Slf4jpublic class RedissonDelayQueue {
+
+    private RedissonClient redissonClient;
+
+    private RDelayedQueue&lt;String&gt; delayQueue;
+    private RBlockingQueue&lt;String&gt; blockingQueue;
+
+    @PostConstruct
+    public void init() {
+        initDelayQueue();
+        startDelayQueueConsumer();
+    }
+
+    private void initDelayQueue() {
+        Config config = new Config();
+        SingleServerConfig serverConfig = config.useSingleServer();
+        serverConfig.setAddress("redis://localhost:6379");
+        redissonClient = Redisson.create(config);
+
+        blockingQueue = redissonClient.getBlockingQueue("SANYOU");
+        delayQueue = redissonClient.getDelayedQueue(blockingQueue);
+    }
+
+    private void startDelayQueueConsumer() {
+        new Thread(() -&gt; {
+            while (true) {
+                try {
+                    String task = blockingQueue.take();
+                    log.info("接收到延迟任务:{}", task);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }, "SANYOU-Consumer").start();
+    }
+
+    public void offerTask(String task, long seconds) {
+        log.info("添加延迟任务:{} 延迟时间:{}s", task, seconds);
+        delayQueue.offer(task, seconds, TimeUnit.SECONDS);
+    }
+
+}</code></pre> 
+ <p style="text-align:left">这个类在创建的时候会去初始化延迟队列，创建一个RedissonClient对象，之后通过RedissonClient对象获取到RDelayedQueue和RBlockingQueue对象，传入的队列名字叫SANYOU，这个名字无所谓。</p> 
+ <p style="text-align:left">当延迟队列创建之后，会开启一个延迟任务的消费线程，这个线程会一直从RBlockingQueue中通过take方法阻塞获取延迟任务。</p> 
+ <p style="text-align:left">添加任务的时候是通过RDelayedQueue的offer方法添加的。</p> 
+ <p style="text-align:left">controller类，通过接口添加任务，延迟时间为5s</p> 
+ <pre class="kdocs-java"><code class="language-java">@RestController
+public class RedissonDelayQueueController {
+
+    @Resource
+    private RedissonDelayQueue redissonDelayQueue;
+
+    @GetMapping("/add")
+    public void addTask(@RequestParam("task") String task) {
+        redissonDelayQueue.offerTask(task, 5);
+    }
+
+}</code></pre> 
+ <p style="text-align:left">启动项目，在浏览器输入如下连接，添加任务</p> 
+ <blockquote class="kdocs-blockquote" style="text-align:left"> 
+  <a class="kdocs-link" style="color:#0A6CFF" href="http://localhost:8080/add?task=sanyou" target="_blank" rel="noopener noreferrer"><span class="kdocs-bold" style="font-weight:bold">http://localhost:8080/add?task=sanyou</span></a> 
+ </blockquote> 
+ <p style="text-align:left">静静等待5s，成功获取到任务。</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:740px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:21.486486%;height:0"> 
+    <img src="https://images2.imgbox.com/63/d3/g0fhhr0n_o.png" style="margin-left:;width:740px;margin-top:-21.486486%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <h4 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">2、实现原理</span></h4> 
+ <p style="text-align:left">如下图就是上面demo中，一个延迟队列会在Redis内部使用到的channel和数据类型</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:340px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:85.29411%;height:0"> 
+    <img src="https://images2.imgbox.com/94/2b/sMTYltCy_o.png" style="margin-left:;width:340px;margin-top:-85.29411%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">SANYOU前面的前缀都是固定的，Redisson创建的时候会拼上前缀。</p> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">redisson_delay_queue_timeout:SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">，sorted set数据类型，存放所有延迟任务，按照延迟任务的到期时间戳（提交任务时的时间戳 + 延迟时间）来排序的，所以列表的最前面的第一个元素就是整个延迟队列中最早要被执行的任务，这个概念很重要</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">redisson_delay_queue:SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">，list数据类型，也是存放所有的任务，但是研究下来发现好像没什么用。。</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">，list数据类型，被称为目标队列，这个里面存放的任务都是已经到了延迟时间的，可以被消费者获取的任务，所以上面demo中的RBlockingQueue的take方法是从这个目标队列中获取到任务的</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">redisson_delay_queue_channel:SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">，是一个channel，用来通知客户端开启一个延迟任务</span></p></li></ul> 
+ <p style="text-align:left">有了这些概念之后，再来看看整体的运行原理图</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:577px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:90.64124%;height:0"> 
+    <img src="https://images2.imgbox.com/31/f9/gaRhBkAI_o.png" style="margin-left:;width:577px;margin-top:-90.64124%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">生产者在提交任务的时候将任务放到</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">redisson_delay_queue_timeout:SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">中，分数就是提交任务的时间戳+延迟时间，就是延迟任务的到期时间戳</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">客户端会有一个延迟任务，为了区分，后面我都说是客户端延迟任务。这个延迟任务会向Redis Server发送一段lua脚本，Redis执行lua脚本中的命令，并且是原子性的</span></p></li></ul> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:740px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:62.43243%;height:0"> 
+    <img src="https://images2.imgbox.com/0f/b0/KXslf49H_o.png" style="margin-left:;width:740px;margin-top:-62.43243%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">这段lua脚本主要干了两件事：</p> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">将到了延迟时间的任务从</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">redisson_delay_queue_timeout:SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">中移除，存到</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">这个目标队列</span></p></li></ul> 
+ <ul><li style="margin-left:1.4em;list-style-type:disc;text-indent:0;text-align:left"><p><span class="kdocs-bold" style="font-weight:bold">获取到</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">redisson_delay_queue_timeout:SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">中目前最早到过期时间的延迟任务的到期时间戳，然后发布到</span><span class="kdocs-fontSize" style="font-size:9pt"><span class="kdocs-bold" style="font-weight:bold">redisson_delay_queue_channel:SANYOU</span></span><span class="kdocs-bold" style="font-weight:bold">这个channel中</span></p></li></ul> 
+ <p style="text-align:left">当客户端监听到<span class="kdocs-fontSize" style="font-size:9pt">redisson_delay_queue_channel:SANYOU</span>这个channel的消息时，会再次提交一个客户端延迟任务，延迟时间就是消息（最早到过期时间的延迟任务的到期时间戳）- 当前时间戳，这个时间其实也就是<span class="kdocs-fontSize" style="font-size:9pt">redisson_delay_queue_channel:SANYOU</span>中最早到过期时间的任务还剩余的延迟时间。</p> 
+ <p style="text-align:left">此处可以等待10s，好好想想。。</p> 
+ <p style="text-align:left">这样，一旦时间来到了上面说的最早到过期时间任务的到期时间戳，<span class="kdocs-fontSize" style="font-size:9pt">redisson_delay_queue_timeout:SANYOU</span>中上面说的最早到过期时间的任务已经到期了，客户端的延迟任务也同时到期，于是开始执行lua脚本操作，及时将到了延迟时间的任务放到目标队列中。然后再次发布剩余的延迟任务中最早到期的任务到期时间戳到channe中，如此循环往复，一直运行下去，保证<span class="kdocs-fontSize" style="font-size:9pt">redisson_delay_queue_timeout:SANYOU</span>中到期的数据能及时放到目标队列中。</p> 
+ <p style="text-align:left">所以，上述说了一大堆的主要的作用就是保证到了延迟时间的任务能够及时被放到目标队列。</p> 
+ <p style="text-align:left">这里再补充两个特殊情况，图中没有画出：</p> 
+ <p style="text-align:left">第一个就是如果<span class="kdocs-fontSize" style="font-size:9pt">redisson_delay_queue_timeout:SANYOU</span>是新添加的任务（队列之前有或者没有任务）是队列中最早需要被执行的，也会发布消息到channel，之后就按时上面说的流程走了。</p> 
+ <p style="text-align:left">添加任务代码如下，也是通过lua脚本来的</p> 
+ <div class="kdocs-line-container"> 
+  <div class="kdocs-img" style="flex-direction:column;max-width:100%;width:740px;justify-content:center;align-items:center;height:auto"> 
+   <div class="kdocs-img" style="padding-top:56.89189%;height:0"> 
+    <img src="https://images2.imgbox.com/be/47/yClkvTtm_o.png" style="margin-left:;width:740px;margin-top:-56.89189%;height:auto"> 
+   </div> 
+  </div> 
+ </div> 
+ <p style="text-align:left">第二种特殊情况就是项目启动的时候会执行一次客户端延迟任务。项目在重启时，由于没有客户端延迟任务的执行，可能会出现<span class="kdocs-fontSize" style="font-size:9pt">redisson_delay_queue_timeout:SANYOU</span>队列中有到期但是没有被放到目标队列的可能，重启就执行一次就是为了保证到期的数据能被及时放到目标队列中。</p> 
+ <h4 style="text-align:left"><span class="kdocs-bold" style="font-weight:bold">3、与第一种方案比较</span></h4> 
+ <p style="text-align:left">现在来比较一下第一种方案和Redisson的这种方案，看看有没有第一种方案的那些坑。</p> 
+ <p style="text-align:left">第一个任务延迟的问题，Redisson方案理论上是没有延迟的，但是当消息数量增加，消费者消费缓慢这个情况下可能会导致延迟任务消费的延迟。</p> 
+ <p style="text-align:left">第二个丢消息的问题，Redisson方案很大程度上减轻了丢消息的可能性，因为所有的任务都是存在list和sorted set两种数据类型中，Redis有持久化机制，就算Redis宕机了，也就可能会丢一点点数据。</p> 
+ <p style="text-align:left">第三个广播消费任务的问题，这个是不会出现的，因为每个客户端都是从同一个目标队列中获取任务的。</p> 
+ <p style="text-align:left">第四个问题是Redis内部channel发布事件的问题，跟这种方案不沾边，就更不可能存在了。</p> 
+ <p style="text-align:left">所以，通过上面的对比可以看出，Redisson这种实现方案就显得更加的靠谱了。</p> 
+</div>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

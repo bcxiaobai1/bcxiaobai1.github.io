@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>MySQL高级（MVCC实现原理，日志系统）篇 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MySQL高级（MVCC实现原理，日志系统）篇</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h2>
+<a id="MySQL_0"></a>MySQL日志系统</h2> 
+<p>前面我们系统了解了一个查询语句的执行流程，并介绍了执行过程中涉及的处理模块。相信你还记得，一条查询语句的执行过程一般是经过连接器、分析器、优化器、执行器等功能模块，最后到达存储引擎,但是我们的update语句，涉及到数据的持久化，我们又是怎么保证，更新操作的进行的呢？</p> 
+<blockquote> 
+ <p>思考 ：一条更新语句的执行流程又是怎样的呢？</p> 
+</blockquote> 
+<p>与查询流程不一样的是，<strong>更新流程还涉及两个重要的日志模块</strong>，它们正是我们今天要讨论的主角：<strong>redo log（重做日志）和 binlog（归档日志</strong>）。如果接触 MySQL，那这两个词肯定是绕不过的，我后面的内容里也会不断地和你强调。不过话说回来，redo log 和 binlog 在设计上有很多有意思的地方，这些设计思路也可以用到你自己的程序里。</p> 
+<p><img src="https://images2.imgbox.com/66/43/mMq5OkTB_o.png" alt=""></p> 
+<h3>
+<a id="1redo_log_11"></a>1、redo log</h3> 
+<blockquote> 
+ <p>重要的日志模块</p> 
+</blockquote> 
+<p>在 MySQL 里存在这个问题，如果每一次的更新操作都需要写进磁盘，然后磁盘也要找到对应的那条记录，然后再更新，整个过程 IO 成本、查找成本都很高。为了解决这个问题，就采用了 MySQL 里经常说到的 WAL 技术（Write-Ahead Logging）也就是预处理日志！</p> 
+<p>具体来说，</p> 
+<ul>
+<li>当有一条记录需要更新的时候，InnoDB 引擎就会先把记录写到 redo log里面，并更新内存，这个时候更新就算完成了，</li>
+<li>同时，InnoDB 引擎会在适当的时候，将这个操作记录更新到磁盘里面，而这个更新往往是在系统比较空闲的时候做，</li>
+</ul> 
+<p>但是InnoDB的 redo log 是固定大小的，比如可以配置为一组 4 个文件，每个文件的大小是 1GB，那么”总共就可以记录 4GB 的操作。从头开始写，写到末尾就又回到开头循环写，如下面这个图所示。</p> 
+<p><img src="https://images2.imgbox.com/34/24/x9Etx9xk_o.png" alt=""></p> 
+<p>有了 redo log，InnoDB 就可以保证即使数据库发生异常重启，之前提交的记录都不会丢失，这个能力称为==<strong>crash-safe</strong>==。</p> 
+<p>CrashSafe指MySQL服务器宕机重启后，能够保证：</p> 
+<ul>
+<li>所有已经提交的事务的数据仍然存在。</li>
+<li>所有没有提交的事务的数据自动回滚。</li>
+</ul> 
+<p>例如：如果Mysql 进程异常重启了，系统会自动去检查redo log，将未写入到Mysql的数据从redo log恢复到Mysql中去。</p> 
+<h3>
+<a id="2binlog_38"></a>2、binlog</h3> 
+<p>前面我们讲过，MySQL 整体来看，其实就有两块：一块是 Server 层，它主要做的是 MySQL 功能层面的事情；还有一块是引擎层，负责存储相关的具体事宜。<mark>上面我们聊到的redo log 是 InnoDB 引擎特有的日志</mark>，而 Server 层也有自己的日志，称为 binlog（归档日志）。</p> 
+<blockquote> 
+ <p>我想你肯定会问，为什么会有两份日志呢？</p> 
+</blockquote> 
+<p>因为最开始 MySQL 里并没有 InnoDB 引擎。MySQL 自带的引擎是 MyISAM，但是 MyISAM 没有 crash-safe 的能力，binlog 日志只能用于归档。而 InnoDB 是另一个公司以插件形式引入 MySQL 的，既然只依靠 binlog 是没有 crash-safe 能力的，所以 InnoDB 使用另外一套日志系统——也就是 redo log 来实现 crash-safe 能力。</p> 
+<p><strong>这两种日志有以下三点不同：</strong></p> 
+<ol>
+<li>redo log 是 InnoDB 引擎特有的；binlog 是 MySQL 的 Server 层实现的，所有引擎都可以使用。</li>
+<li>redo log 是物理日志，记录的是“在某个数据页上做了什么修改”；binlog 是逻辑日志，记录的是这个语句的原始逻辑，比如“给 ID=2 这一行的 c 字段加 1 ”。</li>
+<li>redo log 是循环写的，空间固定会用完；binlog 是可以追加写入的。“追加写”是指 binlog 文件写到一定大小后会切换到下一个，并不会覆盖以前的日志。</li>
+<li>MySQL崩溃的话，redo log会保证数据不会丢失，而binlog只是记录了执行的sql语句 ；</li>
+</ol> 
+<p><strong>有了对这两个日志的概念性理解，我们再来看执行器和 InnoDB 引擎在执行这个简单的 update 语句时的内部流程</strong></p> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">update</span> T <span class="token keyword">set</span> c<span class="token operator">=</span>c<span class="token operator">+</span><span class="token number">1</span> <span class="token keyword">where</span> ID<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">;</span>
+</code></pre> 
+<ol>
+<li>执行器先找引擎取 ID=2 这一行。ID 是主键，引擎直接用树搜索找到这一行。如果 ID=2 这一行所在的数据页本来就在内存中，就直接返回给执行器；否则，需要先从磁盘读入内存，然后再返回。</li>
+<li>执行器拿到引擎给的行数据，把这个值加上 1，比如原来是 N，现在就是 N+1，得到新的一行数据，再调用引擎接口写入这行新数据。</li>
+<li>引擎将这行新数据更新到内存中，同时将这个更新操作记录到 redo log 里面，此时 redo log 处于 prepare 状态。然后告知执行器执行完成了，随时可以提交事务。</li>
+<li>执行器生成这个操作的 binlog，并把 binlog 写入磁盘。</li>
+<li>执行器调用引擎的提交事务接口，引擎把刚刚写入的 redo log 改成提交（commit）状态，更新完成。</li>
+</ol> 
+<p><img src="https://images2.imgbox.com/83/c7/me9h338w_o.png" alt=""></p> 
+<p>你可能注意到了，最后三步看上去有点“绕”，将 redo log 的写入拆成了两个步骤：prepare 和 commit，这就是"两阶段提交"。</p> 
+<h3>
+<a id="3_72"></a>3、两阶段提交</h3> 
+<blockquote> 
+ <p>两阶段提交的目的就是为了**<mark>保证bin log 和redo log 中的数据是一致的</mark>**！</p> 
+</blockquote> 
+<p>由于 redo log 和 binlog 是两个独立的逻辑，如果不用两阶段提交，要么就是先写完 redo log 再写 binlog，或者采用反过来的顺序。我们</p> 
+<p>看看这两种方式会有什么问题？仍然用前面的 update 语句来做例子。假设当前 ID=2 的行，字段 c 的值是 0，再假设执行 update 语句过</p> 
+<p>程中在写完第一个日志后，第二个日志还没有写完期间发生了 crash，会出现什么情况呢？</p> 
+<ul>
+<li>
+<strong>先写 redo log 后写 binlog</strong>。假设在 redo log 写完，binlog 还没有写完的时候，MySQL 进程异常重启。由于我们前面说过的，redo log 写完之后，系统即使崩溃，仍然能够把数据恢复回来，所以恢复后这一行 c 的值是 1。但是由于 binlog 没写完就 crash 了，这时候 binlog 里面就没有记录这个语句。因此，之后备份日志的时候，存起来的 binlog 里面就没有这条语句。然后你会发现，如果需要用这个 binlog 来恢复临时库的话，由于这个语句的 binlog 丢失，这个临时库就会少了这一次更新，恢复出来的这一行 c 的值就是 0，与原库的值不同。</li>
+<li>
+<strong>先写 binlog 后写 redo log</strong>。如果在 binlog 写完之后 crash，由于 redo log 还没写，崩溃恢复以后这个事务无效，所以这一行 c 的值是 0。但是 binlog 里面已经记录了“把 c 从 0 改成 1”这个日志。所以，在之后用 binlog 来恢复的时候就多了一个事务出来，恢复出来的这一行 c 的值就是 1，与原库的值不同。</li>
+</ul> 
+<p>可以看到，如果不使用“两阶段提交”，那么数据库的状态就有可能和用它的日志恢复出来的库的状态不一致。</p> 
+<p><strong>简单说，redo log 和 binlog 都可以用于表示事务的提交状态，而两阶段提交就是让这两个状态保持逻辑上的一致。</strong></p> 
+<h3>
+<a id="4_91"></a>4、日志的开启</h3> 
+<ul>
+<li>redo log 用于保证 crash-safe 能力。<code>innodb_flush_log_at_trx_commit</code> 这个参数设置成 1 的时候，表示每次事务的 redo log 都直接持久化到磁盘。这个参数我建议你设置成 1，这样可以保证 MySQL 异常重启之后数据不丢失。</li>
+<li>
+<code>sync_binlog</code> 这个参数设置成 1 的时候，表示每次事务的 binlog 都持久化到磁盘。这个参数我也建议你设置成 1，这样可以保证 MySQL 异常重启之后 binlog 不丢失。</li>
+</ul> 
+<h2>
+<a id="MySQL_98"></a>六、MySQL事务</h2> 
+<blockquote> 
+ <p>在MySQL基础篇，已经陈述事务相关的基本内容，不再赘述！</p> 
+</blockquote> 
+<ul>
+<li>读未提交（READ UNCOMMITTED）：一个事务还没提交时，它做的变更就能被别的事务看到。</li>
+<li>读提交（READ COMMITTED）：一个事务提交之后，它做的变更才会被其他事务看到。</li>
+<li>可重复读（REPEATABLE READ）：一个事务执行过程中看到的数据，总是跟这个事务在启动时看到的数据是一致的。当然在可重复读隔离级别下，未提交变更对其他事务也是不可见的。</li>
+<li>串行化（SERIALIZABLE）：对于同一行记录，“写”会加“写锁”，“读”会加“读锁”，当出现读写锁冲突的时候，后访问的事务必须等前一个事务执行完成，才能继续执行。</li>
+</ul> 
+<p><strong>以后我们会把读提交简称为RC，可重复读简称为RR</strong></p> 
+<p>一般我们面临的并发场景就是如下三种</p> 
+<ul>
+<li>读读并发 ：不会存在任何线程安全问题，也不需要并发控制</li>
+<li>读写并发 ：会有线程安全问题，因此需要加<strong>锁</strong>，但是加锁效率太低，故引入**<mark>MVCC(锁)进行并发控制</mark>**</li>
+<li>写写并发 ：会有线程安全问题，更新丢失问题</li>
+</ul> 
+<p><strong><mark>MVCC，全称Multi-Version Concurrency Control，即多版本并发控制，解决并发读写问题</mark></strong></p> 
+<h3>
+<a id="1MVCC_119"></a>1、MVCC实现原理</h3> 
+<p><code>MVCC</code>的目的就是多版本并发控制，在数据库中的实现，就是为了解决读写冲突，它的实现原理主要是依赖<strong>记录中的 3个隐式字段，undo日志 ，Read View 来实现的</strong></p> 
+<blockquote> 
+ <p>在学习MVCC多版本并发控制之前，我们必须先了解一下如下知识！</p> 
+</blockquote> 
+<h4>
+<a id="1_125"></a>1、快照读和当前读</h4> 
+<p><strong>当前读</strong> ：读取的是MySQL对应数据的<mark>最新版本</mark>，读取时还要保证其他并发事务不能修改当前记录，会对读取的记录进行加锁</p> 
+<pre><code class="prism language-sql"><span class="token keyword">select</span> <span class="token keyword">lock</span> <span class="token operator">in</span> <span class="token keyword">share</span> <span class="token keyword">mode</span><span class="token punctuation">(</span>共享锁<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token keyword">select</span> <span class="token keyword">for</span> <span class="token keyword">update</span> <span class="token punctuation">;</span> <span class="token keyword">update</span> <span class="token punctuation">;</span> <span class="token keyword">insert</span> <span class="token punctuation">;</span><span class="token keyword">delete</span><span class="token punctuation">(</span>排他锁<span class="token punctuation">)</span> <span class="token operator">/</span><span class="token operator">*</span>这些操作都是一种当前读
+</code></pre> 
+<p><strong>快照读</strong> ：读取的是MySQL对应数据的<mark>历史版本</mark></p> 
+<pre><code class="prism language-sql"><span class="token keyword">select</span>   <span class="token operator">/</span><span class="token operator">*</span>仅这一个操作时快照读
+</code></pre> 
+<p>​</p> 
+<p><strong><mark>MVCC多版本控制指的是维持一个数据的多个版本，使得读写操作没有冲突，快照读是MySQL为了实现MVCC的一个非阻塞读功能</mark></strong></p> 
+<p><strong>实现原理</strong></p> 
+<h4>
+<a id="2_145"></a>2、隐藏字段</h4> 
+<p><img src="https://images2.imgbox.com/7b/d1/HuOo0aIq_o.png" alt="、"></p> 
+<p>隐藏字段是不可见的，除非翻阅源码 ；</p> 
+<blockquote> 
+ <p>插入和修改测试</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/79/48/m7HXkGsa_o.png" alt="、"></p> 
+<p><strong>这里的undo log就是上述日志中InnoDB自带的另一种日志，保存的是历史版本的数据，用以回滚</strong></p> 
+<blockquote> 
+ <p><strong>事务3修改name = lisi</strong></p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/2c/7a/oDXvOAJt_o.png" alt="、"></p> 
+<p>我们发现，unlog当中旧的版本数据形成了一个链表，<strong>链表首部存储的是最新的旧纪录，链表尾部存放的是最旧的旧纪录</strong></p> 
+<p><strong>undolog不会无限膨胀下去</strong>，会存在一个后台线程，purge线程，当发现当前记录不需要回滚且不需要参与MVCC的时候，就会把数据清</p> 
+<p>理掉</p> 
+<h4>
+<a id="3readview_172"></a>3、readview</h4> 
+<p><mark>当<strong>事务在进行快照读的时候</strong>，会<strong>生成一个读视图来进行可见性判断</strong></mark>，可见性判断是由可见性算法来确定（详聊可见性算法）</p> 
+<blockquote> 
+ <p>1、我们先看一个现象，如下我们两个会话执行类似的操作产生的结果（隔离界别：RR）</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/18/0b/NFyivsEL_o.png" alt="、"></p> 
+<p>我们可以看到，事务2修改并提交的数据事务1中是可以看到的！</p> 
+<p><img src="https://images2.imgbox.com/4b/91/jgG6ctvi_o.png" alt="、"></p> 
+<p>当我们再次进行如图测试，却的查不到我们的事务2修改并提交的数据，这是为什么？</p> 
+<blockquote> 
+ <p>2、操作统计</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/72/fa/ZX0eoDNF_o.png" alt="、"></p> 
+<p>我们看到第二次操作只是比第一次操作多执行了1次select操作，这是为什么呢？</p> 
+<blockquote> 
+ <p>3、原理分析</p> 
+</blockquote> 
+<p>让我们再次重温这句话：<mark>当<strong>事务在进行快照读的时候</strong>，会<strong>生成一个读视图来进行可见性判断</strong></mark>，可见性判断是由可见性算法来确定 ！</p> 
+<p>而图中我们的select就恰恰就是快照读的唯一操作，所以会生成一致性读视图即consistent read view，进行可见性判，来判断事务1能否</p> 
+<p>看到事务2修改，且已经提交的内容！</p> 
+<p><strong>1、首先我们可见性视图有如下几个字段，所以生成可见性视图会对如下字段进行填充</strong></p> 
+<p><img src="https://images2.imgbox.com/dc/c5/ST5PsM50_o.png" alt=""></p> 
+<p><strong>2、根据第一次操作表进行填充</strong></p> 
+<p><img src="https://images2.imgbox.com/6d/4c/APi8Qk1f_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-nrszAq09-1639583184050)(MySQL笔记（高级篇）.assets/image-20211215222903695.png)]"></p> 
+<ul>
+<li>DB_TRX_ID：是我们上述表中的隐藏字段，表示的是最近修改的事务id</li>
+<li>右侧就是我们的可见性</li>
+</ul> 
+<p>有了上述的内容，我们通过可见性算法对致性视图进行判断，<mark><strong>得出结论：这个事务在Read View生成之前就已经开始commit，那么修改的结果是能够看见的。</strong></mark></p> 
+<p>因此，我们的操作1（图1）的操作得以解释！</p> 
+<p><strong>3、根据第二次的操作，对表进行填充</strong></p> 
+<blockquote> 
+ <p>这次我们采取倒推的方式</p> 
+</blockquote> 
+<p>我们的操作2进行了2次select操作，第一次select操作进行快照读的时候生成了一个一致性视图如下：</p> 
+<p><img src="https://images2.imgbox.com/35/97/vbZdXyNS_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-vBID3SyW-1639583184050)(MySQL笔记（高级篇）.assets/image-20211215223830349.png)]"></p> 
+<p>此时还未进行update操作，所以是读不到的，（注意：DB_TRX_ID是不属于ReadView的字段的，属于隐藏字段！）</p> 
+<p>接下来当我们执行完update，并且提交的时候进行select操作，会生成一个新一致性视图，但是从3行开始的操作都是一致的，生成的一致性视图也应该是与操作2的一致的呀，按理说我们应该也会生成如下的可见性视图呀！</p> 
+<p><img src="https://images2.imgbox.com/b7/6e/KqX2Jk6k_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-mSjqmQnJ-1639583184050)(MySQL笔记（高级篇）.assets/image-20211215223203429.png)]"></p> 
+<p>但是我们如果是如下视图，经过可见性算法，我们应该可以看到数据的呀，<mark><strong>所以得出结论：第二次select并未创建新的视图</strong></mark></p> 
+<p><strong><mark>总结 ： 能否看到修改的数据取决于可见性算法，可见性算法比较的时候取决于readview中的结果值</mark></strong></p> 
+<blockquote> 
+ <p>结论</p> 
+</blockquote> 
+<p><strong>因为不同隔离级别生成readView的时机是不同的</strong> ：</p> 
+<ul>
+<li>RC隔离级别：每次进行快照读都会生成新的ReadView ；</li>
+<li>RR隔离级别：只有在事务进行第一次快照读的时候生成ReadView，之后的快照读都用之前的ReadView ；</li>
+</ul> 
+<blockquote> 
+ <p>但是我们的MVCC并不能解决我们的幻读问题，</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/57/d1/8ZPh8Wjx_o.png" alt=""></p> 
+<p>如果当前的所有操作都是当前读，那么是不会产生幻读问题，只有当前读和快照读一起使用的时候才会产生幻读问题</p> 
+<blockquote> 
+ <p>那么如何解决幻读问题呢？</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/26/89/ELzJ2TOq_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-HLVnriRG-1639583184051)(MySQL笔记（高级篇）.assets/image-20211215232413833.png)]"></p> 
+<p>最后，我们加锁解决问题 ；</p> 
+<p>for update仅适用于InnoDB，且必须在事务块(BEGIN/COMMIT)中才能生效。在进行事务操作时，通过“for update”语句“，</p> 
+<p><strong><mark>MySQL会对查询结果集中每行数据都添加排他锁</mark></strong>，其他线程对该记录的更新与删除操作都会阻塞。排他锁包含行锁、表锁。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

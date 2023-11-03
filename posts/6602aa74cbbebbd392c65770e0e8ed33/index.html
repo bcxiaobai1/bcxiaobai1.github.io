@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>log4j2远程执行漏洞原理以及解决方案 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">log4j2远程执行漏洞原理以及解决方案</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>好久没更新博客了，因为最近实在是超级忙，最近Log4j2核弹级别漏洞被疯狂刷屏。</p> 
+<p><img alt="" height="347" src="https://images2.imgbox.com/97/cf/v6z67YXx_o.png" width="623"></p> 
+<blockquote> 
+ <p>2021年12月9日，国内多家机构监测到Apache Log4j2存在任意代码执行漏洞，并紧急通报相关情况。由于Apache Log4j存在递归解析功能，未取得身份认证的用户，可以从远程发送数据请求输入数据日志，轻松触发漏洞，最终在目标上执行任意代码。鉴于Apache Log4j本身涉及多种应用组件，猿码优创将此漏洞威胁等级调整为：严重。</p> 
+</blockquote> 
+<p> 目前经过不懈努力，猿码优创已经给复现了。</p> 
+<p><img alt="" height="857" src="https://images2.imgbox.com/34/a3/ItLWZNKN_o.png" width="1200"></p> 
+<p>还给大家画了一个流程图：</p> 
+<p><img alt="" height="552" src="https://images2.imgbox.com/8b/10/091djpJ3_o.png" width="1200"></p> 
+<p></p> 
+<p>产生原因：存在JNDI注入漏洞，当程序将用户输入的数据被日志记录时，即可触发此漏洞，成功利用此漏洞可以在目标服务器上执行任意远端代码。</p> 
+<p>我们来看一个简单的业务场景：</p> 
+<p>下面是一个登录页面：</p> 
+<p><img alt="" height="542" src="https://images2.imgbox.com/ac/ba/1wbXCmU8_o.png" width="723"></p> 
+<p> 后端我们把用户谁登录了进行打印。</p> 
+<pre><code class="language-java">public void login(string name){
+  logger.info("{},刚刚登录了猿码优创系统", name); //日志框架为：log4j2
+}
+输出结果为：yuanmayouchuang刚刚登录了猿码优创系统，这个就忽略演示了。</code></pre> 
+<p>很简单的一个业务场景，但是如果在这个地方输入：{java:os}会发生什么呢？</p> 
+<pre><code>执行：logger.info("${java:os}"); //logger为log4j
+输出结果：Windows 10 10.0, architecture: amd64-64</code></pre> 
+<p><img alt="" height="714" src="https://images2.imgbox.com/ca/6f/O4l9Orxk_o.png" width="1149"></p> 
+<p></p> 
+<p> 有没有感觉特别像SQL注入。</p> 
+<p><img alt="" height="200" src="https://images2.imgbox.com/24/df/2yVvNnMu_o.png" width="811"></p> 
+<p>为什么会发生这样的事呢？</p> 
+<p>log4j2的强大之处在于，除了可以输出程序中的变量，它还提供了一个叫<strong>Lookup</strong>的东西，可以用来输出更多内容：</p> 
+<p><img alt="" height="680" src="https://images2.imgbox.com/d9/e0/NahkClyx_o.png" width="1200"></p> 
+<p></p> 
+<blockquote> 
+ <p> lookup 翻译过来就是查找、搜索的意思。那么log4j2中，就是在输出日志的时候，通过方法去查找要输出的内容。相当于一个接口，具体去哪里找，怎么找找，就需要编写具体的代码去实现，就相当于java中的多态差不多意思。</p> 
+</blockquote> 
+<p>log4j2提供了很多查找方法：</p> 
+<p><img alt="" height="744" src="https://images2.imgbox.com/de/65/n8N64dl8_o.png" width="1091"></p> 
+<p></p> 
+<p> 我们主要看一下本次漏洞的罪魁祸首：JNDI 什么是JNDI？它是干嘛的？？我们问一下百度百科。</p> 
+<p><img alt="" height="509" src="https://images2.imgbox.com/31/ef/YgM9ojbJ_o.png" width="823"></p> 
+<blockquote> 
+ <p> 以上看的是不是超级懵，看看上面咱们做的那个实验，传参为：${java:os} 输出计算机系统名称，相当于类似于一个字典的数据源，通过传参，然后找字典然后输出相应的信息。</p> 
+ <p>这个时候小伙伴就有想了，跟我有什么关系，输出系统变量，不会引起很大的事故吧。最多欺骗日志输出，能引起什么腥风血浪。</p> 
+</blockquote> 
+<p>别急，听猿码优创给你慢慢道来。JNDI 既然相当于一个字典，那里面有很多数据源。</p> 
+<p><img alt="" height="246" src="https://images2.imgbox.com/d3/80/Q7CtsGxk_o.png" width="442"></p> 
+<p><img alt="" height="429" src="https://images2.imgbox.com/c5/6a/jjVsLXzN_o.png" width="710"></p> 
+<p> 其中有一个数据源就是本次漏洞的受害者，那就是LDAP</p> 
+<p>什么是LDAP？我们先问问百度百科。</p> 
+<p><img alt="" height="375" src="https://images2.imgbox.com/cc/f0/ts1QxHKD_o.png" width="828"></p> 
+<p> what？？？？怎么看了一脸懵逼。</p> 
+<p><img alt="" height="363" src="https://images2.imgbox.com/fe/e7/uqNEPgh7_o.png" width="566"></p> 
+<p>有没有在一些开源系统中看到过这个单词LDAP登录。</p> 
+<blockquote> 
+ <p>LDAP是开放的Internet标准，支持跨平台的Internet协议，在业界中得到广泛认可的，并且市场上或者开源社区上的大多产品都加入了对LDAP的支持，因此对于这类系统，不需单独定制，只需要通过LDAP做简单的配置就可以与服务器做认证交互。“简单粗暴”，可以大大降低重复开发和对接的成本。</p> 
+</blockquote> 
+<blockquote> 
+ <p>这样说能明白了不？再举个例子，比如你们公司购买了一个OA系统，但是呢你们原来有自己的域账户，这个时候OA系统厂家不会为你们单独改造一套系统出来，这样成本太大，这个时候LDAP就派上了用场，通过简单配置，就可以用域账户登录购买的OA系统。但是简单配置相当于是远端加载了一些信息。</p> 
+</blockquote> 
+<p>来上面两个 lookup和LDAP大家有没有一个简单的了解。好我们来说这次的漏洞原理。</p> 
+<p>这个时候我们还是用代码举例子。</p> 
+<pre><code> @GetMapping(value = "/test")
+    public String test(String info) {
+        //执行远程代码
+        logger.error("----------------log4j漏洞演示--------------------");
+        logger.info(info); //logger为log4j
+        return "success";
+
+    }
+这个时候我们info传递：${jndi:ldap://127.0.0.1:3001/}</code></pre> 
+<p>这个时候log4j一发现${} 这个时候里面的信息就是要单独处理的。</p> 
+<pre><code>发现是JDNI扩展内容：${jndi:ldap://127.0.0.1:3001/yuanmayouchuang} ldap服务器在127.0.0.1 直接查找key是：yuanmayouchuang 然后查找完毕去返回相应的数据。</code></pre> 
+<blockquote> 
+ <p>如果是普通的数据那就没什么？问题就是出现在可以请求java对象！启动完项目 Java对象一般只存在于内存中，但也可以通过序列化的方式将其存储到文件中，或者通过网络传输。但更危险的在于：JNDI还支持一个叫命名引用（Naming References）的方式，可以通过远程下载一个class文件，然后下载后加载起来构建对象。</p> 
+</blockquote> 
+<p>注意：这里就是核弹级别漏洞问题了：<span style="color:#be191c"><strong>JNDI可以远程下载class文件来构建对象！！！</strong></span></p> 
+<p>就是下载的class（java编译后的代码）如果里面有恶意代码这不完蛋了吗？</p> 
+<p><img alt="" height="497" src="https://images2.imgbox.com/d5/7c/ffVfhJe5_o.png" width="1200"></p> 
+<p> <span style="color:#be191c">一句话总结漏洞：就是该输出日志的地方执行了远端服务器恶意Class代码</span></p> 
+<p><strong><span style="color:#be191c">互联网流传一句话：永远不要相信用户的输入的内容。</span></strong></p> 
+<p>修复方案：<a class="has-card" href="https://logging.apache.org/log4j/2.x/security.html" title="Log4j2修复方案官方地址"><span class="link-card-box"><span class="link-title">Log4j2修复方案官方地址</span><span class="link-link"><img alt="" class="link-link-icon" src="https://images2.imgbox.com/c1/71/BjePDZ2K_o.png">https://logging.apache.org/log4j/2.x/security.html</span></span></a></p> 
+<p><img alt="" height="952" src="https://images2.imgbox.com/9e/87/LqDw7WBQ_o.png" width="1200"></p> 
+<table align="center" border="1" cellpadding="1" cellspacing="1" style="width:696px">
+<caption>
+  Log4j2废弃解决方案（在2021年12月15日官方推翻）
+ </caption>
+<thead><tr>
+<th style="text-align:center;width:121px">版本号</th>
+<th style="text-align:center;width:571px">解决方案</th>
+</tr></thead>
+<tbody>
+<tr>
+<td style="width:121px">2.10-2.14版本</td>
+<td style="width:571px">系统属性 log4j2.formatMsgNoLookups 或环境变量 LOG4J_FORMAT_MSG_NO_LOOKUPS 设置为 true</td>
+</tr>
+<tr>
+<td style="width:121px">2.7-2.14.1之间的版本</td>
+<td style="width:571px">设置log4j2.xml的%m为 %m{nolookups}</td>
+</tr>
+<tr>
+<td style="width:121px">2.10以下版本</td>
+<td style="width:571px">删除org/apache/logging/log4j/core/lookup/JndiLookup.class这个类</td>
+</tr>
+</tbody>
+</table>
+<p> 哎呀，大家很幸运，然后今天我打开log4j官方发现昨天的翻译就是我上面发的给推翻了。。。</p> 
+<p><img alt="" height="806" src="https://images2.imgbox.com/5a/87/HoKPQfrH_o.png" width="1200"></p> 
+<p>这是最新的解决方案：升级到最新2.0.16版本</p> 
+<p><img alt="" height="319" src="https://images2.imgbox.com/c6/e4/NskZUqX5_o.png" width="1130"></p> 
+<pre><code>log4j2.0.16 core版本 pom文件： https://mvnrepository.com/artifact/org.apache.logging.log4j
+&lt;!-- https://mvnrepository.com/artifact/org.apache.logging.log4j/log4j-core --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;org.apache.logging.log4j&lt;/groupId&gt;
+    &lt;artifactId&gt;log4j-core&lt;/artifactId&gt;
+    &lt;version&gt;2.16.0&lt;/version&gt;
+&lt;/dependency&gt;
+log4j2.0.16 api版本 pom文件： https://mvnrepository.com/artifact/org.apache.logging.log4j
+&lt;!-- https://mvnrepository.com/artifact/org.apache.logging.log4j/log4j-api --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;org.apache.logging.log4j&lt;/groupId&gt;
+    &lt;artifactId&gt;log4j-api&lt;/artifactId&gt;
+    &lt;version&gt;2.16.0&lt;/version&gt;
+&lt;/dependency&gt;</code></pre> 
+<p>到此本文就介绍完毕了。</p> 
+<p>稍后我会把LDAP模拟攻击源码发出来了，需要大家遵守以下协议。</p> 
+<blockquote> 
+ <pre>源码是针对Log4j2超高危RCE漏洞`CVE-2021-4428`的复现DEMO，目的是认识该漏洞的危害性并根据您系统的情况做出针对性的防御。
+警告---重要
+本DEMO只是针对技术层面的研究，不涉及恶意远程计算机侵入方面的相关脚本。请勿利用漏洞进行非法侵入他人计算机的违法活动。否则您将可能承担以下侵权责任：
+
+1. 根据《中华人民共和国治安管理处罚法》第二十九条 对违反国家规定，侵入计算机信息系统，造成危害的，处五日以下拘留;情节较重的，处五日以上十日以下拘留。
+2. 根据《中华人民共和国刑法》第二百八十五条第一款的规定,犯本罪的,处三年以下有期徒刑或者拘役。单位犯本罪的,对单位判处罚金,并对其直接负责的主管人员和其他直接责任人员,依照上述规定处罚。
+请勿用于非法用途，否则将承担相应的法律责任。</pre> 
+</blockquote>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

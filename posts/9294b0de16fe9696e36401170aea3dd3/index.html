@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>记一次性能优化的心酸历程【Flask&#43;Gunicorn&#43;pytorch&#43;多进程&#43;线程池，一顿操作猛如虎】 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">记一次性能优化的心酸历程【Flask&#43;Gunicorn&#43;pytorch&#43;多进程&#43;线程池，一顿操作猛如虎】</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <blockquote> 
+ <p><strong>您好，我是码农飞哥，感谢您阅读本文，欢迎一键三连哦</strong>。<br> <strong>本文只是记录我优化的心酸历程。无他，唯记录尔。。。。。小伙伴们可围观，可打call，可以私信与我交流。</strong><br> 干货满满，建议收藏，需要用到时常看看。 小伙伴们如有问题及需要，欢迎踊跃留言哦~ ~ ~。</p> 
+</blockquote> 
+<p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul><li>
+<ul>
+<li><a href="#_5">问题背景</a></li>
+<li><a href="#_8">系统环境</a></li>
+<li><a href="#_17">优化历程</a></li>
+<li>
+<ul>
+<li><a href="#_28">小小分析一波</a></li>
+<li><a href="#torchcudaempty_cache_32">第一阶段：直接上torch.cuda.empty_cache()清理。</a></li>
+<li><a href="#_38">第二阶段（创建子进程加载模型并进行训练）</a></li>
+<li><a href="#GPU_117">第三阶段（全局线程池+释放GPU）</a></li>
+</ul>
+   </li>
+<li><a href="#_159">总结</a></li>
+<li><a href="#_162">参考</a></li>
+<li><a href="#_165">粉丝专属福利</a></li>
+</ul>
+ </li></ul>
+</div>
+<p></p> 
+<h2>
+<a id="_5"></a>问题背景</h2> 
+<p>现有一个古诗自动生成的训练接口，该接口通过Pytorch来生训练模型（即生成古诗）为了加速使用到了GPU，但是训练完成之后GPU未能释放。故此需要进行优化，即在古诗生成完成之后释放GPU。<br> 该项目是一个通过Flask搭建的web服务，在服务器上为了实现并发采用的是gunicorn来启动应用。通过pythorch来进行古诗训练。项目部署在一个CentOS的服务器上。</p> 
+<h2>
+<a id="_8"></a>系统环境</h2> 
+<table>
+<thead><tr>
+<th>软件</th>
+<th>版本</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>flask</td>
+<td>0.12.2</td>
+</tr>
+<tr>
+<td>gunicorn</td>
+<td>19.9.0</td>
+</tr>
+<tr>
+<td>CentOS 6.6</td>
+<td>带有GPU的服务器，不能加机器</td>
+</tr>
+<tr>
+<td>pytorch</td>
+<td>1.7.0+cpu</td>
+</tr>
+</tbody>
+</table>
+<p><strong>因为特殊的原因这里之后一个服务器供使用，故不能考虑加机器的情况。</strong></p> 
+<h2>
+<a id="_17"></a>优化历程</h2> 
+<p>pytorch在训练模型时，需要先加载模型model和数据data，如果有GPU显存的话我们可以将其放到GPU显存中加速，如果没有GPU的话则只能使用CPU了。<br> 由于加载模型以及数据的过程比较慢。所以，<strong>我这边将加载过程放在了项目启动时加载</strong>。</p> 
+<pre><code class="prism language-py"><span class="token keyword">import</span> torch
+device <span class="token operator">=</span> <span class="token string">"cuda"</span> <span class="token keyword">if</span> torch<span class="token punctuation">.</span>cuda<span class="token punctuation">.</span>is_available<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">else</span> <span class="token string">"cpu"</span>
+model <span class="token operator">=</span> GPT2LMHeadModel<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span>os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>join<span class="token punctuation">(</span>base_path<span class="token punctuation">,</span> <span class="token string">"model"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+model<span class="token punctuation">.</span>to<span class="token punctuation">(</span>device<span class="token punctuation">)</span>
+model<span class="token punctuation">.</span><span class="token builtin">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这部分耗时大约在6秒左右。cuda表示使用torch的cuda。模型数据加载之后所占的GPU显存大小大约在1370MB。优化的目标就是在训练完成之后将这部分占用的显存释放掉。</p> 
+<h3>
+<a id="_28"></a>小小分析一波</h3> 
+<p>现状是项目启动时就加载模型model和数据data的话，当模型数据在GPU中释放掉之后，下次再进行模型训练的话不就没有模型model和数据data了么？如果要释放GPU的话，就需要考虑如何重新加载GPU。<br> 所以，模型model和数据data不能放在项目启动的时候加载，只能放在调用训练的函数时加载，但是由于加载比较慢，所以只能放在一个异步的子线程或者子进程中运行。<br> <strong>所以，我这边首先将模型数据的加载过程以及训练放在了一个单独的线程中执行。</strong></p> 
+<h3>
+<a id="torchcudaempty_cache_32"></a>第一阶段：直接上torch.cuda.empty_cache()清理。</h3> 
+<p>GPU没释放，那就释放呗。这不是很简单么？百度一波pytorch怎么释放GPU显存。<br> <img src="https://images2.imgbox.com/2b/60/j8aXt87x_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/fc/14/4w7kU7qm_o.png" alt="在这里插入图片描述"><br> 轻点一下，即找到了答案。那就是在训练完成之后<code>torch.cuda.empty_cache()</code> 。<strong>代码加上之后再运行，发现并没啥卵用！！！！，CV大法第一运用失败</strong><br> 这到底是啥原因呢？我们后面会分析到！！！</p> 
+<h3>
+<a id="_38"></a>第二阶段（创建子进程加载模型并进行训练）</h3> 
+<p>既然子线程加载模型并进行训练不能释放GPU的话，那么我们能不能转变一下思路。创建一个子进程来加载模型数据并进行训练，<br> 当训练完成之后就将这个子进程杀掉，它所占用的资源（主要是GPU显存）不就被释放了么？<br> 这思路看起来没有丝毫的毛病呀。说干就干。</p> 
+<ol><li>定义加载模型数据以及训练的方法 training。（代码仅供参考）</li></ol> 
+<pre><code class="prism language-py"><span class="token keyword">def</span> <span class="token function">training</span><span class="token punctuation">(</span>queue<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    manage<span class="token punctuation">.</span>app<span class="token punctuation">.</span>app_context<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>push<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'基础加载开始'</span><span class="token punctuation">)</span>
+    <span class="token keyword">with</span> manage<span class="token punctuation">.</span>app<span class="token punctuation">.</span>app_context<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        device <span class="token operator">=</span> <span class="token string">"cuda"</span> <span class="token keyword">if</span> torch<span class="token punctuation">.</span>cuda<span class="token punctuation">.</span>is_available<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">else</span> <span class="token string">"cpu"</span>
+        current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'device1111开始啦啦啦'</span><span class="token punctuation">)</span>
+        model<span class="token punctuation">.</span>to<span class="token punctuation">(</span>device<span class="token punctuation">)</span>
+        current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'device2222'</span><span class="token punctuation">)</span>
+        model<span class="token punctuation">.</span><span class="token builtin">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        n_ctx <span class="token operator">=</span> model<span class="token punctuation">.</span>config<span class="token punctuation">.</span>n_ctx
+        current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'基础加载完成'</span><span class="token punctuation">)</span>
+		<span class="token comment">#训练方法</span>
+		result_list<span class="token operator">=</span>start_train<span class="token punctuation">(</span>model<span class="token punctuation">,</span>n_ctx<span class="token punctuation">,</span>device<span class="token punctuation">)</span>
+        current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'完成训练'</span><span class="token punctuation">)</span>
+        <span class="token comment">#将训练方法返回的结果放入队列中</span>
+        queue<span class="token punctuation">.</span>put<span class="token punctuation">(</span>result_list<span class="token punctuation">)</span>
+</code></pre> 
+<ol start="2"><li>创建子进程执行training方法，然后通过阻塞的方法获取训练结果</li></ol> 
+<pre><code class="prism language-py"><span class="token keyword">from</span> torch <span class="token keyword">import</span> multiprocessing <span class="token keyword">as</span> mp
+<span class="token keyword">def</span> <span class="token function">sub_process_train</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token comment">#定义一个队列获取训练结果</span>
+    train_queue <span class="token operator">=</span> mp<span class="token punctuation">.</span>Queue<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    training_process <span class="token operator">=</span> mp<span class="token punctuation">.</span>Process<span class="token punctuation">(</span>target<span class="token operator">=</span>training<span class="token punctuation">,</span> args<span class="token operator">=</span><span class="token punctuation">(</span>train_queue<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    training_process<span class="token punctuation">.</span>start<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'子进程执行'</span><span class="token punctuation">)</span>
+    <span class="token comment"># 等训练完成</span>
+    training_process<span class="token punctuation">.</span>join<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'执行完成'</span><span class="token punctuation">)</span>
+    <span class="token comment">#获取训练结果</span>
+    result_list <span class="token operator">=</span> train_queue<span class="token punctuation">.</span>get<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'获取到数据'</span><span class="token punctuation">)</span>
+    <span class="token keyword">if</span> training_process<span class="token punctuation">.</span>is_alive<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'子进程还存活'</span><span class="token punctuation">)</span>
+        <span class="token comment">#杀掉子进程</span>
+        os<span class="token punctuation">.</span>kill<span class="token punctuation">(</span>training_process<span class="token punctuation">.</span>pid<span class="token punctuation">,</span> signal<span class="token punctuation">.</span>SIGKILL<span class="token punctuation">)</span>
+    current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span><span class="token string">'杀掉子进程'</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> result_list
+</code></pre> 
+<ol start="3"><li>因为子进程要阻塞获取执行结果，所以需要定义一个线程去执行sub_process_train方法以保证训练接口可以正常返回。</li></ol> 
+<pre><code class="prism language-py"><span class="token keyword">import</span> threading
+threading<span class="token punctuation">.</span>Thread<span class="token punctuation">(</span>target<span class="token operator">=</span>sub_process_train<span class="token punctuation">)</span><span class="token punctuation">.</span>start<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>代码写好了，见证奇迹的时候来了。<br> 首先用python manage.py 启动一下，看下结果，运行结果如下，报了一个错误，从错误的提示来看就是不能在forked的子进程中重复加载CUDA。<code>"Cannot re-initialize CUDA in forked subprocess. " + msg) RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing, you must use the 'spawn' start method</code>。<br> <img src="https://images2.imgbox.com/5c/b5/HkNpVWDU_o.png" alt="在这里插入图片描述"><br> 这里有问题，就是 forked 是啥，spawn 又是啥？这里就需要了解创建子进程的方式了。<br> 通过<code>torch.multiprocessing.Process(target=training, args=(train_queue))</code> 创建一个子进程<br> fork和spawn是构建子进程的不同方式，区别在于<br> 1. fork: 除了必要的启动资源，其余的变量，包，数据等都集成自父进程，也就是共享了父进程的一些内存页，因此启动较快，但是由于大部分都是用的自父进程数据，所有是不安全的子进程。<br> 2. spawn：从头构建一个子进程，父进程的数据拷贝到子进程的空间中，拥有自己的Python解释器，所有需要重新加载一遍父进程的包，因此启动叫慢，但是由于数据都是自己的，安全性比较高。<br> 回到刚刚那个报错上面去。为啥提示要不能重复加载。<br> 这是因为Python3中使用 <strong>spawn启动方法才支持在进程之间共享CUDA张量</strong>。而用的multiprocessing 是使用 fork 创建子进程，不被 CUDA 运行时所支持。<br> 所以，只有在创建子进程之前加上<code>mp.set_start_method('spawn')</code> 方法。即</p> 
+<pre><code class="prism language-py"><span class="token keyword">def</span> <span class="token function">sub_process_train</span><span class="token punctuation">(</span>prefix<span class="token punctuation">,</span> length<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">try</span><span class="token punctuation">:</span>
+        mp<span class="token punctuation">.</span>set_start_method<span class="token punctuation">(</span><span class="token string">'spawn'</span><span class="token punctuation">)</span>
+    <span class="token keyword">except</span> RuntimeError<span class="token punctuation">:</span>
+        <span class="token keyword">pass</span>
+    train_queue <span class="token operator">=</span> mp<span class="token punctuation">.</span>Queue<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    training_process <span class="token operator">=</span> mp<span class="token punctuation">.</span>Process<span class="token punctuation">(</span>target<span class="token operator">=</span>training<span class="token punctuation">,</span> args<span class="token operator">=</span><span class="token punctuation">(</span>train_queue<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token comment">##省略其他代码</span>
+</code></pre> 
+<p>再次通过 <strong>python manage.py</strong> 运行项目。运行结果图1和图2所示，可以看出可以正确是使用GPU显存，在训练完成之后也可以释放GPU。<br> <img src="https://images2.imgbox.com/6f/65/EhZTixpG_o.png" alt="图1"><br> <img src="https://images2.imgbox.com/54/f6/yXtKWHOT_o.png" alt="图2"><br> 一切看起来都很prefect。 But，But。通过gunicorn启动项目之后，再次调用接口，则出现下面结果。<br> <img src="https://images2.imgbox.com/53/29/rODVIRdd_o.png" alt="在这里插入图片描述"><br> <strong>用gunicorn启动项目子进程竟然未执行，这就很头大了。不加mp.set_start_method(‘spawn’) 方法模型数据不能加载，<br> 加上这个方法子进程不能执行，真的是一个头两个大</strong>。</p> 
+<h3>
+<a id="GPU_117"></a>第三阶段（全局线程池+释放GPU）</h3> 
+<p>子进程的方式也不行了。只能回到前面的线程方式了。前面创建线程的方式都是直接通过直接new一个新线程的方式，当同时运行的线程数过多的话，则很容易就会出现GPU占满的情况，从而导致应用崩溃。所以，这里采用全局线程池的方式来创建并管理线程，然后当线程执行完成之后释放资源。</p> 
+<ol><li>在项目启动之后就创建一个全局线程池。大小是2。保证还有剩余的GPU。</li></ol> 
+<pre><code class="prism language-py"><span class="token keyword">from</span> multiprocessing<span class="token punctuation">.</span>pool <span class="token keyword">import</span> ThreadPool
+pool <span class="token operator">=</span> ThreadPool<span class="token punctuation">(</span>processes<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+</code></pre> 
+<ol start="2"><li>通过线程池来执行训练</li></ol> 
+<pre><code class="prism language-py">  pool<span class="token punctuation">.</span>apply_async<span class="token punctuation">(</span>func<span class="token operator">=</span>async_produce_poets<span class="token punctuation">)</span>
+</code></pre> 
+<ol start="3"><li>用线程加载模型和释放GPU</li></ol> 
+<pre><code class="prism language-py"><span class="token keyword">def</span> <span class="token function">async_produce_poets</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">try</span><span class="token punctuation">:</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"子进程开始"</span> <span class="token operator">+</span> <span class="token builtin">str</span><span class="token punctuation">(</span>os<span class="token punctuation">.</span>getpid<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token operator">+</span><span class="token string">" "</span><span class="token operator">+</span><span class="token builtin">str</span><span class="token punctuation">(</span>threading<span class="token punctuation">.</span>current_thread<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>ident<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        start_time <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>time<span class="token punctuation">.</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        manage<span class="token punctuation">.</span>app<span class="token punctuation">.</span>app_context<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>push<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        device <span class="token operator">=</span> <span class="token string">"cuda"</span> <span class="token keyword">if</span> torch<span class="token punctuation">.</span>cuda<span class="token punctuation">.</span>is_available<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">else</span> <span class="token string">"cpu"</span>
+        model <span class="token operator">=</span> GPT2LMHeadModel<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span>os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>join<span class="token punctuation">(</span>base_path<span class="token punctuation">,</span> <span class="token string">"model"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        model<span class="token punctuation">.</span>to<span class="token punctuation">(</span>device<span class="token punctuation">)</span>
+        model<span class="token punctuation">.</span><span class="token builtin">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        n_ctx <span class="token operator">=</span> model<span class="token punctuation">.</span>config<span class="token punctuation">.</span>n_ctx
+        result_list<span class="token operator">=</span>start_train<span class="token punctuation">(</span>model<span class="token punctuation">,</span>n_ctx<span class="token punctuation">,</span>device<span class="token punctuation">)</span>
+        <span class="token comment">#将模型model转到cpu</span>
+        model <span class="token operator">=</span> model<span class="token punctuation">.</span>to<span class="token punctuation">(</span><span class="token string">'cpu'</span><span class="token punctuation">)</span>
+        <span class="token comment">#删除模型，也就是删除引用</span>
+        <span class="token keyword">del</span> model
+        <span class="token comment">#在使用其释放GPU。</span>
+        torch<span class="token punctuation">.</span>cuda<span class="token punctuation">.</span>empty_cache<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        train_seconds <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>time<span class="token punctuation">.</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> start_time<span class="token punctuation">)</span>
+        current_app<span class="token punctuation">.</span>logger<span class="token punctuation">.</span>info<span class="token punctuation">(</span><span class="token string">'训练总耗时是={0}'</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span><span class="token builtin">str</span><span class="token punctuation">(</span>train_seconds<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">except</span> Exception <span class="token keyword">as</span> e<span class="token punctuation">:</span>
+        manage<span class="token punctuation">.</span>app<span class="token punctuation">.</span>app_context<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>push<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这一番操作之后，终于达到了理想的效果。</p> 
+<p>这里因为使用到了gunicorn来启动项目。所以gunicorn 相关的知识必不可少。在CPU受限的系统中采用sync的工作模式比较理想。<br> 详情可以查看<a href="https://blog.csdn.net/u014534808/article/details/112576701">gunicorn的简单总结</a></p> 
+<p>问题分析，前面第一阶段直接使用<code>torch.cuda.empty_cache()</code> 没能释放GPU就是因为没有删除掉模型model。模型已经加载到了GPU了。</p> 
+<h2>
+<a id="_159"></a>总结</h2> 
+<p>本文从实际项目的优化入手，记录优化方面的方方面面。希望对读者朋友们有所帮助。</p> 
+<h2>
+<a id="_162"></a>参考</h2> 
+<p><a href="https://stackoverflow.com/questions/64095876/multiprocessing-fork-vs-spawn">multiprocessing fork() vs spawn()</a></p> 
+<h2>
+<a id="_165"></a>粉丝专属福利</h2> 
+<blockquote> 
+ <p>软考资料：<a href="https://pan.baidu.com/s/1V6nBkDA3B_PBKCn9I6NVxQ?_at_=1635046984508">实用软考资料</a></p> 
+ <p>面试题：<a href="https://pan.baidu.com/s/1V6nBkDA3B_PBKCn9I6NVxQ">5G 的Java高频面试题</a></p> 
+ <p>学习资料：<a href="https://pan.baidu.com/s/14u5ZTiDOcQg2QxlYswOCjA">50G的各类学习资料</a></p> 
+ <p>脱单秘籍：回复【脱单】</p> 
+ <p>并发编程：回复【并发编程】</p> 
+</blockquote> 
+<pre><code>											?? 验证码 可通过搜索下方 公众号 获取?? 
+</code></pre> 
+<p>​</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

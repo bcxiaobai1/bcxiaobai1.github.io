@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>CEPH分布式存储部署 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">CEPH分布式存储部署</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p>ceph支持块存储、对象存储、cephfs文件共享系统，概念性的东西这里不过多介绍，请自行查阅ceph分布式存储相关资料，本文主要介绍ceph分布式集群部署</p> 
+<p>操作系统：centos7.9 最小安装<br> 节点配置：ceph.node1+ceph.node2+ceph.node3 Dell R730xd 3台（单台配置 256G内存+4块128G SSd+10块8T HDD），4块ssd raid10 数据盘未作raid，节点多有条件的可以做raid10<br> 集群组成：admin master节点+node1存储节点+node2存储节点+node3存储节点+client 客户端</p> 
+<p><strong>1.主机名解析，写入到hosts文件，此操作在所有设备上面操作</strong></p> 
+<pre><code class="prism language-bash">设备对应关系如下：
+主机名                     <span class="token function">ip</span>                          角色
+admin                 <span class="token number">192.168</span>.1.20          master控制节点，安装ceph-deploy
+ceph.node1            <span class="token number">192.168</span>.1.21          mon、mgr、osd
+ceph.node2            <span class="token number">192.168</span>.1.22          osd
+ceph.node3            <span class="token number">192.168</span>.1.23          osd
+ceph.client           <span class="token number">192.168</span>.1.24          osd
+
+注意：ceph.client我这里是作为测试用途，实际的client客户端可能是任意的与master节点路由可达的linux虚拟机，master节点与node节点也并不一定是内网，请根据实际业务场景来部署
+</code></pre> 
+<pre><code class="prism language-bash"><span class="token function">vim</span> /etc/hosts
+<span class="token number">192.168</span>.1.20    admin
+<span class="token number">192.168</span>.1.21    ceph.node1
+<span class="token number">192.168</span>.1.22    ceph.node2
+<span class="token number">192.168</span>.1.23    ceph.node3
+<span class="token number">192.168</span>.1.24    ceph.client 
+
+注意：配置写入完成后，在每台设备上面互ping一下主机名，看看能否正常解析，这点很重要，不要嫌麻烦
+</code></pre> 
+<p><strong>2.关闭所有设备的防火墙和selinux</strong></p> 
+<pre><code class="prism language-bash">此步骤省略，请自行关闭，不会的百度一下
+注意，若设备含有公网地址，ssh默认22端口先不要更改，否则等会部署ceph节点的时候没法加ssh端口号，会被拒绝连接，等所有配置都完成后，再开启防火墙放通相应的端口
+</code></pre> 
+<p><strong>3.创建一个普通用户用作后续集群部署的用户，并赋予sudo权限，所有设备上面均需要操作</strong></p> 
+<pre><code class="prism language-bash">创建用户并设置密码
+<span class="token function">useradd</span> it
+<span class="token function">passwd</span> it
+
+赋予新用户sudo权限
+<span class="token function">vim</span> /etc/sudoers
+root <span class="token assign-left variable">ALL</span><span class="token operator">=</span><span class="token punctuation">(</span>ALL<span class="token punctuation">)</span> ALL 找到这行，在下面新增一行，如下
+it <span class="token assign-left variable">ALL</span><span class="token operator">=</span><span class="token punctuation">(</span>root<span class="token punctuation">)</span> NOPASSWD:ALL
+</code></pre> 
+<p><strong>4.配置master控制节点ssh免密登录所有设备，在admin设备上面操作</strong></p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># su - it</span>
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ ssh-keygen
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ ssh-copy-id it@ceph.node1
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ ssh-copy-id it@ceph.node2
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ ssh-copy-id it@ceph.node3
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ ssh-copy-id it@ceph.client
+
+在admin设备上用root用户添加.ssh/config配置文件，这样ceph-deploy 就能用所建的用户名登录ceph节点了，如下
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment">#mkdir ~/.ssh</span>
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># vim ~/.ssh/config</span>
+Host ceph.node1
+Hostname ceph.node1
+User it
+
+Host ceph.node2
+Hostname ceph.node2
+User it
+
+Host ceph.node3
+Hostname ceph.node3
+User it
+
+注意：ceph.client 可以配置也可以不配置，我这里不作配置，以上配置保存退出即可
+</code></pre> 
+<p><strong>5.在admin设备安装ceph-deploy ，用root用户执行</strong></p> 
+<pre><code class="prism language-bash">配置ceph yum源
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/yum.repos.d/ceph.repo</span>
+<span class="token punctuation">[</span>ceph-noarch<span class="token punctuation">]</span>
+<span class="token assign-left variable">name</span><span class="token operator">=</span>Ceph noarch packages
+<span class="token assign-left variable">baseurl</span><span class="token operator">=</span>https://download.ceph.com/rpm-luminous/el7/noarch
+<span class="token assign-left variable">enabled</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token assign-left variable">gpgcheck</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token assign-left variable">type</span><span class="token operator">=</span>rpm-md
+<span class="token assign-left variable">gpgkey</span><span class="token operator">=</span>https://download.ceph.com/keys/release.asc
+
+重建一下yum元数据，并开启yum缓存
+yum clean all
+yum makecache
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/yum.conf</span>
+<span class="token assign-left variable">keepcache</span><span class="token operator">=</span><span class="token number">1</span>
+
+安装ceph-deploy
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># yum install ceph-deploy -y</span>
+</code></pre> 
+<p><strong>6.安装ntp，所有设备均需要操作</strong></p> 
+<pre><code class="prism language-bash">注意：我这里选择admin设备作为ntp时间服务器，其它设备均向admin设备同步时间
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># yum install -y ntp     #所有设备都需要执行</span>
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/ntp.conf  #有4行server的位置，把那4行server行注释掉，填写以下两行</span>
+server <span class="token number">127.127</span>.1.0 <span class="token comment"># local clock</span>
+fudge  <span class="token number">127.127</span>.1.0 stratum <span class="token number">10</span>
+</code></pre> 
+<p>更改完如下图<br> <img src="https://images2.imgbox.com/73/99/lpDIbZxD_o.png" alt="在这里插入图片描述"></p> 
+<pre><code class="prism language-bash">启动一下ntp服务
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># systemctl start ntpd</span>
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable ntpd</span>
+
+在其它设备用root用户执行如下命令：
+yum <span class="token function">install</span> ntpdate  -y
+ntpdate  时间服务器ip
+</code></pre> 
+<p><strong>7.ceph 集群部署</strong></p> 
+<pre><code class="prism language-bash">注意：以下操作没有特别说明，均在admin设备操作
+创建集群操作目录
+<span class="token punctuation">[</span>root@admin ~<span class="token punctuation">]</span><span class="token comment"># su - it</span>
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span>  <span class="token function">mkdir</span> ceph.cluster   <span class="token comment">## ceph-deploy命令需要在此目录执行</span>
+
+依赖安装
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> <span class="token function">wget</span> -c https://files.pythonhosted.org/packages/5f/ad/1fde06877a8d7d5c9b60eff7de2d452f639916ae1d48f0b8f97bf97e570a/distribute-0.7.3.zip
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> <span class="token function">unzip</span> distribute-0.7.3.zip  <span class="token comment">#若没有unzip命令先安装yum -y install unzip</span>
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ <span class="token builtin class-name">cd</span> distribute-0.7.3
+<span class="token punctuation">[</span>it@admin distribute-0.7.3<span class="token punctuation">]</span>$ <span class="token function">sudo</span> python setup.py <span class="token function">install</span>
+
+集群创建
+<span class="token punctuation">[</span>it@admin ~<span class="token punctuation">]</span>$ <span class="token builtin class-name">cd</span> ceph.cluster/
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">sudo</span>  ceph-deploy new ceph.node1
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">ls</span>
+ceph.conf  ceph-deploy-ceph.log  ceph.mon.keyring  <span class="token comment">#集群创建成功后会有这三个文件</span>
+
+安装luminous-12.2.13
+配置国内ceph yum源,所有设备均操作
+<span class="token function">sudo</span> yum -y <span class="token function">install</span> epel-release
+<span class="token function">sudo</span> <span class="token function">vim</span> /etc/yum.repos.d/ceph.repo
+<span class="token punctuation">[</span>Ceph<span class="token punctuation">]</span>
+<span class="token assign-left variable">name</span><span class="token operator">=</span>Ceph packages <span class="token keyword">for</span> <span class="token variable">$basearch</span>
+<span class="token assign-left variable">baseurl</span><span class="token operator">=</span>http://mirrors.aliyun.com/ceph/rpm-luminous/el7/<span class="token variable">$basearch</span>
+<span class="token assign-left variable">enabled</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token assign-left variable">gpgcheck</span><span class="token operator">=</span><span class="token number">0</span>
+<span class="token assign-left variable">type</span><span class="token operator">=</span>rpm-md
+<span class="token assign-left variable">gpgkey</span><span class="token operator">=</span>https://mirrors.aliyun.com/ceph/keys/release.asc
+<span class="token assign-left variable">priority</span><span class="token operator">=</span><span class="token number">1</span>
+
+<span class="token punctuation">[</span>Ceph-noarch<span class="token punctuation">]</span>
+<span class="token assign-left variable">name</span><span class="token operator">=</span>Ceph noarch packages
+<span class="token assign-left variable">baseurl</span><span class="token operator">=</span>http://mirrors.aliyun.com/ceph/rpm-luminous/el7/noarch
+<span class="token assign-left variable">enabled</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token assign-left variable">gpgcheck</span><span class="token operator">=</span><span class="token number">0</span>
+<span class="token assign-left variable">type</span><span class="token operator">=</span>rpm-md
+<span class="token assign-left variable">gpgkey</span><span class="token operator">=</span>https://mirrors.aliyun.com/ceph/keys/release.asc
+<span class="token assign-left variable">priority</span><span class="token operator">=</span><span class="token number">1</span>
+
+<span class="token punctuation">[</span>ceph-source<span class="token punctuation">]</span>
+<span class="token assign-left variable">name</span><span class="token operator">=</span>Ceph <span class="token builtin class-name">source</span> packages
+<span class="token assign-left variable">baseurl</span><span class="token operator">=</span>http://mirrors.aliyun.com/ceph/rpm-luminous/el7/SRPMS
+<span class="token assign-left variable">enabled</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token assign-left variable">gpgcheck</span><span class="token operator">=</span><span class="token number">0</span>
+<span class="token assign-left variable">type</span><span class="token operator">=</span>rpm-md
+<span class="token assign-left variable">gpgkey</span><span class="token operator">=</span>https://mirrors.aliyun.com/ceph/keys/release.asc
+<span class="token assign-left variable">priority</span><span class="token operator">=</span><span class="token number">1</span>
+保存退出后重建一下yum元数据
+<span class="token function">sudo</span> yum clean all
+<span class="token function">sudo</span> yum makecache
+
+在ceph.node1 ceph.node2 ceph.node3 ceph.client 上面安装ceph和ceph-radosgw
+<span class="token function">sudo</span> yum <span class="token function">install</span> ceph ceph-radosgw  -y   <span class="token comment">#以上设备都需要执行</span>
+
+验证：在node1、node2、node3、client上面看一下ceph版本
+<span class="token function">sudo</span> ceph --version
+ceph version <span class="token number">12.2</span>.13 <span class="token punctuation">(</span>584a20eb0237c657dc0567da126be145106aa47e<span class="token punctuation">)</span> luminous <span class="token punctuation">(</span>stable<span class="token punctuation">)</span>
+</code></pre> 
+<p><strong>8.集群初始化</strong></p> 
+<pre><code class="prism language-bash">在admin设备上面用 it 用户执行,初始化mon
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph-deploy mon create-initial
+
+赋予各个节点使用命令免用户名权限：
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph-deploy admin ceph.node1 ceph.node2 ceph.node3
+
+安装ceph-mgr：只有luminous才有，为使用dashboard做准备
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph-deploy mgr create ceph.node1   <span class="token comment">##我这里规划的ceph.node1</span>
+
+创建osd
+注意：各个节点上提供存储空间的磁盘大小不能太小，最好50G以上，注意检查磁盘名字
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">sudo</span>  ceph-deploy osd create --data /dev/sdb ceph.node1  <span class="token comment">#这里省略，我有8块存储磁盘/dev/sdb /dev/sdc /dev/sdd ......</span>
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">sudo</span>  ceph-deploy osd create --data /dev/sdb ceph.node2  <span class="token comment">#这里省略，同上</span>
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">sudo</span>  ceph-deploy osd create --data /dev/sdb ceph.node3  <span class="token comment">#这里省略，同上</span>
+命令中/dev/sdb是在各个节点上为osd准备的空闲磁盘（无需分区格式化，如果有分区需要指定具体分区），个人建议不要分区
+
+查看集群状态：
+<span class="token punctuation">[</span>it@admin ceph.cluster<span class="token punctuation">]</span>$ <span class="token function">ssh</span> ceph.node1 <span class="token function">sudo</span> ceph -s
+如果显示health_ok，3个osd up就成功了
+</code></pre> 
+<p>如下所示，就表示ok了<br> <img src="https://images2.imgbox.com/f9/06/DJ4lz2QQ_o.png" alt="在这里插入图片描述"><br> <strong>9.在ceph.node1上面配置Dashboard</strong></p> 
+<pre><code class="prism language-bash">把ceph-mgr和ceph-mon安装在同一个主机上，最好只有一个ceph-mgr
+<span class="token punctuation">[</span>root@ceph.node1 ~<span class="token punctuation">]</span><span class="token comment"># su - it</span>
+
+创建管理域密钥
+<span class="token punctuation">[</span>it@ceph.node1 ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph auth get-or-create mgr.node1 mon <span class="token string">'allow profile mgr'</span> osd
+
+开启ceph-mgr 管理域
+<span class="token punctuation">[</span>it@ceph.node1 ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph-mgr -i ceph.node1
+
+查看ceph状态，确认mgr的状态为active
+<span class="token punctuation">[</span>it@ceph.node1 ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph status
+cluster:
+    id:     aec06bc6-428c-49ff-a2c1-2d84808bcb54
+    health: HEALTH_OK
+ 
+  services:
+    mon: <span class="token number">1</span> daemons, quorum node1
+    mgr: node1<span class="token punctuation">(</span>active, starting<span class="token punctuation">)</span>
+    osd: <span class="token number">3</span> osds: <span class="token number">3</span> up, <span class="token number">3</span> <span class="token keyword">in</span>
+ 
+  data:
+    pools:   <span class="token number">0</span> pools, <span class="token number">0</span> pgs
+    objects: <span class="token number">0</span> objects, 0B
+    usage:   <span class="token number">3</span>.01GiB used, <span class="token number">12</span>.0GiB / <span class="token number">15</span>.0GiB avail
+    pgs:
+
+打开dashboard模块：
+<span class="token punctuation">[</span>it@ceph.node1 ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph mgr module <span class="token builtin class-name">enable</span> dashboard
+
+绑定开启dashboard模块的ceph-mgr节点的ip地址：
+<span class="token punctuation">[</span>it@ceph.node1 ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph config-key <span class="token builtin class-name">set</span> mgr/dashboard/node1/server_addr <span class="token number">192.168</span>.121  <span class="token comment">##这个是node1的ip</span>
+
+创建存储池：
+<span class="token punctuation">[</span>it@ceph.node1 ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> ceph osd pool create rbd <span class="token number">128</span> <span class="token number">128</span>
+<span class="token comment">#扩展：少于 5 个 OSD 时可把 pg_num 设置为 128</span>
+OSD 数量在 <span class="token number">5</span> 到 <span class="token number">10</span> 个时，可把 pg_num 设置为 <span class="token number">512</span>
+OSD 数量在 <span class="token number">10</span> 到 <span class="token number">50</span> 个时，可把 pg_num 设置为 <span class="token number">4096</span>
+
+初始化存储池：
+<span class="token punctuation">[</span>it@ceph.node1 ~<span class="token punctuation">]</span>$ <span class="token function">sudo</span> rbd pool init rbd
+
+浏览器登录：
+http://192.168.1.21:7000
+</code></pre> 
+<p>到这里ceph分布式集群部署完成！<br> <img src="https://images2.imgbox.com/74/57/HEUc3sJQ_o.png" alt="在这里插入图片描述"><br> <strong>10.client端挂载使用，client端我这里直接以命令行的形式表述</strong></p> 
+<pre><code class="prism language-bash"><span class="token number">1</span>.yum环境配置
+yum -y <span class="token function">install</span> epel-release
+<span class="token function">vim</span> /etc/yum.repos.d/ceph.repo
+<span class="token punctuation">[</span>Ceph<span class="token punctuation">]</span>
+<span class="token assign-left variable">name</span><span class="token operator">=</span>Ceph packages <span class="token keyword">for</span> <span class="token variable">$basearch</span>
+<span class="token assign-left variable">baseurl</span><span class="token operator">=</span>http://mirrors.aliyun.com/ceph/rpm-luminous/el7/<span class="token variable">$basearch</span>
+<span class="token assign-left variable">enabled</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token assign-left variable">gpgcheck</span><span class="token operator">=</span><span class="token number">0</span>
+<span class="token assign-left variable">type</span><span class="token operator">=</span>rpm-md
+<span class="token assign-left variable">gpgkey</span><span class="token operator">=</span>https://mirrors.aliyun.com/ceph/keys/release.asc
+<span class="token assign-left variable">priority</span><span class="token operator">=</span><span class="token number">1</span>
+
+<span class="token punctuation">[</span>Ceph-noarch<span class="token punctuation">]</span>
+<span class="token assign-left variable">name</span><span class="token operator">=</span>Ceph noarch packages
+<span class="token assign-left variable">baseurl</span><span class="token operator">=</span>http://mirrors.aliyun.com/ceph/rpm-luminous/el7/noarch
+<span class="token assign-left variable">enabled</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token assign-left variable">gpgcheck</span><span class="token operator">=</span><span class="token number">0</span>
+<span class="token assign-left variable">type</span><span class="token operator">=</span>rpm-md
+<span class="token assign-left variable">gpgkey</span><span class="token operator">=</span>https://mirrors.aliyun.com/ceph/keys/release.asc
+<span class="token assign-left variable">priority</span><span class="token operator">=</span><span class="token number">1</span>
+
+<span class="token punctuation">[</span>ceph-source<span class="token punctuation">]</span>
+<span class="token assign-left variable">name</span><span class="token operator">=</span>Ceph <span class="token builtin class-name">source</span> packages
+<span class="token assign-left variable">baseurl</span><span class="token operator">=</span>http://mirrors.aliyun.com/ceph/rpm-luminous/el7/SRPMS
+<span class="token assign-left variable">enabled</span><span class="token operator">=</span><span class="token number">1</span>
+<span class="token assign-left variable">gpgcheck</span><span class="token operator">=</span><span class="token number">0</span>
+<span class="token assign-left variable">type</span><span class="token operator">=</span>rpm-md
+<span class="token assign-left variable">gpgkey</span><span class="token operator">=</span>https://mirrors.aliyun.com/ceph/keys/release.asc
+<span class="token assign-left variable">priority</span><span class="token operator">=</span><span class="token number">1</span>
+
+yum clean all
+yum makecache
+yum  -y <span class="token function">install</span> python-setuptools
+
+
+<span class="token number">2</span>.创建ceph存储池用户it
+<span class="token function">useradd</span> it
+<span class="token function">passwd</span> it
+
+<span class="token number">3</span>.授权cephu用户sudo权限
+<span class="token function">vim</span> /etc/sudoers
+在root    <span class="token assign-left variable">ALL</span><span class="token operator">=</span><span class="token punctuation">(</span>ALL<span class="token punctuation">)</span>       ALL行下面新增一行
+it  <span class="token assign-left variable">ALL</span><span class="token operator">=</span><span class="token punctuation">(</span>ALL<span class="token punctuation">)</span>       NOPASSWD:ALL
+
+<span class="token number">4</span>.切换到cephu用户登录
+<span class="token function">su</span> - it
+
+<span class="token number">5</span>.安装ceph
+<span class="token function">sudo</span> yum <span class="token function">install</span> ceph ceph-radosgw  -y
+安装完成后用ceph --version 查看版本信息是否为12.2.13
+
+<span class="token number">6</span>.上传mgr节点授权信息到/etc/ceph/目录，并授权可读权限<span class="token punctuation">(</span>就是前文提到的那三个文件，client安装完是没有授权文件的，需要手动上传<span class="token punctuation">)</span>
+<span class="token builtin class-name">cd</span> /etc/ceph
+<span class="token function">sudo</span> <span class="token function">chmod</span> +r /etc/ceph/ceph.client.admin.keyring
+<span class="token function">ls</span>
+-rw-r--r-- <span class="token number">1</span> root root  <span class="token number">63</span> <span class="token number">12</span>月 <span class="token number">22</span> <span class="token number">21</span>:08 ceph.client.admin.keyring
+-rw-r--r-- <span class="token number">1</span> root root <span class="token number">221</span> <span class="token number">12</span>月 <span class="token number">23</span> <span class="token number">11</span>:30 ceph.conf
+-rw-r--r-- <span class="token number">1</span> root root  <span class="token number">92</span> <span class="token number">1</span>月  <span class="token number">31</span> <span class="token number">2020</span> rbdmap
+
+<span class="token number">7</span>.修改ceph.conf文件，解决映射镜像时出现问题
+<span class="token function">sudo</span> <span class="token function">vi</span> /etc/ceph/ceph.conf
+rbd_default_features <span class="token operator">=</span> <span class="token number">1</span>
+
+<span class="token number">8</span>.client节点创建块设备镜像：单位是M，这里创建4个G（根据存储池大小按需分配）
+<span class="token function">sudo</span> rbd create ceshi10 --size <span class="token number">40960</span>
+
+<span class="token number">9</span>.将client节点映射镜像到主机（ceph集群）
+<span class="token function">sudo</span> rbd map ceshi10 --name client.admin
+没有报错的话应该会提示/dev/rbd0
+
+<span class="token number">10</span>.将client节点格式化块设备
+<span class="token function">sudo</span> mkfs.xfs /dev/rbd/rbd/ceshi10
+
+<span class="token number">11</span>.挂载刚刚格式化完的块设备
+<span class="token function">sudo</span> <span class="token function">mkdir</span> /ceshi
+<span class="token function">sudo</span> <span class="token function">mount</span> /dev/rbd/rbd/ceshi10  /ceshi
+<span class="token builtin class-name">cd</span> /ceshi
+进入块设备测试一下看看能不能正常使用
+<span class="token function">sudo</span> <span class="token function">mkdir</span> <span class="token number">111</span>
+<span class="token function">ls</span>
+<span class="token number">111</span>
+ 
+说明：client端不建议直接使用root用户来操作！
+</code></pre>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

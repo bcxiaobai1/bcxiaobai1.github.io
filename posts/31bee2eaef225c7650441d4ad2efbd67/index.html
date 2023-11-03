@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Suricata6.0流表管理源码注释一：流表管理简介 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Suricata6.0流表管理源码注释一：流表管理简介</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p style="margin-left:21pt;text-align:center"><span style="color:#365f91"><strong>目录</strong></span></p> 
+<p style="margin-left:.0001pt"><span style="color:#0000ff"><u><a href="#_Toc92466805">1. 流管理内容简介... 1</a></u></span></p> 
+<p style="margin-left:.0001pt"><span style="color:#0000ff"><u><a href="#_Toc92466806">2. 流的新建... 1</a></u></span></p> 
+<p style="margin-left:.0001pt"><span style="color:#0000ff"><u><a href="#_Toc92466807">3. 流的老化... 2</a></u></span></p> 
+<p style="margin-left:.0001pt"><span style="color:#0000ff"><u><a href="#_Toc92466808">4. 流空闲数量的动态维护... 2</a></u></span></p> 
+<p style="margin-left:.0001pt"><span style="color:#0000ff"><u><a href="#_Toc92466809">5. 流存储关键数据结构... 2</a></u></span></p> 
+<p style="margin-left:.0001pt"><span style="color:#0000ff"><u><a href="#_Toc92466810">6. 流管理主要函数... 3</a></u></span></p> 
+<p style="margin-left:21pt"></p> 
+<p style="margin-left:21pt"></p> 
+<ol><li>
+<a name="_Toc92466805"></a><a name="_Ref92445191">流管理内容简介</a>
+</li></ol>
+<p style="margin-left:21pt">流管理包括流表的初始化，流的新建、查找、更新、检查老化、流的回收、空闲流数量的动态维护等。</p> 
+<ol><li><a name="_Toc92466806">流的新建</a></li></ol>
+<p style="margin-left:21pt">当一个网络数据包到达时，经过收包，解码产生了packet结构体指针p，这时进入下一个模块第一个工作就是为这个p查找其所属流flow，这个工作从函数FlowHandlePacket开始，不同的suricata版本对这个函数的调用位置不一样，但都是在解码后进行调用，从4.0开始在FlowWorker函数中调用，3.0及以前的版本都在解码模块的解码函数中调用比如在DecodeUDP，DecodeTCP等函数中调用。</p> 
+<p style="margin-left:21pt">FlowHandlePacket函数做了大部分流查找分配及状态设置更新的工作，有一部分更新状态的工作放在另外一个函数FlowUpdate，在如果没有找到则分配一个flow，如果找到则更新流状态</p> 
+<p style="margin-left:21pt">流的flow存放在全局flow哈希数组中：FlowBucket *flow_hash，所以操作bucket时需要对其上锁，每个bucket存放若干哈希值相同的flow结构体，哈希值就是五元组哈希后与数组大小的模，解码后为一个包获取flow时，先从全局变量flow_hash[hash%hash_size]数组里进行查找，存在则把flow放到链表头并进行状态更新操作，不存在则需要从空闲的flow池子里分配一个flow结构体。</p> 
+<p style="margin-left:21pt">分配flow两个方式，一个是从预先分配的全局flow池子里获取，如果没有可用的flow，则在配置的内存空间范围内直接从内存上分配flow，这个池子就称为空闲flow池子，它是个根据配置文件预先分配一定数量flow的内存池，需要的时候从里边取，不需要了则归还进去，取到flow后，设置相关成员数据，然后放入全局变量flow_hash中，该flow后续的packet都可以匹配到该flow结构体。</p> 
+<p style="margin-left:21pt">不同版本的全局flow池子有所区别，比如4.0和之前的版本都是FlowQueue flow_spare_q（带锁的flow链表）这样的全局变量（5.0左右版本没看过），直接用锁子从这个全局变量获取可用的flow结构体。</p> 
+<p style="margin-left:21pt">6.0版本也是用的全局变量，只不过flow不是组织成一个链表，而是先根据配置文件配置的flow个数进行预分配，把这些flow每100个flow组织成一个空闲的flow队列，再把每个包含100个flow的队列组成pool，就是通过static FlowSparePool *flow_spare_pool链接起来形成pool，它是个全局变量，由static SCMutex flow_spare_pool_m保护。</p> 
+<p style="margin-left:21pt">处理包的每个线程都有自己的空闲flow队列，分配flow时，从线程自己的flow队列（变量名字：spare_queue）里获取，如果没有可用flow，则从上边说的全局pool里取一个flow队列赋值给spare_queue，后续有包到来就从spare_queue里取flow使用，所以从全局pool获取的flow是一个flow队列（100个），一次获取一个队列的flow，只有100个flow用完了才需要锁一次全局pool获取一个flow队列，而不像4.0及之前版本一次获取一个flow每次都要锁，从这点看，减小了锁的粒度，如果流的数量比较多的话，在获取flow时可以提高不少性能。</p> 
+<ol><li><a name="_Toc92466807">流的老化</a></li></ol>
+<p style="margin-left:21pt">（1）根据流的状态设置流的超时时间，时间到了则老化之，回收flow到全局的flow_spare_pool中，哪个flow队列不够100，就放入哪个flow队列。</p> 
+<p style="margin-left:21pt">（2）如果预先分配的flow结构体不够用了，配置的flow内存也用完了，则设置进入紧急模式状态，一个是把流的超时时间设置为紧急超时时间，这个时间远远短于正常老化时间，二是流老化处理线程轮询间隔时间也会缩短，轮询间隔时间正常时667毫秒检查一次老化，紧急模式为250毫秒检查一次；另外，每个线程只老化自己负责的flowbucket上的flow，这个flowbucket的范围在FlowInitConfig初始化时设置，就是按照flowbucket的数量平均分配给每个老化线程即运行FlowManager函数的线程。</p> 
+<p style="margin-left:21pt">（3）进入紧急模式后，会不断检查可用flow的数量，如果这个数量达到预分配flow数量的一定的百分比，则退出紧急模式</p> 
+<ol><li><a name="_Toc92466808">流空闲数量的动态维护</a></li></ol>
+<p style="margin-left:21pt">空闲flow个数动态维护是在流老化线程的第1个线程中，就是在老化线程函数会检查自己是否第一个老化线程，是的话则做这项工作，检查空闲flow数量于预分配flow数量的之间的关系而采取的少则补多则释放的策略。</p> 
+<p style="margin-left:21pt">flow空闲数量少于预分配数量的90%时则进行补充，如果flow空闲数量多于预分配的flow数量的110%时则进行释放。</p> 
+<p style="margin-left:21pt">释放逻辑：多出来的flow数量x是flow队列（固定100个）数量的10倍及以上则释放x/10个flow，就是多出来的flow数量必须小于单个flow队列flow数量的10倍，比如单个flow队列固定flow数量为100，则由于从内存分配而多出来的flow数量必须小于1000（100*10），如果为1000则释放的数量为1000/10=100，如果为1100，则需要释放1100/10=110。</p> 
+<p style="margin-left:21pt">多出来的flow是因为预分配的flow使用完了，而且当前flow占用的总内存没有超过配置的内存字节数，于是flowalloc分配新flow，这样flow数量就会增多。</p> 
+<ol><li><a name="_Toc92466809">流存储关键数据结构</a></li></ol>
+<p style="margin-left:21pt">全局flow哈希数组中：FlowBucket *flow_hash，正则使用的流的结构体flow存放到这里</p> 
+<p style="margin-left:21pt"></p> 
+<p style="margin-left:21pt">存放空闲Flow队列的pool定义：</p> 
+<p style="margin-left:21pt">typedef struct FlowSparePool {<!-- --></p> 
+<p style="margin-left:21pt">FlowQueuePrivate queue;        //flow队列，就是个链表，由100个flow组成</p> 
+<p style="margin-left:21pt">     struct FlowSparePool *next; //池子链表，把多个flow队列组织成链表，线程自己的flow队列用完时，从这个pool里获取一个flow队列</p> 
+<p style="margin-left:21pt"> } FlowSparePool;</p> 
+<p style="margin-left:21pt"></p> 
+<p style="margin-left:21pt"> static uint32_t flow_spare_pool_flow_cnt = 0;    //空闲flow总个数，包括所有flow队列的flow</p> 
+<p style="margin-left:21pt"> static uint32_t flow_spare_pool_block_size = 100;//每个flow队列里空闲flow的个数</p> 
+<p style="margin-left:21pt"> static FlowSparePool *flow_spare_pool = NULL;  //全局链表头指针，存储可用的flow</p> 
+<p style="margin-left:21pt"> static SCMutex flow_spare_pool_m = SCMUTEX_INITIALIZER;//保护上边那位爷</p> 
+<ol><li><a name="_Toc92466810">流管理主要函数</a></li></ol>
+<p style="margin-left:0cm">流初始化函数：</p> 
+<table border="1" cellspacing="0"><tbody>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm;text-align:justify"><strong>入口函数</strong></p> </td>
+<td style="border-color:#000000;vertical-align:top;width:241pt"> <p style="margin-left:0cm"><strong>被直接调用函数</strong></p> </td>
+</tr>
+<tr>
+<td rowspan="3" style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm">FlowInitConfig</p> <p style="margin-left:0cm">(flow.c)</p> </td>
+<td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowQueueInit</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowSparePoolInit</p> </td></tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowInitFlowProto</p> </td></tr>
+<tr>
+<td rowspan="2" style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm">FlowSparePoolInit</p> <p style="margin-left:0cm">(flow-spare-pool.c)</p> </td>
+<td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowSpareGetPool</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowSparePoolUpdateBlock</p> </td></tr>
+</tbody></table>
+<p style="margin-left:0cm"></p> 
+<p style="margin-left:0cm">流查询建立主要函数：</p> 
+<table border="1" cellspacing="0"><tbody>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm;text-align:justify"><strong>入口函数</strong></p> </td>
+<td style="border-color:#000000;vertical-align:top;width:241pt"> <p style="margin-left:0cm"><strong>被直接调用函数</strong></p> </td>
+</tr>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm">FlowWorker (flow-worker.c)</p> </td>
+<td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowHandlePacket</p> </td>
+</tr>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm">FlowHandlePacket (flow.c)</p> </td>
+<td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowGetFlowFromHash</p> </td>
+</tr>
+<tr>
+<td rowspan="4" style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm">FlowGetFlowFromHash</p> <p style="margin-left:0cm">(flow-hash.c)</p> </td>
+<td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowGetNew</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">MoveToWorkQueue</p> </td></tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowInit</p> </td></tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowUpdateState</p> </td></tr>
+<tr>
+<td rowspan="5" style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm">FlowGetNew</p> <p style="margin-left:0cm">(flow-hash.c)</p> </td>
+<td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowQueuePrivateGetFromTop</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowSpareSync</p> </td></tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowTimeoutsEmergency</p> </td></tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowGetUsedFlow</p> </td></tr>
+<tr><td style="vertical-align:top;width:241pt"> <p style="margin-left:0cm">FlowAlloc</p> </td></tr>
+</tbody></table>
+<p style="margin-left:0cm"></p> 
+<p style="margin-left:0cm">流老化检查主要函数：</p> 
+<table border="1" cellspacing="0"><tbody>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:140.1pt"> <p style="margin-left:0cm"><strong>入口函数</strong></p> </td>
+<td style="border-color:#000000;vertical-align:top;width:286pt"> <p style="margin-left:0cm"><strong>被直接调用函数</strong></p> </td>
+</tr>
+<tr>
+<td rowspan="3" style="border-color:#000000;vertical-align:top;width:140.1pt"> <p style="margin-left:0cm">FlowManage</p> <p style="margin-left:0cm">(flow-manager.c)</p> </td>
+<td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowSpareGetPoolSize</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowSparePoolUpdate</p> </td></tr>
+<tr><td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowTimeoutHash</p> </td></tr>
+<tr>
+<td rowspan="3" style="border-color:#000000;vertical-align:top;width:140.1pt"> <p style="margin-left:0cm">FlowTimeoutHash</p> <p style="margin-left:0cm">(flow-manager.c)</p> </td>
+<td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowManagerHashRowTimeout</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowManagerHashRowClearEvictedList</p> </td></tr>
+<tr><td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">ProcessAsideQueue</p> </td></tr>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:140.1pt"> <p style="margin-left:0cm">FlowManagerHashRowClearEvictedList</p> <p style="margin-left:0cm">(flow-manager.c)</p> </td>
+<td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowQueuePrivateAppendFlow</p> </td>
+</tr>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:140.1pt"> <p style="margin-left:0cm">FlowManagerFlowTimeout</p> <p style="margin-left:0cm">(flow-manager.c)</p> </td>
+<td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowGetFlowTimeoutDirect</p> </td>
+</tr>
+<tr>
+<td rowspan="2" style="border-color:#000000;vertical-align:top;width:140.1pt"> <p style="margin-left:0cm">ProcessAsideQueue</p> <p style="margin-left:0cm">(flow-manager.c)</p> </td>
+<td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowForceReassemblyForFlow</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowQueuePrivateAppendFlow</p> </td></tr>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:140.1pt"> <p style="margin-left:0cm">FlowForceReassemblyForFlow</p> <p style="margin-left:0cm">(flow-timeout.c)</p> </td>
+<td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">TmThreadsInjectFlowById</p> </td>
+</tr>
+<tr>
+<td rowspan="2" style="border-color:#000000;vertical-align:top;width:140.1pt"> <p style="margin-left:0cm">TmThreadsInjectFlowById</p> <p style="margin-left:0cm">(tm-threads.c)</p> </td>
+<td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">FlowEnqueue</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:286pt"> <p style="margin-left:0cm">SCCondSignal</p> </td></tr>
+</tbody></table>
+<p style="margin-left:0cm"></p> 
+<p style="margin-left:0cm">流回收主要函数：</p> 
+<table border="1" cellspacing="0"><tbody>
+<tr>
+<td style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm"><strong>入口函数</strong></p> </td>
+<td style="border-color:#000000;vertical-align:top;width:250.6pt"> <p style="margin-left:0cm"><strong>被直接调用函数</strong></p> </td>
+</tr>
+<tr>
+<td rowspan="3" style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm">FlowRecycler</p> <p style="margin-left:0cm">(flow-manager.c)</p> </td>
+<td style="vertical-align:top;width:250.6pt"> <p style="margin-left:0cm">FlowQueueExtractPrivate</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:250.6pt"> <p style="margin-left:0cm">FlowQueuePrivateGetFromTop</p> </td></tr>
+<tr><td style="vertical-align:top;width:250.6pt"> <p style="margin-left:0cm">Recycler</p> </td></tr>
+<tr>
+<td rowspan="3" style="border-color:#000000;vertical-align:top;width:175.5pt"> <p style="margin-left:0cm">Recycler</p> <p style="margin-left:0cm">(flow-manager.c)</p> </td>
+<td style="vertical-align:top;width:250.6pt"> <p style="margin-left:0cm">OutputFlowLog</p> </td>
+</tr>
+<tr><td style="vertical-align:top;width:250.6pt"> <p style="margin-left:0cm">FlowClearMemory</p> </td></tr>
+<tr><td style="vertical-align:top;width:250.6pt"> <p style="margin-left:0cm">FlowSparePoolReturnFlow</p> </td></tr>
+</tbody></table>
+<p style="margin-left:21pt"></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

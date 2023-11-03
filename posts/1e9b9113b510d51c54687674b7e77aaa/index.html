@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>15_Elasticsearch 内部原理详细解析（下篇） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">15_Elasticsearch 内部原理详细解析（下篇）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <blockquote> 
+  <p>本文章收录于<a href="" title="【Elasticsearch 系列】">【Elasticsearch 系列】</a>，将详细的讲解 Elasticsearch 整个大体系，包括但不限于ELK讲解、ES调优、海量数据处理等</p> 
+ </blockquote> 
+ <p></p> 
+ <h1>一、什么是mapping</h1> 
+ <p>自动或手动为index中的type建立的一种数据结构和相关配置，简称为mapping。我们以下面的例子来说明什么是mapping。</p> 
+ <p>插入几条数据，让es自动为我们建立一个索引</p> 
+ <pre class="has"><code class="language-javascript">PUT /article/_doc/1
+{
+  "post_date": "2017-01-01",
+  "title": "my first article",
+  "content": "this is my fi  rst article in this website",
+  "author_id": 11400
+}</code></pre> 
+ <p>我们可以通过 GET article/_mapping 命令来查看es自动建立的mapping，从下图可以看出es会根据字段值的不同会给字段设置不同的值</p> 
+ <p style="text-align:center"><img alt="533b1573888e484a2e1f2344858a67e7.png" src="https://images2.imgbox.com/78/6b/iBtWTXu8_o.png"></p> 
+ <p>dynamic mapping，自动为我们建立index，以及对应的mapping，mapping中包含了每个field对应的数据类型，以及如何分词等</p> 
+ <p>当然我们也可以手动在创建数据之前，先创建index以及对应的mapping</p> 
+ <h1>二、精确匹配与全文搜索的对比分析</h1> 
+ <h2>1、精确匹配（exact value）</h2> 
+ <p>Elasticsearch中的数据可以大致分为两种类型：<strong>精准匹配及全文文本</strong>。</p> 
+ <p>精准匹配是确定的，正如它的名字一样。精准匹配“Foo”和“foo”就并不相同。2021 和2021-09-15也不相同。</p> 
+ <p>比如有个字段的值是2022-01-01，当通过精准匹配（exact value）搜索的时候，必须输入2022-01-01，才能搜索出来，如果你输入一个01，是搜索不出来的。</p> 
+ <h2>2、全文检索（full text）</h2> 
+ <p>全文文本从另一个角度来说是文本化的数据（常常以人类的语言书写），比如一篇推文（Twitter的文章）或邮件正文。</p> 
+ <p><span style="color:#fe2c24"><strong>全文文本（full text）就不是说单纯的只是匹配完整的一个值，而是可以对值进行拆分词语后（分词）进行匹配，也可以通过缩写、时态、大小写、同义词等进行匹配。</strong></span></p> 
+ <p>比如：</p> 
+ <p>（1）缩写 vs. 全程：cn vs china</p> 
+ <p>（2）格式转化：like liked likes</p> 
+ <p>（3）大小写：Tom vs tom</p> 
+ <p>（4）同义词：like vs love</p> 
+ <p>2017-01-01，2017 01 01，搜索2017，或者01，都可以搜索出来</p> 
+ <p>china，搜索cn，也可以将china搜索出来</p> 
+ <p>likes，搜索like，也可以将likes搜索出来</p> 
+ <p>Tom，搜索tom，也可以将Tom搜索出来</p> 
+ <p>like，搜索love，同义词，也可以将like搜索出来</p> 
+ <h1>三、倒排索引原理理解</h1> 
+ <p>假如我们有两个文档，他们分别是</p> 
+ <pre class="has"><code class="language-perl">doc1：I really liked my small dogs, and I think my mom also liked them.
+doc2：He never liked any dogs, so I hope that my mom will not expect me to liked him.</code></pre> 
+ <p>我们来进行模拟分词以及倒排索引的建立。建立倒排索引的时候，会执行一个操作（normalization）。也就是说对拆分出的各个单词进行相应的处理，以提升后面搜索的时候能够搜索到相关联的文档的概率。</p> 
+ <p>normalization简单来说就是在建立倒排索引时进行时态的转换，单复数的转换，同义词的转换，大小写的转换。比如：mom —&gt; mother，liked —&gt; like，small —&gt; little，dogs —&gt; dog。</p> 
+ <p>建立倒排索引，加入normalization</p> 
+ <p style="text-align:center"><img alt="b91d3d1250c12c52fb5c652f8493f7ab.png" src="https://images2.imgbox.com/c3/d4/mAduL6ds_o.png"></p> 
+ <p>‍</p> 
+ <p>当使用mother liked little dog搜索时，会先进行分词，然后进行normalization，就会把mother 转成 mom、like--&gt;like、little--&gt; little、dog--&gt;dog。</p> 
+ <p>搜索结果：doc1和doc2都会搜索出来</p> 
+ <h1>四、分词器的内部组成到底是什么，以及内置分词器的介绍</h1> 
+ <h2>1、什么是分词器</h2> 
+ <p>分词器是Elasticsearch中很重要的一个组件，用来将一段文本分析成一个一个的词，Elasticsearch再根据这些词去做倒排索引。主要功能是做切分词语和normalization（提升recall召回率）</p> 
+ <p>比如给你一段句子，然后将这段句子拆分成一个一个的单个的单词，同时对每个单词进行normalization（时态转换，单复数转换），分词器</p> 
+ <p>recall召回率：搜索的时候，增加能够搜索到的结果的数量</p> 
+ <h2>2、分词器内部主要组成部分</h2> 
+ <p><strong>分词器主要由三个部门组成：字符过滤器（character filter）、分词器（tokenizer）、token filter</strong></p> 
+ <ul>
+<li> <p><strong>character filter</strong>：在一段文本进行分词之前，先进行预处理。比如说最常见的就是，过滤html标签（&lt;span&gt;hello&lt;span&gt; 转换成 hello），&amp; 转换成 and（I&amp;you 转换成 I and you）；</p> </li>
+<li> <p><strong>tokenizer</strong>：进行分词处置。比如hello you and me 进行分词之后 hello, you, and, me</p> </li>
+<li> <p><strong>token filter</strong>：进行normalization相关的一些操作。比如dogs转换成dog、liked转换成like、Tom转换成tom、a/the/an这种无意义的停用词直接干掉、mother转换成mom、small转换成little。</p> </li>
+</ul>
+ <p><span style="color:#fe2c24"><strong>分词器非常重要，它能够将一段文本进行各种处理，最后处理好的结果才会拿去建立倒排索引。</strong></span></p> 
+ <h2>2、elasticsearch内置分词器介绍</h2> 
+ <ul>
+<li> <p><strong>standard analyzer</strong>：标准分词器，是Elasticsearch中默认的分词器，可以拆分英文单词，大写字母统一转换成小写。</p> </li>
+<li> <p><strong>simple analyzer</strong>：按非字母的字符分词，例如：数字、标点符号、特殊字符等，会去掉非字母的词，大写字母统一转换成小写。</p> </li>
+<li> <p><strong>whitespace analyzer</strong>：简单按照空格进行分词，相当于按照空格split了一下，大写字母不会转换成小写。</p> </li>
+<li> <p><strong>stop analyzer</strong>：会去掉无意义的词，例如：the、a、an 等，大写字母统一转换成小写。</p> </li>
+<li> <p><strong>keyword analyzer</strong>：不拆分，整个文本当作一个词。</p> </li>
+</ul>
+ <p><span style="color:#fe2c24"><strong>elasticsearch 中默认使用的分词器为standard。</strong></span></p> 
+ <p><strong>下面用一个例子来说明在各个分词器中的表现</strong></p> 
+ <p><strong>例子语句</strong>：Set the shape to semi-transparent by calling set_trans(5)</p> 
+ <p><strong>在各种分词器中的表现为</strong></p> 
+ <p><strong>standard analyzer</strong>：set, the, shape, to, semi, transparent, by, calling, set_trans, 5</p> 
+ <p><strong>simple analyzer</strong>：set, the, shape, to, semi, transparent, by, calling, set, trans</p> 
+ <p><strong>whitespace analyzer</strong>：Set, the, shape, to, semi-transparent, by, calling, set_trans(5)</p> 
+ <p><strong>language analyzer（特定的语言的分词器，比如说，英语分词器）</strong>：set, shape, semi, transpar, call, set_tran, 5</p> 
+ <h1>五、query string的分词器</h1> 
+ <h2>1、query string分词</h2> 
+ <p>query string必须和index建立时相同的analyzer进行分词，其对exact value和full text是区别对待的</p> 
+ <p>比如我们有一个document，其中有一个field，包含的value是：hello you and me，建立倒排索引。我们要搜索这个document对应的index，搜索文本是hell me，这个搜索文本就是query string。</p> 
+ <p><strong>query string默认情况下es会使用它对应的field建立倒排索引时相同的分词器去进行分词，进行分词和normalization。只有这样才能实现正确的搜索</strong></p> 
+ <p>比如我们建立倒排索引的时候，将dogs --&gt; dog，结果你搜索的时候，还是一个dogs，那不就搜索不到了吗？所以搜索的时候，那个dogs也必须变成dog才行。才能搜索到。</p> 
+ <p>不同类型的field，可能有的就是full text，有的就是exact value</p> 
+ <h1>六、mapping 元数据详细讲解</h1> 
+ <h2>1、什么是mapping</h2> 
+ <p><strong>mapping是定义文档及其包含的字段如何存储和索引的过程。</strong></p> 
+ <p>mapping就是index的元数据，每个index都有一个自己的mapping，决定了数据类型，建立倒排索引的行为，还有进行搜索的行为例如等。</p> 
+ <p>可以使用映射（mapping）来定义哪些字符串字段应被视为全文字段，哪些字段包含数字、日期或地理位置以及日期值的格式，还可以自定义规则来控制动态添加字段的映射。</p> 
+ <p>ES的mapping类似于静态语言中的数据类型：声明一个变量为int类型的变量，以后这个变量都只能存储int类型的数据。一个number类型的mapping字段只能存储number类型的数据。</p> 
+ <p>同语言的数据类型相比，mapping还有一些其他的含义，mapping不仅告诉ES一个field中是什么类型的值， 它还告诉ES如何索引数据以及数据是否能被搜索到。</p> 
+ <p><span style="color:#fe2c24"><strong>当你的查询没有返回相应的数据，你的mapping很有可能有问题。当你拿不准的时候，直接检查你的mapping。</strong></span></p> 
+ <p><strong>当我们向elasticsearch中插入一条数据时，es内部流程如下：</strong></p> 
+ <p>（1）往es里面直接插入数据，es会自动建立索引，同时建立type以及对应的mapping</p> 
+ <p>（2）mapping中就自动定义了每个field的数据类型</p> 
+ <p>（3）不同的数据类型（比如说text和date），可能有的是exact value，有的是full text</p> 
+ <p>（4）exact value，在建立倒排索引的时候，分词的时候，是将整个值一起作为一个关键词建立到倒排索引中的；full text，会经历各种各样的处理，分词，normaliztion（时态转换，同义词转换，大小写转换），才会建立到倒排索引中</p> 
+ <p>（5）同时呢，exact value和full text类型的field就决定了，在一个搜索过来的时候，对exact value field或者是full text field进行搜索的行为也是不一样的，会跟建立倒排索引的行为保持一致；比如说exact value搜索的时候，就是直接按照整个值进行匹配，full text query string，也会进行分词和normalization再去倒排索引中去搜索</p> 
+ <p>（6）可以用es的dynamic mapping，让其自动建立mapping，包括自动设置数据类型；也可以提前手动创建index和type的mapping，自己对各个field进行设置，包括数据类型，包括索引行为，包括分词器，等等</p> 
+ <h2>2、mapping的核心数据类型以及dynamic mapping</h2> 
+ <h3>（1）、核心的数据类型</h3> 
+ <p>mapping的核心数据类型分为：</p> 
+ <p><strong>简单类型</strong>：string、byte、short、integer、long、float、double、boolean、date；</p> 
+ <p><strong>对象类型</strong>：一种支持 JSON 分层性质的类型。例如 object或nested。</p> 
+ <p><strong>特殊类型</strong>：如geo_point, geo_shape, 或completion</p> 
+ <h3>（2）动态映射（dynamic mapping）</h3> 
+ <p>当我们插入一条数据时，如果这个索引在es中存在，es则会根据相应的规则帮我们动态映射到对应的mapping数据类型。</p> 
+ <p>比如true或false会映射成boolean类型，123会映射成long类型，123.45映射成double类型，2017-01-01映射成date类型，"hello world" 映射成string（text）类型</p> 
+ <h3>（3）查看索引的mapping结构</h3> 
+ <pre class="has"><code class="language-nginx">GET article/_mapping</code></pre> 
+ <p style="text-align:center"><img alt="d0241d39a9720ceda87967a22bf0b525.png" src="https://images2.imgbox.com/b7/72/xDNvFupE_o.png"></p> 
+ <h2>3、手动建立和修改mapping以及定制string类型数据是否分词</h2> 
+ <h3>（1）如何建立索引</h3> 
+ <p>允许分词：analyzed</p> 
+ <p>不允许分词：not_analyzed</p> 
+ <p>不能被索引和分词：no</p> 
+ <p><span style="color:#fe2c24"><strong>只能创建index时手动建立mapping，或者新增field mapping，但是不能update field mapping</strong></span></p> 
+ <p><span style="color:#fe2c24"><strong>创建索引</strong></span></p> 
+ <pre class="has"><code class="language-javascript">PUT /article
+{
+  "mappings": {
+      "properties": {
+        "author_id": {
+          "type": "long"
+        },
+        "title": {
+          "type": "text",
+          "analyzer": "english"
+        },
+        "content": {
+          "type": "text"
+        },
+        "post_date": {
+          "type": "date"
+        }
+      }
+  }
+}</code></pre> 
+ <h3>（2）对mapping的各种操作</h3> 
+ <p>但是不能够修改mapping，修改mapping时会报错：index [article/F4pFl4TdQASTSN2y-kkgEA] already exists</p> 
+ <p style="text-align:center"><img alt="197c0a9524d5346377ed72d2e4f0367d.png" src="https://images2.imgbox.com/da/92/VQsY5TEq_o.png"></p> 
+ <p><strong>但是可以新增字段，然后设置对应的数据类型</strong></p> 
+ <pre class="has"><code class="language-bash">#新增mapping字段映射
+PUT /article/_mapping
+{
+  "properties": {
+    "createName": {
+      "type": "keyword"
+    }
+  }
+}</code></pre> 
+ <p><strong>查看索引中所有字段的mapping映射</strong></p> 
+ <pre class="has"><code class="language-nginx">GET /article/_mapping</code></pre> 
+ <p style="text-align:center"><img alt="0ff0ae8faef74a0aa50ba0ad65c14077.png" src="https://images2.imgbox.com/f4/df/T2L3Tqay_o.png"></p> 
+ <p><strong>查看索引单个字段的mapping映射</strong></p> 
+ <pre class="has"><code class="language-nginx">GET /article/_mapping/field/createName</code></pre> 
+ <p style="text-align:center"><img alt="bc51811a4617b403a04b1df6b9bc9340.png" src="https://images2.imgbox.com/d5/88/1qptlq1A_o.png"></p> 
+ <h3>（3）mapping复杂数据类型以及object类型</h3> 
+ <p><strong>a、多值字段</strong>：multivalue field</p> 
+ <p>{ "tags": [ "tag1", "tag2" ]}</p> 
+ <p>建立索引时与string是一样的，数据类型不能混</p> 
+ <p><strong>b、空字段</strong>：empty field</p> 
+ <p>null，[]，[null]</p> 
+ <p><strong>c、对象字段</strong>：object field</p> 
+ <p>比如如下index中，address就是个对象字段（object类型）</p> 
+ <pre class="has"><code class="language-javascript">PUT /company/employee/1
+{
+  "address": {
+    "country": "china",
+    "province": "guangdong",
+    "city": "guangzhou"
+  },
+  "name": "jack",
+  "age": 27,
+  "join_date": "2017-01-01"
+}</code></pre> 
+ <p style="text-align:center">&lt; END &gt;</p> 
+ <blockquote> 
+  <p>本文章收录于<a href="" title="【Elasticsearch 系列】">【Elasticsearch 系列】</a>，将详细的讲解 Elasticsearch 整个大体系，包括但不限于ELK讲解、ES调优、海量数据处理等</p> 
+ </blockquote> 
+</div>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

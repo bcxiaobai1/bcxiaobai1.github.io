@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Redis的IO多路复用和多线程特性会破坏分布式锁的原子性吗？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis的IO多路复用和多线程特性会破坏分布式锁的原子性吗？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <blockquote> 
+ <p>文章收录在我的 GitHub 仓库，欢迎Star/fork：<br> <a href="https://github.com/Wasabi1234/Java-Interview-Tutorial">Java-Interview-Tutorial</a></p> 
+</blockquote> 
+<h1>
+<a id="1__3"></a>1 为什么使用分布式锁？</h1> 
+<p>当有多个客户端并发访问某个共享资源时，比如要修改DB某条记录，为避免记录修改冲突，可将所有客户端从Redis获取分布式锁，拿到锁的客户端才能操作共享资源。</p> 
+<p>分布式锁实现的关键就是保证加锁、解锁都是原子操作，才能保证多个客户端访问时锁的正确性。而Redis能通过事件驱动框架同时捕获多个客户端的可读事件（命令请求）。在Redis 6.x，还会有多个I/O线程并发读取或写回数据。</p> 
+<p>那事到如今，分布式锁的原子性，还能被保证吗？</p> 
+<p>那就得研究一条命令在Redis Server的执行过程，同时看看有I/O多路复用和多I/O线程情况下，分布式锁的原子性是否会被影响。</p> 
+<h1>
+<a id="2___13"></a>2 实现分布式锁</h1> 
+<p>分布式锁的<strong>加锁</strong>操作使用 Redis的SET命令，其提供如下可选参数：</p> 
+<ol>
+<li> <p>NX</p> 
+  <ul>
+<li>当操作的K不存在时，Redis会直接创建</li>
+<li>当操作的K已存在，则返回NULL，Redis对K也不会做任何修改</li>
+</ul> </li>
+<li> <p>EX：设置K的过期时间</p> </li>
+</ol> 
+<p>可让客户端发送如下命令执行加锁：</p> 
+<ul>
+<li>lockKey，锁的名称</li>
+<li>uid，客户端用于唯一标记自己的ID（优化后的雪花算法）</li>
+<li>expireTime，该K所代表的锁的过期时间，当这过期时间到达后，该K会被删除，相当于释放锁，这就避免锁一直无法释放问题（当客户端所在机器宕机时）。</li>
+</ul> 
+<pre><code class="prism language-c">SET lockKey uid EX expireTime NX
+</code></pre> 
+<h2>
+<a id="_33"></a>加锁</h2> 
+<p>而若还没客户端创建过锁，假设客户端A发送了这个SET命令给Redis：</p> 
+<pre><code class="prism language-c">SET stockLock <span class="token number">1033</span> EX <span class="token number">30</span> NX
+</code></pre> 
+<p>Redis就会创建对应K=stockLock，V=客户端的ID 1033。此时，假设另一客户端B也发了SET，要把K=stockLock对应的V改为客户端B的ID 2033，即加锁。</p> 
+<pre><code>SET stockLock 2033 EX 30 NX
+</code></pre> 
+<p>由于NX参数，若stockLock的K已存在，客户端B就无法对其进行修改，即无法获得锁，这就实现了加锁效果。</p> 
+<h2>
+<a id="_49"></a>解锁</h2> 
+<p>使用<strong>Lua脚本</strong>完成，会以EVAL命令形式在Redis Server执行。客户端会使用GET命令读取锁对应K的V，并判断V是否等于客户端自身ID：</p> 
+<ul>
+<li> <p>若相等，表明当前客户端正拿着锁</p> <p>此时可执行DEL命令删除K，即释放锁</p> </li>
+<li> <p>若value不等于客户端自身ID</p> <p>则该脚本会直接返回。</p> </li>
+</ul> 
+<pre><code class="prism language-lua"><span class="token keyword">if</span> redis<span class="token punctuation">.</span><span class="token function">call</span><span class="token punctuation">(</span><span class="token string">"get"</span><span class="token punctuation">,</span>lockKey<span class="token punctuation">)</span> <span class="token operator">==</span> uid <span class="token keyword">then</span>
+   <span class="token keyword">return</span> redis<span class="token punctuation">.</span><span class="token function">call</span><span class="token punctuation">(</span><span class="token string">"del"</span><span class="token punctuation">,</span>lockKey<span class="token punctuation">)</span>
+<span class="token keyword">else</span>
+   <span class="token keyword">return</span> <span class="token number">0</span>
+<span class="token keyword">end</span>
+</code></pre> 
+<p>这样客户端就不会误删除别的客户端获得的锁，保证了锁的安全性。</p> 
+<p>无论是加锁的SET命令，还是解锁的Lua脚本和EVAL命令，在I/O多路复用下会被同时执行吗？或者当使用多I/O线程后，会被多个线程同时执行吗？即I/O多路复用引入的多个并发客户端及多I/O线程是否会破坏命令的原子性。</p> 
+<p>这就和Redis中命令的执行过程有关。</p> 
+<h1>
+<a id="3_Redis_75"></a>3 一条命令在Redis是如何完成执行的？</h1> 
+<p>Redis Server一旦和某一客户端建立连接后，就会在事件驱动框架中注册可读事件，对应客户端的命令请求。整个命令处理的过程可分为如下阶段：</p> 
+<ul>
+<li>命令解析，对应processInputBufferAndReplicate</li>
+<li>命令执行，对应processCommand</li>
+<li>结果返回，对应addReply</li>
+</ul> 
+<h2>
+<a id="31_readQueryFromClient_83"></a>3.1 命令读取阶段：readQueryFromClient函数</h2> 
+<p>会从客户端连接的socket中，读取最大为readlen长度的数据，readlen大小为宏定义PROTO_IOBUF_LEN，默认16KB。</p> 
+<p><img src="https://images2.imgbox.com/83/06/pPLN83Ri_o.png" alt=""></p> 
+<p><img src="https://images2.imgbox.com/99/64/fbtQEEfA_o.png" alt=""></p> 
+<p>接着根据读取数据的情况，进行异常处理，如：</p> 
+<ul>
+<li> <p>数据读取失败</p> </li>
+<li> <p>或客户端连接关闭等</p> </li>
+</ul> 
+<p>若当前客户端是主从复制中的主节点，readQueryFromClient会把读取的数据，追加到用于主从节点命令同步的缓冲区中。</p> 
+<p>最后，调用processInputBuffer，进入命令解析阶段。</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">readQueryFromClient</span><span class="token punctuation">(</span>aeEventLoop <span class="token operator">*</span>el<span class="token punctuation">,</span> <span class="token keyword">int</span> fd<span class="token punctuation">,</span> <span class="token keyword">void</span> <span class="token operator">*</span>privdata<span class="token punctuation">,</span> <span class="token keyword">int</span> mask<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+   <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+   readlen <span class="token operator">=</span> PROTO_IOBUF_LEN<span class="token punctuation">;</span>  <span class="token comment">//从客户端socket中读取的数据长度，默认为16KB</span>
+   <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+   c<span class="token operator">-&gt;</span>querybuf <span class="token operator">=</span> <span class="token function">sdsMakeRoomFor</span><span class="token punctuation">(</span>c<span class="token operator">-&gt;</span>querybuf<span class="token punctuation">,</span> readlen<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//给缓冲区分配空间</span>
+   nread <span class="token operator">=</span> <span class="token function">read</span><span class="token punctuation">(</span>fd<span class="token punctuation">,</span> c<span class="token operator">-&gt;</span>querybuf<span class="token operator">+</span>qblen<span class="token punctuation">,</span> readlen<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//调用read从描述符为fd的客户端socket中读取数据</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token function">processInputBufferAndReplicate</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//调用processInputBufferAndReplicate进一步处理读取内容</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>该函数的基本流程：</p> 
+<p><img src="https://images2.imgbox.com/3d/81/kBH337An_o.png" alt=""></p> 
+<h2>
+<a id="32_processInputBuffer_117"></a>3.2 命令解析：processInputBuffer函数</h2> 
+<p>根据当前客户端是否有CLIENT_MASTER标记，执行如下分支：</p> 
+<ul>
+<li> <p>Case1</p> <p>对应<strong>客户端无CLIENT_MASTER标记</strong>，即当前客户端不属于主从复制中的Master。那processInputBufferAndReplicate函数会直接调用processInputBuffer（在networking.c文件中）函数，对客户端输入缓冲区中的命令和参数进行解析。所以在这里，实际执行命令解析的函数就是processInputBuffer函数。我们一会儿来具体看下这个函数。</p> </li>
+<li> <p>Case2</p> <p>对应<strong>客户端有CLIENT_MASTER标记</strong>，即当前客户端属于主从复制中的Master。processInputBufferAndReplicate除了会调用processInputBuffer函数，解析客户端命令，还会调用replicationFeedSlavesFromMasterStream函数，将主节点接收到的命令同步给从节点。</p> </li>
+</ul> 
+<p><img src="https://images2.imgbox.com/9e/b5/60ACV8Kl_o.png" alt=""></p> 
+<p>最终<strong>命令解析实际是在processInputBuffer执行的</strong>。</p> 
+<p>首先，processInputBuffer函数会执行一个while循环，不断地从客户端的输入缓冲区中读取数据。然后，它会<strong>判断读取到的命令格式，是否以“*”开头</strong>。</p> 
+<ul>
+<li>若命令以 <code>*</code>开头，表明该命令是 PROTO_REQ_MULTIBULK 类型的请求，即符合RESP协议（Redis客户端与服务器端的标准通信协议）的请求。processInputBuffer会进一步调用processMultibulkBuffer解析读取到的命令</li>
+<li>不是以<code>*</code>开头，说明该命令是PROTO_REQ_INLINE类型的请求，并非RESP协议请求。这类命令也被称为<strong>管道命令</strong>，命令和命令间用换行符<code>rn</code>分隔的。如使用Telnet发给Redis的命令就属该类型命令。此时，processInputBuffer会调用processInlineBuffer解析命令。</li>
+</ul> 
+<p><img src="https://images2.imgbox.com/12/71/QnQ9xfgi_o.png" alt=""></p> 
+<p>当命令解析完成后，processInputBuffer就会调用processCommand，开始进入命令处理的第三个阶段，也就是命令执行阶段。</p> 
+<p>processInputBuffer函数的基本执行流程：</p> 
+<p><img src="https://images2.imgbox.com/ce/6a/hgIAGn2m_o.jpg" alt=""></p> 
+<p>好，那么下面，我们接着来看第三个阶段，也就是命令执行阶段的processCommand函数的基本处理流程。</p> 
+<h2>
+<a id="33_processCommand_148"></a>3.3 命令执行：processCommand</h2> 
+<p>实现在server.c，实际执行命令前的主要逻辑：</p> 
+<ol>
+<li> <p>processCommand调用moduleCallCommandFilters，将Redis命令替换成module想替换的命令</p> </li>
+<li> <p>processCommand判断当前命令是否为quit命令并做相应处理</p> <p><img src="https://images2.imgbox.com/56/b5/iX7eHwf3_o.png" alt=""></p> </li>
+<li> <p>processCommand调用lookupCommand，在全局变量server的commands成员变量中查找相关命令<img src="https://images2.imgbox.com/b3/17/PCIHHSNm_o.png" alt=""></p> </li>
+</ol> 
+<p>全局变量server的<strong>commands成员变量是个哈希表</strong>，定义在redisServer结构体：<img src="https://images2.imgbox.com/66/ba/Mj0N0PbG_o.png" alt=""></p> 
+<p>commands成员变量的初始化是在initServerConfig，调用dictCreate完成哈希表创建，再调用populateCommandTable将Redis提供的命令名称和对应的实现函数，插入哈希表。<img src="https://images2.imgbox.com/f7/0c/aJNh56b7_o.png" alt=""></p> 
+<p>而这其中的populateCommandTable使用了redisCommand结构体数组redisCommandTable。</p> 
+<p><strong>redisCommandTable数组</strong>是在server.c文件中定义的，它的每一个元素是一个redisCommand结构体类型的记录，对应了Redis实现的一条命令。也就是说，redisCommand结构体中就记录了当前命令所对应的实现函数是什么。</p> 
+<p>如下代码展示GET、SET等命令信息，实现函数分别是getCommand，setCommand：<img src="https://images2.imgbox.com/04/97/iW2xmiZ7_o.png" alt=""></p> 
+<p>所以lookupCommand会根据解析的命令名称，在commands对应的哈希表中查找相应命令。</p> 
+<p>那么，一旦查到对应命令后，processCommand函数就会进行多种检查，比如命令的参数是否有效、发送命令的用户是否进行过验证、当前内存的使用情况，等等。这部分的处理逻辑比较多，你可以进一步阅读processCommand函数来了解下。</p> 
+<p>这样，等到processCommand对命令做完各种检查后，就开始执行命令，会判断当前客户端是否有CLIENT_MULTI标记：</p> 
+<ul>
+<li> <p>若有，说明要处理Redis事务相关命令</p> <p>就要按事务要求，调用queueMultiCommand：将命令入队保存，等待后续再一把梭处理。</p> </li>
+<li> <p>若无，无关事务特性</p> <p>processCommand调用call：实际执行命令。call函数执行命令是通过调用命令本身，即redisCommand结构体中定义的函数指针完成。每个redisCommand结构体中都定义了其对应实现函数，在redisCommandTable数组可查到。</p> </li>
+</ul> 
+<p>分布式锁的加锁操作就是使用SET命令实现的，所以来看SET命令为例，来看一个命令实际执行过程。</p> 
+<p>SET命令对应实现函数<strong>setCommand</strong>：首先会判断命令参数，如是否带有NX、EX、XX、PX等可选项，若有，就会记录这些标记。</p> 
+<p>然后，setCommand会调用setGenericCommand：根据setCommand记录的命令参数标记，进行相应处理。如命令参数中有NX，则setGenericCommand会调用lookupKeyWrite，查找要执行SET命令的key是否已存在。</p> 
+<p>若K已存在，则setGenericCommand会调用addReply，返回NULL，正符合分布式锁的语义。</p> 
+<p><img src="https://images2.imgbox.com/28/4c/tzVfiJcj_o.png" alt=""></p> 
+<p>若SET命令可正常执行，即：</p> 
+<ul>
+<li> <p>命令带NX选项但K并不存在</p> </li>
+<li> <p>或带有XX选项但K已存在</p> </li>
+</ul> 
+<p>这样setGenericCommand就会调用setKey完成KV对的实际插入：</p> 
+<pre><code>setKey(c-&gt;db,key,val);
+</code></pre> 
+<p>然后，若命令设置了TTL，setGenericCommand还会调用setExpire函数设置过期时间。最后，setGenericCommand函数会<strong>调用addReply函数，将结果返回给客户端</strong>，如下所示：</p> 
+<pre><code>addReply(c, ok_reply ? ok_reply : shared.ok);
+</code></pre> 
+<p>SET命令执行流程：</p> 
+<p><img src="https://images2.imgbox.com/8d/23/PUn44iN0_o.png" alt=""></p> 
+<p>无论：</p> 
+<ul>
+<li>在命令执行过程中，发现不符合命令的执行条件</li>
+<li>或是命令能成功执行</li>
+</ul> 
+<p>addReply函数都会被调用以返回结果。所以，这就进入命令处理过程的最后一个阶段：结果返回阶段。</p> 
+<h2>
+<a id="34_addReply_223"></a>3.4 结果返回阶段：addReply</h2> 
+<p>调用prepareClientToWrite，并在prepareClientToWrite中调用clientInstallWriteHandler，将待写回客户端加入到全局变量server的clients_pending_write列表。</p> 
+<p>然后，addReply会调用_addReplyToBuffer等函数，将要返回的结果添加到客户端的输出缓冲区。</p> 
+<p>至此，这就是一条命令如何从读取，经过解析、执行等步骤，最终将结果返给客户端，该过程以及涉及的主要函数：</p> 
+<p><img src="https://images2.imgbox.com/99/d9/1rd1mh7t_o.png" alt=""></p> 
+<p>若在前面命令处理过程中，都由I/O主线程处理，则命令执行的原子性肯定能得到保证，分布式锁的原子性也相应得到保证。</p> 
+<p>但若这个处理过程配合上了I/O多路复用机制和多IO线程机制，那这俩机制是在这个过程的什么阶段发挥作用的？会不会影响命令执行的原子性？</p> 
+<p>所以现在就要明确，这俩机制到底参与了什么流程，才能知道是否对原子性保证有副作用。</p> 
+<h1>
+<a id="4_IO_241"></a>4 I/O多路复用会影响对命令原子性吗？</h1> 
+<p><strong>I/O多路复用机制是在readQueryFromClient执行前发挥作用的</strong>。在事件驱动框架中调用aeApiPoll函数，获取一批已就绪的socket描述符。然后执行一个循环，针对每个就绪描述符上的读事件，触发执行readQueryFromClient函数。</p> 
+<p>如此，即使I/O多路复用机制同时获取了多个就绪的socket描述符，但实际处理时，Redis主线程仍是针对每个事件逐一调用回调函数进行处理。且针对写事件，I/O多路复用机制也是针对每个事件逐一处理。</p> 
+<p>I/O多路复用机制通过aeApiPoll获取一批事件，然后逐一处理：</p> 
+<p><img src="https://images2.imgbox.com/85/9b/981x70vu_o.png" alt=""></p> 
+<p>这表明，即使使用I/O多路复用，命令的整个处理过程仍可由I/O主线程完成，也就仍保证命令执行的原子性。如下就是I/O多路复用机制和命令处理过程的关系：</p> 
+<p><img src="https://images2.imgbox.com/29/d7/07KlgRFM_o.png" alt=""></p> 
+<h1>
+<a id="5_IO_255"></a>5 多I/O线程会破坏命令原子性吗？</h1> 
+<p>多I/O线程可执行读操作或写操作。对读操作，readQueryFromClient在执行过程中，会调用 postponeClientRead 将待读客户端加入 clients_pending_read 等待列表。</p> 
+<p>然后，待读客户端会被分配给多I/O线程执行，每个IO线程执行的函数就是 readQueryFromClient，它会读取命令=》调用processInputBuffer解析命令，该过程和Redis 6.0前代码一致。</p> 
+<p>而Redis 6.0 processInputBuffer新增了个判断条件：若客户端有CLIENT_PENDING_READ标识，则解析完命令后，processInputBuffer只会把客户端标识改为CLIENT_PENDING_COMMAND，就退出命令解析的循环流程。</p> 
+<p>此时，processInputBuffer只是解析了第一个命令，不会实际调用processCommand执行命令：</p> 
+<p><img src="https://images2.imgbox.com/b1/e8/7eggpku8_o.png" alt=""></p> 
+<p>这样，等所有I/O线程都解析完了第一个命令后，I/O主线程中执行的handleClientsWithPendingReadsUsingThreads会再调用processCommandAndResetClient执行命令及调用processInputBuffer解析剩余命令。</p> 
+<p>所以，<strong>即使使用多I/O线程，其实命令执行阶段也是由主I/O线程完成，所有命令执行的原子性仍得到保证</strong>，即不会破坏分布式锁的原子性。</p> 
+<h2>
+<a id="_271"></a>写回数据流程</h2> 
+<p>该阶段，addReply是将客户端写回操作推迟执行的，而此时Redis命令已完成执行，所以，即使有多个I/O线程在同时将客户端数据写回，也只是把结果返给客户端，并不影响命令在Redis Server的执行结果。因此，即使用了多I/O线程写回，Redis同样不会破坏命令执行的原子性。</p> 
+<p>使用多I/O线程机制后，命令处理过程各个阶段是由什么线程执行：</p> 
+<p><img src="https://images2.imgbox.com/e4/9b/RbUZE4vO_o.png" alt=""></p> 
+<h1>
+<a id="6__279"></a>6 总结</h1> 
+<p>加锁和解锁操作分别可以使用SET命令和Lua脚本与EVAL命令来完成。那么，分布式锁的原子性保证，就主要依赖SET和EVAL命令在Redis server中执行时的原子性保证了。</p> 
+<p>Redis中命令处理的整个过程在Redis 6.0版本前都是由主IO线程来执行完成的。虽然Redis使用了IO多路复用机制，但是该机制只是一次性获取多个就绪的socket描述符，对应了多个发送命令请求的客户端。而Redis在主IO线程中，还是逐一来处理每个客户端上的命令的，所以命令执行的原子性依然可以得到保证。</p> 
+<p>使用Redis 6.0版本后，命令处理过程中的读取、解析和结果写回，就由多IO线程处理。不过多IO线程只是完成解析第一个读到的命令，命令实际执行还是由主IO线程处理。当多IO线程在并发写回结果时，命令就已执行完，不存在多IO线程冲突问题。所以，使用了多IO线程后，命令执行原子性仍可得到保证。</p> 
+<p><strong>多IO线程实际并不会加快命令的执行</strong>，只会将读取解析命令并行化执行，写回结果并行化执行，且读取解析命令还是针对收到的第一条命令。这一设计考虑还是由于网络IO需加速处理。如命令执行本身成为Redis运行时瓶颈，其实可考虑使用Redis切片集群提升处理效率。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

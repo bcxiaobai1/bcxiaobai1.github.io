@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>RocketMQ：NameServer路由管理源码分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">RocketMQ：NameServer路由管理源码分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-dracula">
+                    
+                        
+                    
+                    <p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul><li>
+<ul>
+<li><a href="#NameServer_2">NameServer路由管理</a></li>
+<li>
+<ul>
+<li><a href="#1_4">1.前言</a></li>
+<li><a href="#2_8">2.路由元信息</a></li>
+<li><a href="#3_38">3.路由注册</a></li>
+<li>
+<ul>
+<li><a href="#31Broker_51">3.1Broker路由注册</a></li>
+<li><a href="#32NameServer_191">3.2NameServer处理路由注册</a></li>
+<li><a href="#33_382">3.3路由删除</a></li>
+<li>
+<ul>
+<li><a href="#331Broker_393">3.3.1Broker异常关闭</a></li>
+<li><a href="#332Broker_581">3.3.2Broker正常关闭</a></li>
+</ul>
+     </li>
+<li><a href="#34_750">3.4路由发现</a></li>
+<li><a href="#35_864">3.5总结</a></li>
+</ul>
+   </li>
+</ul>
+  </li>
+</ul>
+ </li></ul>
+</div>
+<p></p> 
+<h2>
+<a id="NameServer_2"></a>NameServer路由管理</h2> 
+<h3>
+<a id="1_4"></a>1.前言</h3> 
+<p>NameServer主要作用是为消息消费者和消息生产者提供关于主题Topic的路由信息，那么NameServer需要存储路由的基本信息，还要管理Broker节点，包括路由注册、路由删除等。</p> 
+<h3>
+<a id="2_8"></a>2.路由元信息</h3> 
+<p>路由元信息主要由<code>RouteInfoManager</code>来进行管理，这个类在<a href="https://blog.csdn.net/TaylorSwiftiiln/article/details/121297786">上一篇文章</a>中已经介绍过，这里再做一下简单的介绍。</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">static</span> <span class="token keyword">long</span> BROKER_CHANNEL_EXPIRED_TIME <span class="token operator">=</span> <span class="token number">1000</span> <span class="token operator">*</span> <span class="token number">60</span> <span class="token operator">*</span> <span class="token number">2</span><span class="token punctuation">;</span>	
+<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">ReadWriteLock</span> lock <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ReentrantReadWriteLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">HashMap</span><span class="token operator">&lt;</span><span class="token class-name">String</span><span class="token comment">/* topic */</span><span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span></span><span class="token operator">&gt;</span> topicQueueTable<span class="token punctuation">;</span>
+<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">HashMap</span><span class="token operator">&lt;</span><span class="token class-name">String</span><span class="token comment">/* brokerName */</span><span class="token punctuation">,</span> <span class="token class-name">BrokerData</span><span class="token operator">&gt;</span> brokerAddrTable<span class="token punctuation">;</span>
+<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">HashMap</span><span class="token operator">&lt;</span><span class="token class-name">String</span><span class="token comment">/* clusterName */</span><span class="token punctuation">,</span> <span class="token class-name">Set</span><span class="token operator">&lt;</span><span class="token class-name">String</span><span class="token comment">/* brokerName */</span><span class="token operator">&gt;&gt;</span> clusterAddrTable<span class="token punctuation">;</span>
+<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">HashMap</span><span class="token operator">&lt;</span><span class="token class-name">String</span><span class="token comment">/* brokerAddr */</span><span class="token punctuation">,</span> <span class="token class-name">BrokerLiveInfo</span><span class="token operator">&gt;</span> brokerLiveTable<span class="token punctuation">;</span>
+<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">HashMap</span><span class="token operator">&lt;</span><span class="token class-name">String</span><span class="token comment">/* brokerAddr */</span><span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span><span class="token comment">/* Filter Server */</span><span class="token operator">&gt;</span> filterServerTable<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>BROKER_CHANNEL_EXPIRED_TIME</strong>：NameServer与Broker空闲连接时长，在<code>2min</code>NameServer之内没有收到Broker的心跳包，则NameServer会关闭与该Broker的连接并删除Broker的路由信息。</p> 
+<p><strong>lock</strong>：读写锁，用来保护以下用于存储关键信息的非线程安全容器HashMap。</p> 
+<p><strong>topicQueueTable</strong>：Topic消息队列路由信息，消息发送时根据路由表进行负载均衡</p> 
+<p><strong>brokerAddrTable</strong>：Broker基础信息，包括brokerName、所属集群名称、主备Broker地址</p> 
+<p><strong>clusterAddrTable</strong>：Broker集群信息，存储集群中所有Broker名称</p> 
+<p><strong>brokerLiveTable</strong>：Broker状态信息，NameServer每次收到心跳包会对该表进行信息维护。</p> 
+<p><strong>filterServerTable</strong>：Broker上的FilterServer列表，用于类模式消息过滤。</p> 
+<blockquote> 
+ <p>RocketMQ基于定于发布机制，一个Topic拥有多个消息队列，一个Broker为每一个主题创建4个读队列和4个写队列。多个Broker组成一个集群，集群由相同的多台Broker组成Master-Slave架构，brokerId为0代表Master，大于0为Slave。BrokerLiveInfo中的lastUpdateTimestamp存储上次收到Broker心跳包的时间。</p> 
+</blockquote> 
+<h3>
+<a id="3_38"></a>3.路由注册</h3> 
+<p>以下是路由注册的时序图：</p> 
+<p><img src="https://images2.imgbox.com/4b/50/IrufXAVI_o.png" alt="在这里插入图片描述"></p> 
+<p>RocketMQ的路由注册功能是通过Broker与NameServer的心跳机制实现的。Broker启动时向NameServer集群发送心跳信息，每隔<code>30s</code>向集群所有NameServer发送心跳包，NameServer接收到之后会对brokerLiveTable中的BrokerLiveInfo的lastUpdateTimeStamp属性值进行更新。此外NameServer会每隔<code>10s</code>扫描brokerLiveTable，如果检测到有Broker连续<code>120s</code>没有发送心跳包，则NameServer将移除Broker的路由信息同时关闭Socket连接。</p> 
+<hr> 
+<blockquote> 
+ <p>源码</p> 
+</blockquote> 
+<h4>
+<a id="31Broker_51"></a>3.1Broker路由注册</h4> 
+<p><strong>BrokerController#start</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//...进行检查</span>
+
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>messageStoreConfig<span class="token punctuation">.</span><span class="token function">isEnableDLegerCommitLog</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">startProcessorByHa</span><span class="token punctuation">(</span>messageStoreConfig<span class="token punctuation">.</span><span class="token function">getBrokerRole</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">handleSlaveSynchronize</span><span class="token punctuation">(</span>messageStoreConfig<span class="token punctuation">.</span><span class="token function">getBrokerRole</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//注册Broker信息</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">registerBrokerAll</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//创建定时任务线程池</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>scheduledExecutorService<span class="token punctuation">.</span><span class="token function">scheduleAtFixedRate</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Runnable</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token annotation punctuation">@Override</span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//每隔三十秒注册Broker信息</span>
+                <span class="token class-name">BrokerController</span><span class="token punctuation">.</span><span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">registerBrokerAll</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">,</span> brokerConfig<span class="token punctuation">.</span><span class="token function">isForceRegister</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"registerBrokerAll Exception"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token number">1000</span> <span class="token operator">*</span> <span class="token number">10</span><span class="token punctuation">,</span> <span class="token class-name">Math</span><span class="token punctuation">.</span><span class="token function">max</span><span class="token punctuation">(</span><span class="token number">10000</span><span class="token punctuation">,</span> <span class="token class-name">Math</span><span class="token punctuation">.</span><span class="token function">min</span><span class="token punctuation">(</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getRegisterNameServerPeriod</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">60000</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span>MILLISECONDS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>brokerStatsManager <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>brokerStatsManager<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>brokerFastFailure <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>brokerFastFailure<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>BrokerController#registerBrokerAll</strong></p> 
+<pre><code class="prism language-java"><span class="token keyword">if</span> <span class="token punctuation">(</span>forceRegister <span class="token operator">||</span> <span class="token function">needRegister</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">getBrokerAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getRegisterBrokerTimeoutMills</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//开始注册</span>
+    <span class="token function">doRegisterBrokerAll</span><span class="token punctuation">(</span>checkOrderConfig<span class="token punctuation">,</span> oneway<span class="token punctuation">,</span> topicConfigWrapper<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>BrokerController#doRegisterBrokerAll</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//进入brokerOuterAPI#registerBrokerAll</span>
+<span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">RegisterBrokerResult</span><span class="token punctuation">&gt;</span></span> registerBrokerResultList <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>brokerOuterAPI<span class="token punctuation">.</span><span class="token function">registerBrokerAll</span><span class="token punctuation">(</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">getBrokerAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">getHAServerAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    topicConfigWrapper<span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>filterServerManager<span class="token punctuation">.</span><span class="token function">buildNewFilterServerList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    oneway<span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getRegisterBrokerTimeoutMills</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">isCompressedRegister</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>BrokerOuterAPI#registerBrokerAll</strong></p> 
+<pre><code class="prism language-java"><span class="token keyword">final</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">RegisterBrokerResult</span><span class="token punctuation">&gt;</span></span> registerBrokerResultList <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">CopyOnWriteArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//获取nameServer地址信息</span>
+<span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> nameServerAddressList <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>remotingClient<span class="token punctuation">.</span><span class="token function">getNameServerAddressList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>nameServerAddressList <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">&amp;&amp;</span> nameServerAddressList<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//进行请求头的封装</span>
+    <span class="token keyword">final</span> <span class="token class-name">RegisterBrokerRequestHeader</span> requestHeader <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">RegisterBrokerRequestHeader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">setBrokerAddr</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">setBrokerId</span><span class="token punctuation">(</span>brokerId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">setBrokerName</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">setClusterName</span><span class="token punctuation">(</span>clusterName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">setHaServerAddr</span><span class="token punctuation">(</span>haServerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">setCompressed</span><span class="token punctuation">(</span>compressed<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//封装注册请求体</span>
+    <span class="token class-name">RegisterBrokerBody</span> requestBody <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">RegisterBrokerBody</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestBody<span class="token punctuation">.</span><span class="token function">setTopicConfigSerializeWrapper</span><span class="token punctuation">(</span>topicConfigWrapper<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestBody<span class="token punctuation">.</span><span class="token function">setFilterServerList</span><span class="token punctuation">(</span>filterServerList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">final</span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> body <span class="token operator">=</span> requestBody<span class="token punctuation">.</span><span class="token function">encode</span><span class="token punctuation">(</span>compressed<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">final</span> <span class="token keyword">int</span> bodyCrc32 <span class="token operator">=</span> <span class="token class-name">UtilAll</span><span class="token punctuation">.</span><span class="token function">crc32</span><span class="token punctuation">(</span>body<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">setBodyCrc32</span><span class="token punctuation">(</span>bodyCrc32<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">final</span> <span class="token class-name">CountDownLatch</span> countDownLatch <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">CountDownLatch</span><span class="token punctuation">(</span>nameServerAddressList<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//遍历nameServer地址 ---&gt;  分别向各个nameServer注册Broker</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">final</span> <span class="token class-name">String</span> namesrvAddr <span class="token operator">:</span> nameServerAddressList<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        brokerOuterExecutor<span class="token punctuation">.</span><span class="token function">execute</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Runnable</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token annotation punctuation">@Override</span>
+            <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">//向nameServer注册Broker并返回注册结果</span>
+                    <span class="token class-name">RegisterBrokerResult</span> result <span class="token operator">=</span> <span class="token function">registerBroker</span><span class="token punctuation">(</span>namesrvAddr<span class="token punctuation">,</span> oneway<span class="token punctuation">,</span> timeoutMills<span class="token punctuation">,</span> requestHeader<span class="token punctuation">,</span> body<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>result <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        registerBrokerResultList<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>result<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+
+                    log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"register broker[{}]to name server {} OK"</span><span class="token punctuation">,</span> brokerId<span class="token punctuation">,</span> namesrvAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    log<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"registerBroker Exception, {}"</span><span class="token punctuation">,</span> namesrvAddr<span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+                    countDownLatch<span class="token punctuation">.</span><span class="token function">countDown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        countDownLatch<span class="token punctuation">.</span><span class="token function">await</span><span class="token punctuation">(</span>timeoutMills<span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span>MILLISECONDS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">InterruptedException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">return</span> registerBrokerResultList<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>BrokerOuterAPI#registerBroker</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//如果是oneway发送 无需关注返回结果 直接返回null</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>oneway<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>remotingClient<span class="token punctuation">.</span><span class="token function">invokeOneway</span><span class="token punctuation">(</span>namesrvAddr<span class="token punctuation">,</span> request<span class="token punctuation">,</span> timeoutMills<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">RemotingTooMuchRequestException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// Ignore</span>
+        log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"RemotingTooMuchRequestException!!!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token comment">//返回远程调用的响应结果</span>
+<span class="token class-name">RemotingCommand</span> response <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>remotingClient<span class="token punctuation">.</span><span class="token function">invokeSync</span><span class="token punctuation">(</span>namesrvAddr<span class="token punctuation">,</span> request<span class="token punctuation">,</span> timeoutMills<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<hr> 
+<h4>
+<a id="32NameServer_191"></a>3.2NameServer处理路由注册</h4> 
+<p>以下是NameServer处理路由注册的时序图：</p> 
+<p><img src="https://images2.imgbox.com/ca/96/X1aqsJP0_o.png" alt="在这里插入图片描述"></p> 
+<p>请求发送至NameServer，会由默认的网络处理解析类<code>DefaultRequestProcessor</code>进行处理解析，如果请求类型是<code>REGISTER_BROKER</code>则会将请求转发至<code>RouteInfoManager</code>进行路由的注册。</p> 
+<blockquote> 
+ <p>源码</p> 
+</blockquote> 
+<p><strong>DefaultRequestProcessor#processRequest</strong></p> 
+<pre><code class="prism language-java"><span class="token keyword">switch</span> <span class="token punctuation">(</span>request<span class="token punctuation">.</span><span class="token function">getCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> <span class="token class-name">RequestCode</span><span class="token punctuation">.</span>REGISTER_BROKER<span class="token operator">:</span>
+        <span class="token class-name">Version</span> brokerVersion <span class="token operator">=</span> <span class="token class-name">MQVersion</span><span class="token punctuation">.</span><span class="token function">value2Version</span><span class="token punctuation">(</span>request<span class="token punctuation">.</span><span class="token function">getVersion</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//高版本进入这个分支</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>brokerVersion<span class="token punctuation">.</span><span class="token function">ordinal</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;=</span> <span class="token class-name">MQVersion<span class="token punctuation">.</span>Version</span><span class="token punctuation">.</span>V3_0_11<span class="token punctuation">.</span><span class="token function">ordinal</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">registerBrokerWithFilterServer</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> request<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">registerBroker</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> request<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>     
+<span class="token punctuation">}</span>        
+</code></pre> 
+<p><strong>DefaultRequestProcessor#registerBrokerWithFilterServer</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//转发到NameServerController中的RouteInfoManager进行路由注册</span>
+<span class="token class-name">RegisterBrokerResult</span> result <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>namesrvController<span class="token punctuation">.</span><span class="token function">getRouteInfoManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">registerBroker</span><span class="token punctuation">(</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getBrokerAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getBrokerId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getHaServerAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    registerBrokerBody<span class="token punctuation">.</span><span class="token function">getTopicConfigSerializeWrapper</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    registerBrokerBody<span class="token punctuation">.</span><span class="token function">getFilterServerList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    ctx<span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>RouteInfoManager#registerBroker</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//加入写锁-保护HashTable线程安全</span>
+<span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">writeLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">lockInterruptibly</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//维护clusterAddrTable</span>
+<span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> brokerNames <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>clusterAddrTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>clusterName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> brokerNames<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    brokerNames <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>clusterAddrTable<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>clusterName<span class="token punctuation">,</span> brokerNames<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+brokerNames<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//维护brokerAddrTable</span>
+<span class="token comment">//是否是第一次注册 默认为false</span>
+<span class="token keyword">boolean</span> registerFirst <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token class-name">BrokerData</span> brokerData <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>brokerAddrTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//如果在brokerAddrTable没有该Broker信息</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> brokerData<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//设置为第一次注册</span>
+    registerFirst <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token comment">//创建对应的BrokerData信息</span>
+    brokerData <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">BrokerData</span><span class="token punctuation">(</span>clusterName<span class="token punctuation">,</span> brokerName<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">HashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Long</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerAddrTable<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">,</span> brokerData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token comment">//不是第一次注册-对Broker信息进行更新</span>
+<span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Long</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> brokerAddrsMap <span class="token operator">=</span> brokerData<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//Switch slave to master: first remove &lt;1, IP:PORT&gt; in namesrv, then add &lt;0, IP:PORT&gt;</span>
+<span class="token comment">//The same IP:PORT must only have one record in brokerAddrTable</span>
+<span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Entry</span><span class="token punctuation">&lt;</span><span class="token class-name">Long</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> it <span class="token operator">=</span> brokerAddrsMap<span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">while</span> <span class="token punctuation">(</span>it<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">Entry</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Long</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> item <span class="token operator">=</span> it<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">!=</span> brokerAddr <span class="token operator">&amp;&amp;</span> brokerAddr<span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>item<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> brokerId <span class="token operator">!=</span> item<span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        it<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token class-name">String</span> oldAddr <span class="token operator">=</span> brokerData<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>brokerId<span class="token punctuation">,</span> brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+registerFirst <span class="token operator">=</span> registerFirst <span class="token operator">||</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> oldAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//维护topicQueueTable</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">!=</span> topicConfigWrapper
+    <span class="token operator">&amp;&amp;</span> <span class="token class-name">MixAll</span><span class="token punctuation">.</span>MASTER_ID <span class="token operator">==</span> brokerId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">isBrokerTopicConfigChanged</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">,</span> topicConfigWrapper<span class="token punctuation">.</span><span class="token function">getDataVersion</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token operator">||</span> registerFirst<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">ConcurrentMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">TopicConfig</span><span class="token punctuation">&gt;</span></span> tcTable <span class="token operator">=</span>
+            topicConfigWrapper<span class="token punctuation">.</span><span class="token function">getTopicConfigTable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>tcTable <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Map<span class="token punctuation">.</span>Entry</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">TopicConfig</span><span class="token punctuation">&gt;</span></span> entry <span class="token operator">:</span> tcTable<span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//具体细节在这个方法中</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">createAndUpdateQueueData</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">,</span> entry<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//维护brokerLiveTable</span>
+<span class="token class-name">BrokerLiveInfo</span> prevBrokerLiveInfo <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>brokerLiveTable<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">,</span>
+    <span class="token keyword">new</span> <span class="token class-name">BrokerLiveInfo</span><span class="token punctuation">(</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">currentTimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        topicConfigWrapper<span class="token punctuation">.</span><span class="token function">getDataVersion</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        channel<span class="token punctuation">,</span>
+        haServerAddr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> prevBrokerLiveInfo<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"new broker registered, {} HAServer: {}"</span><span class="token punctuation">,</span> brokerAddr<span class="token punctuation">,</span> haServerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//维护filterServerTable</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>filterServerList <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>filterServerList<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>filterServerTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>filterServerTable<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">,</span> filterServerList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">MixAll</span><span class="token punctuation">.</span>MASTER_ID <span class="token operator">!=</span> brokerId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">String</span> masterAddr <span class="token operator">=</span> brokerData<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">MixAll</span><span class="token punctuation">.</span>MASTER_ID<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>masterAddr <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">BrokerLiveInfo</span> brokerLiveInfo <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>brokerLiveTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>masterAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>brokerLiveInfo <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            result<span class="token punctuation">.</span><span class="token function">setHaServerAddr</span><span class="token punctuation">(</span>brokerLiveInfo<span class="token punctuation">.</span><span class="token function">getHaServerAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            result<span class="token punctuation">.</span><span class="token function">setMasterAddr</span><span class="token punctuation">(</span>masterAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>RouteInfoManager#createAndUpdateQueueData</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//创建并封装新的队列信息</span>
+<span class="token class-name">QueueData</span> queueData <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">QueueData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//Broker名称</span>
+queueData<span class="token punctuation">.</span><span class="token function">setBrokerName</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//读写队列个数</span>
+queueData<span class="token punctuation">.</span><span class="token function">setWriteQueueNums</span><span class="token punctuation">(</span>topicConfig<span class="token punctuation">.</span><span class="token function">getWriteQueueNums</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+queueData<span class="token punctuation">.</span><span class="token function">setReadQueueNums</span><span class="token punctuation">(</span>topicConfig<span class="token punctuation">.</span><span class="token function">getReadQueueNums</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//操作权限</span>
+queueData<span class="token punctuation">.</span><span class="token function">setPerm</span><span class="token punctuation">(</span>topicConfig<span class="token punctuation">.</span><span class="token function">getPerm</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//同步复制还是异步复制的标识</span>
+queueData<span class="token punctuation">.</span><span class="token function">setTopicSysFlag</span><span class="token punctuation">(</span>topicConfig<span class="token punctuation">.</span><span class="token function">getTopicSysFlag</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//根据Topic从topicQueueTable中获取队列集合</span>
+<span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span></span> queueDataList <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>topicQueueTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>topicConfig<span class="token punctuation">.</span><span class="token function">getTopicName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//如果没有获取到</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> queueDataList<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//创建并将新的queueData添加到集合中</span>
+    queueDataList <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LinkedList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    queueDataList<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>queueData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//放入topicQueueTable</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>topicQueueTable<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>topicConfig<span class="token punctuation">.</span><span class="token function">getTopicName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> queueDataList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"new topic registered, {} {}"</span><span class="token punctuation">,</span> topicConfig<span class="token punctuation">.</span><span class="token function">getTopicName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> queueData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span> 
+<span class="token comment">//queueDataList不为空</span>
+<span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">boolean</span> addNewOne <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+
+    <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span></span> it <span class="token operator">=</span> queueDataList<span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//对该主题已有队列信息进行遍历</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>it<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">QueueData</span> qd <span class="token operator">=</span> it<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//如果找到相同主题</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>qd<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//已经存在</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>qd<span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>queueData<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                addNewOne <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//进行更改-先删除后新增</span>
+                log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"topic changed, {} OLD: {} NEW: {}"</span><span class="token punctuation">,</span> topicConfig<span class="token punctuation">.</span><span class="token function">getTopicName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> qd<span class="token punctuation">,</span>
+                    queueData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                it<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+	<span class="token comment">//添加一个新的队列信息</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>addNewOne<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        queueDataList<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>queueData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="33_382"></a>3.3路由删除</h4> 
+<p><code>NameServer</code>会每隔10s扫描<code>brokerLiveTable</code>状态表，如果<code>BrokerLive</code>的<code>lastUpdateTimestamp</code>的时间戳距当前时间超过120s，则认为<code>Broker</code>失效，移除该<code>Broker</code>，关闭与<code>Broker</code>连接，同时更新<code>topicQueueTable</code>、<code>brokerAddrTable</code>、<code>brokerLiveTable</code>、<code>filterServerTable</code>。</p> 
+<p><strong>删除路由信息的两个触发条件：</strong></p> 
+<ul>
+<li>NameServer定期扫描brokerLiveTable检测上次心跳包发送时间与当前系统的时间差，如果时间超过<code>120s</code>，则需要移除该Broker路由信息</li>
+<li>Broker正常关闭，执行<code>unregisterBroker</code>
+</li>
+</ul> 
+<h5>
+<a id="331Broker_393"></a>3.3.1Broker异常关闭</h5> 
+<p><img src="https://images2.imgbox.com/bc/cc/gJeCVhh5_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/7a/4a/gQ7OQWqm_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>NamesrvController#initialize</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//定时任务线程池---&gt;每隔十秒扫描活跃状态异常的Broker信息</span>
+<span class="token keyword">this</span><span class="token punctuation">.</span>scheduledExecutorService<span class="token punctuation">.</span><span class="token function">scheduleAtFixedRate</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Runnable</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/**
+     * 对Not Active Broker 进行扫描
+     */</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//在routeInfoManager中进行路由删除</span>
+        <span class="token class-name">NamesrvController</span><span class="token punctuation">.</span><span class="token keyword">this</span><span class="token punctuation">.</span>routeInfoManager<span class="token punctuation">.</span><span class="token function">scanNotActiveBroker</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span>SECONDS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>RouteInfoManager#scanNotActiveBroker</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//遍历brokerLiveTable 查看是否有broker状态长时间没有更新</span>
+<span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Entry</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">BrokerLiveInfo</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> it <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>brokerLiveTable<span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//遍历brokerLiveTable</span>
+<span class="token keyword">while</span> <span class="token punctuation">(</span>it<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">Entry</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">BrokerLiveInfo</span><span class="token punctuation">&gt;</span></span> next <span class="token operator">=</span> it<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">long</span> last <span class="token operator">=</span> next<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getLastUpdateTimestamp</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//如果收到心跳包的时间间距超过120s</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>last <span class="token operator">+</span> BROKER_CHANNEL_EXPIRED_TIME<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">currentTimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//关闭连接</span>
+        <span class="token class-name">RemotingUtil</span><span class="token punctuation">.</span><span class="token function">closeChannel</span><span class="token punctuation">(</span>next<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getChannel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//移除broker</span>
+        it<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        log<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"The broker channel expired, {} {}ms"</span><span class="token punctuation">,</span> next<span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> BROKER_CHANNEL_EXPIRED_TIME<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//维护路由表</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">onChannelDestroy</span><span class="token punctuation">(</span>next<span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> next<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getChannel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>RouteInfoManager#onChannelDestroy</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//待删除的BrokerAddress</span>
+<span class="token class-name">String</span> brokerAddrFound <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>channel <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//加入读锁</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">readLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">lockInterruptibly</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Entry</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">BrokerLiveInfo</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> itBrokerLiveTable <span class="token operator">=</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span>brokerLiveTable<span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//遍历查找待删除的Broker</span>
+            <span class="token keyword">while</span> <span class="token punctuation">(</span>itBrokerLiveTable<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">Entry</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">BrokerLiveInfo</span><span class="token punctuation">&gt;</span></span> entry <span class="token operator">=</span> itBrokerLiveTable<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>entry<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getChannel</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> channel<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    brokerAddrFound <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">break</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//释放锁</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">readLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"onChannelDestroy Exception"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//加入写锁</span>
+<span class="token comment">//根据brokerAddrFound从brokerLiveTable和filterServerTable移除对应的Broker信息</span>
+<span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">writeLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">lockInterruptibly</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">this</span><span class="token punctuation">.</span>brokerLiveTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerAddrFound<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">this</span><span class="token punctuation">.</span>filterServerTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerAddrFound<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//维护brokerAddrTable</span>
+<span class="token class-name">String</span> brokerNameFound <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+<span class="token keyword">boolean</span> removeBrokerName <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Entry</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">BrokerData</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> itBrokerAddrTable <span class="token operator">=</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerAddrTable<span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//遍历brokerAddrTable</span>
+<span class="token keyword">while</span> <span class="token punctuation">(</span>itBrokerAddrTable<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> brokerNameFound<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">BrokerData</span> brokerData <span class="token operator">=</span> itBrokerAddrTable<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//遍历brokerAddress</span>
+    <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Entry</span><span class="token punctuation">&lt;</span><span class="token class-name">Long</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> it <span class="token operator">=</span> brokerData<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>it<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Entry</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Long</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> entry <span class="token operator">=</span> it<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">Long</span> brokerId <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">String</span> brokerAddr <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//遍历到匹配的broker</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>brokerAddr<span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>brokerAddrFound<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            brokerNameFound <span class="token operator">=</span> brokerData<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//根据broker地址移除broker</span>
+            it<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"remove brokerAddr[{}, {}] from brokerAddrTable, because channel destroyed"</span><span class="token punctuation">,</span>
+                brokerId<span class="token punctuation">,</span> brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+	<span class="token comment">//如果当前BrokerData中的Broker列表为空</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>brokerData<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        removeBrokerName <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+        <span class="token comment">//从BrokerAddrTable移除该BrokerData</span>
+        itBrokerAddrTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"remove brokerName[{}] from brokerAddrTable, because channel destroyed"</span><span class="token punctuation">,</span>
+            brokerData<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//维护clusterAddrTable</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>brokerNameFound <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">&amp;&amp;</span> removeBrokerName<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Entry</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">Set</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> it <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>clusterAddrTable<span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//遍历clusterAddrTable</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>it<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Entry</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">Set</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> entry <span class="token operator">=</span> it<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">String</span> clusterName <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> brokerNames <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//根据brokerName删除cluster集群中的broker并返回是否删除成功</span>
+        <span class="token keyword">boolean</span> removed <span class="token operator">=</span> brokerNames<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerNameFound<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>removed<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"remove brokerName[{}], clusterName[{}] from clusterAddrTable, because channel destroyed"</span><span class="token punctuation">,</span>
+                brokerNameFound<span class="token punctuation">,</span> clusterName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			
+            <span class="token comment">//如果cluster已经不包含任何broker则移除该集群</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>brokerNames<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"remove the clusterName[{}] from clusterAddrTable, because channel destroyed and no broker in this cluster"</span><span class="token punctuation">,</span>
+                    clusterName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                it<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//维护TopicQueueTable</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>removeBrokerName<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Entry</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> itTopicQueueTable <span class="token operator">=</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>topicQueueTable<span class="token punctuation">.</span><span class="token function">entrySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//遍历TopicQueueTable</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>itTopicQueueTable<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Entry</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> entry <span class="token operator">=</span> itTopicQueueTable<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//主题</span>
+        <span class="token class-name">String</span> topic <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//主题对应的Broker信息</span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span></span> queueDataList <span class="token operator">=</span> entry<span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span></span> itQueueData <span class="token operator">=</span> queueDataList<span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//遍历Broker</span>
+        <span class="token keyword">while</span> <span class="token punctuation">(</span>itQueueData<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">QueueData</span> queueData <span class="token operator">=</span> itQueueData<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//通过brokerNameFound在queueData中查找对应的Broker信息</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>queueData<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>brokerNameFound<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//移除该Broker</span>
+                itQueueData<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"remove topic[{} {}], from topicQueueTable, because channel destroyed"</span><span class="token punctuation">,</span>
+                    topic<span class="token punctuation">,</span> queueData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+		
+        <span class="token comment">//如果当前主题已经没有任何Broker，则移除该主题Topic</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>queueDataList<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            itTopicQueueTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"remove topic[{}] all queue, from topicQueueTable, because channel destroyed"</span><span class="token punctuation">,</span>
+                topic<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token comment">//释放写锁</span>
+<span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">writeLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h5>
+<a id="332Broker_581"></a>3.3.2Broker正常关闭</h5> 
+<p><img src="https://images2.imgbox.com/98/c2/QIrnSX4B_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>关闭入口-BrokerController</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//BrokerController#shutdown</span>
+<span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">unregisterBrokerAll</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//BrokerController#unregisterBrokerAll</span>
+<span class="token keyword">this</span><span class="token punctuation">.</span>brokerOuterAPI<span class="token punctuation">.</span><span class="token function">unregisterBrokerAll</span><span class="token punctuation">(</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">getBrokerAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>brokerConfig<span class="token punctuation">.</span><span class="token function">getBrokerId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>BrokerOuterAPI#unregisterBrokerAll</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//获取NameServerAddress列表</span>
+<span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> nameServerAddressList <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>remotingClient<span class="token punctuation">.</span><span class="token function">getNameServerAddressList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>nameServerAddressList <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//遍历NameServer</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">String</span> namesrvAddr <span class="token operator">:</span> nameServerAddressList<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//注销指定Broker</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">unregisterBroker</span><span class="token punctuation">(</span>namesrvAddr<span class="token punctuation">,</span> clusterName<span class="token punctuation">,</span> brokerAddr<span class="token punctuation">,</span> brokerName<span class="token punctuation">,</span> brokerId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"unregisterBroker OK, NamesrvAddr: {}"</span><span class="token punctuation">,</span> namesrvAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            log<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"unregisterBroker Exception, {}"</span><span class="token punctuation">,</span> namesrvAddr<span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>BrokerOuterAPI#unregisterBroker</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//封装注销Broker请求头</span>
+<span class="token class-name">UnRegisterBrokerRequestHeader</span> requestHeader <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">UnRegisterBrokerRequestHeader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+requestHeader<span class="token punctuation">.</span><span class="token function">setBrokerAddr</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+requestHeader<span class="token punctuation">.</span><span class="token function">setBrokerId</span><span class="token punctuation">(</span>brokerId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+requestHeader<span class="token punctuation">.</span><span class="token function">setBrokerName</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+requestHeader<span class="token punctuation">.</span><span class="token function">setClusterName</span><span class="token punctuation">(</span>clusterName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//封装注销请求</span>
+<span class="token class-name">RemotingCommand</span> request <span class="token operator">=</span> <span class="token class-name">RemotingCommand</span><span class="token punctuation">.</span><span class="token function">createRequestCommand</span><span class="token punctuation">(</span><span class="token class-name">RequestCode</span><span class="token punctuation">.</span>UNREGISTER_BROKER<span class="token punctuation">,</span> requestHeader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//远程调用并发送请求-返回响应结果</span>
+<span class="token class-name">RemotingCommand</span> response <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>remotingClient<span class="token punctuation">.</span><span class="token function">invokeSync</span><span class="token punctuation">(</span>namesrvAddr<span class="token punctuation">,</span> request<span class="token punctuation">,</span> <span class="token number">3000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">assert</span> response <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+<span class="token keyword">switch</span> <span class="token punctuation">(</span>response<span class="token punctuation">.</span><span class="token function">getCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> <span class="token class-name">ResponseCode</span><span class="token punctuation">.</span>SUCCESS<span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">default</span><span class="token operator">:</span>
+        <span class="token keyword">break</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">MQBrokerException</span><span class="token punctuation">(</span>response<span class="token punctuation">.</span><span class="token function">getCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> response<span class="token punctuation">.</span><span class="token function">getRemark</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>忽略Netty远程调用过程</p> 
+<p><strong>DefaultRequestProcess#processRequest</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//根据请求状态码-进行不同的处理</span>
+<span class="token keyword">switch</span> <span class="token punctuation">(</span>request<span class="token punctuation">.</span><span class="token function">getCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">case</span> <span class="token class-name">RequestCode</span><span class="token punctuation">.</span>UNREGISTER_BROKER<span class="token operator">:</span>
+        <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">unregisterBroker</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> request<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>DefaultRequestProcess#unregisterBroker</strong></p> 
+<pre><code class="prism language-java"><span class="token keyword">final</span> <span class="token class-name">RemotingCommand</span> response <span class="token operator">=</span> <span class="token class-name">RemotingCommand</span><span class="token punctuation">.</span><span class="token function">createResponseCommand</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//解码注销Broker的请求头</span>
+<span class="token keyword">final</span> <span class="token class-name">UnRegisterBrokerRequestHeader</span> requestHeader <span class="token operator">=</span>
+    <span class="token punctuation">(</span><span class="token class-name">UnRegisterBrokerRequestHeader</span><span class="token punctuation">)</span> request<span class="token punctuation">.</span><span class="token function">decodeCommandCustomHeader</span><span class="token punctuation">(</span><span class="token class-name">UnRegisterBrokerRequestHeader</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//转发至RouteInfoManager注销Broker</span>
+<span class="token keyword">this</span><span class="token punctuation">.</span>namesrvController<span class="token punctuation">.</span><span class="token function">getRouteInfoManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">unregisterBroker</span><span class="token punctuation">(</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getBrokerAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    requestHeader<span class="token punctuation">.</span><span class="token function">getBrokerId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//设置响应状态码</span>
+response<span class="token punctuation">.</span><span class="token function">setCode</span><span class="token punctuation">(</span><span class="token class-name">ResponseCode</span><span class="token punctuation">.</span>SUCCESS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+response<span class="token punctuation">.</span><span class="token function">setRemark</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//返回响应结果</span>
+<span class="token keyword">return</span> response<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>RouteInfoManager#unregisterBroker</strong></p> 
+<pre><code class="prism language-java"><span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//加入写锁-保护HashMap线程安全</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">writeLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">lockInterruptibly</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//由于是从BrokerController远程调用来的请求-故不对BrokerAddr进行检查-直接进行移除</span>
+        <span class="token comment">//移除brokerLiveTable中的Broker信息</span>
+        <span class="token class-name">BrokerLiveInfo</span> brokerLiveInfo <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>brokerLiveTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"unregisterBroker, remove from brokerLiveTable {}, {}"</span><span class="token punctuation">,</span>
+            brokerLiveInfo <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">?</span> <span class="token string">"OK"</span> <span class="token operator">:</span> <span class="token string">"Failed"</span><span class="token punctuation">,</span>
+            brokerAddr
+        <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//维护filterServerTable</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>filterServerTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">boolean</span> removeBrokerName <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token comment">//根据brokername获取对应的BrokerData信息</span>
+        <span class="token class-name">BrokerData</span> brokerData <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>brokerAddrTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">!=</span> brokerData<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//删除对应Broker信息</span>
+            <span class="token class-name">String</span> addr <span class="token operator">=</span> brokerData<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"unregisterBroker, remove addr from brokerAddrTable {}, {}"</span><span class="token punctuation">,</span>
+                addr <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">?</span> <span class="token string">"OK"</span> <span class="token operator">:</span> <span class="token string">"Failed"</span><span class="token punctuation">,</span>
+                brokerAddr
+            <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token comment">//如果当前BrokerData中已经没有其他Broker</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>brokerData<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//从BrokerAddrTable移除相应的Broker</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span>brokerAddrTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"unregisterBroker, remove name from brokerAddrTable OK, {}"</span><span class="token punctuation">,</span>
+                    brokerName
+                <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                removeBrokerName <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>removeBrokerName<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//在clusterAddrTable中通过集群名称获取对应的Broker集合</span>
+            <span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> nameSet <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>clusterAddrTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>clusterName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>nameSet <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//移除该集合中的Broker</span>
+                <span class="token keyword">boolean</span> removed <span class="token operator">=</span> nameSet<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"unregisterBroker, remove name from clusterAddrTable {}, {}"</span><span class="token punctuation">,</span>
+                    removed <span class="token operator">?</span> <span class="token string">"OK"</span> <span class="token operator">:</span> <span class="token string">"Failed"</span><span class="token punctuation">,</span>
+                    brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token comment">//如果该集群中的Broker集合为空-移除该集群</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>nameSet<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">this</span><span class="token punctuation">.</span>clusterAddrTable<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>clusterName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    log<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"unregisterBroker, remove cluster from clusterAddrTable {}"</span><span class="token punctuation">,</span>
+                        clusterName
+                    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//移除该Broker下的所有主题Topic</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">removeTopicByBrokerName</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//释放写锁</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">writeLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"unregisterBroker Exception"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<hr> 
+<h4>
+<a id="34_750"></a>3.4路由发现</h4> 
+<p>RocketMQ路由发现是非实时的，当Topic路由出现变化后，NameServer不会主动推送给客户端，而是由客户端定时拉取主题最新的路由。</p> 
+<p><strong>DefaultRequestProcessor#processRequest</strong></p> 
+<pre><code class="prism language-java"><span class="token keyword">switch</span> <span class="token punctuation">(</span>request<span class="token punctuation">.</span><span class="token function">getCode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">case</span> <span class="token class-name">RequestCode</span><span class="token punctuation">.</span>GET_ROUTEINFO_BY_TOPIC<span class="token operator">:</span>
+         <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">getRouteInfoByTopic</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> request<span class="token punctuation">)</span><span class="token punctuation">;</span>	
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>DefaultRequestProcessor#getRouteInfoByTopic</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//远程调用返回的响应结果</span>
+<span class="token keyword">final</span> <span class="token class-name">RemotingCommand</span> response <span class="token operator">=</span> <span class="token class-name">RemotingCommand</span><span class="token punctuation">.</span><span class="token function">createResponseCommand</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//解析获取路由信息的请求头</span>
+<span class="token keyword">final</span> <span class="token class-name">GetRouteInfoRequestHeader</span> requestHeader <span class="token operator">=</span>
+    <span class="token punctuation">(</span><span class="token class-name">GetRouteInfoRequestHeader</span><span class="token punctuation">)</span> request<span class="token punctuation">.</span><span class="token function">decodeCommandCustomHeader</span><span class="token punctuation">(</span><span class="token class-name">GetRouteInfoRequestHeader</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//调用RouteInfoManager中的方法,从路由表topicQueueTable、brokerAddrTable、filterServerTable中</span>
+<span class="token comment">//分别填充TopicRouteData的List&lt;QueueData&gt;、List&lt;BrokerData&gt;、filterServer</span>
+<span class="token class-name">TopicRouteData</span> topicRouteData <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>namesrvController<span class="token punctuation">.</span><span class="token function">getRouteInfoManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">pickupTopicRouteData</span><span class="token punctuation">(</span>requestHeader<span class="token punctuation">.</span><span class="token function">getTopic</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//如果找到主题对应你的路由信息并且该主题为顺序消息</span>
+<span class="token comment">//则从NameServer KVConfig中获取关于顺序消息相关的配置填充路由信息</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>topicRouteData <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>namesrvController<span class="token punctuation">.</span><span class="token function">getNamesrvConfig</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isOrderMessageEnable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">String</span> orderTopicConf <span class="token operator">=</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>namesrvController<span class="token punctuation">.</span><span class="token function">getKvConfigManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getKVConfig</span><span class="token punctuation">(</span><span class="token class-name">NamesrvUtil</span><span class="token punctuation">.</span>NAMESPACE_ORDER_TOPIC_CONFIG<span class="token punctuation">,</span>
+                requestHeader<span class="token punctuation">.</span><span class="token function">getTopic</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        topicRouteData<span class="token punctuation">.</span><span class="token function">setOrderTopicConf</span><span class="token punctuation">(</span>orderTopicConf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> content <span class="token operator">=</span> topicRouteData<span class="token punctuation">.</span><span class="token function">encode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//填充响应体和状态码</span>
+    response<span class="token punctuation">.</span><span class="token function">setBody</span><span class="token punctuation">(</span>content<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    response<span class="token punctuation">.</span><span class="token function">setCode</span><span class="token punctuation">(</span><span class="token class-name">ResponseCode</span><span class="token punctuation">.</span>SUCCESS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    response<span class="token punctuation">.</span><span class="token function">setRemark</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> response<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token comment">//设置响应码-主题不存在</span>
+response<span class="token punctuation">.</span><span class="token function">setCode</span><span class="token punctuation">(</span><span class="token class-name">ResponseCode</span><span class="token punctuation">.</span>TOPIC_NOT_EXIST<span class="token punctuation">)</span><span class="token punctuation">;</span>
+response<span class="token punctuation">.</span><span class="token function">setRemark</span><span class="token punctuation">(</span><span class="token string">"No topic route info in name server for the topic: "</span> <span class="token operator">+</span> requestHeader<span class="token punctuation">.</span><span class="token function">getTopic</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token operator">+</span> <span class="token class-name">FAQUrl</span><span class="token punctuation">.</span><span class="token function">suggestTodo</span><span class="token punctuation">(</span><span class="token class-name">FAQUrl</span><span class="token punctuation">.</span>APPLY_TOPIC_URL<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">return</span> response<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>RouteInfoManager#pickupTopicRouteData</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">//创建主题路由信息对象</span>
+<span class="token class-name">TopicRouteData</span> topicRouteData <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">TopicRouteData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//是否找到对应队列的标识</span>
+<span class="token keyword">boolean</span> foundQueueData <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token comment">//是否找到对应Broker的标识</span>
+<span class="token keyword">boolean</span> foundBrokerData <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+<span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> brokerNameSet <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">BrokerData</span><span class="token punctuation">&gt;</span></span> brokerDataList <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LinkedList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">BrokerData</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+topicRouteData<span class="token punctuation">.</span><span class="token function">setBrokerDatas</span><span class="token punctuation">(</span>brokerDataList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token class-name">HashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> filterServerMap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+topicRouteData<span class="token punctuation">.</span><span class="token function">setFilterServerTable</span><span class="token punctuation">(</span>filterServerMap<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//加入读锁</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">readLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">lockInterruptibly</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//从topicQueueTable中通过主题topic查找Broker列表</span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span></span> queueDataList <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>topicQueueTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>topic<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>queueDataList <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//填充Broker信息到topicRouteData.QueueDatas</span>
+            topicRouteData<span class="token punctuation">.</span><span class="token function">setQueueDatas</span><span class="token punctuation">(</span>queueDataList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            foundQueueData <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+
+            <span class="token class-name">Iterator</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">QueueData</span><span class="token punctuation">&gt;</span></span> it <span class="token operator">=</span> queueDataList<span class="token punctuation">.</span><span class="token function">iterator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">while</span> <span class="token punctuation">(</span>it<span class="token punctuation">.</span><span class="token function">hasNext</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">QueueData</span> qd <span class="token operator">=</span> it<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                brokerNameSet<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>qd<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token comment">//遍历Broker集合</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">String</span> brokerName <span class="token operator">:</span> brokerNameSet<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//从brokerAddrTable中通过BrokerName进行查找</span>
+                <span class="token class-name">BrokerData</span> brokerData <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>brokerAddrTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>brokerName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">!=</span> brokerData<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">BrokerData</span> brokerDataClone <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">BrokerData</span><span class="token punctuation">(</span>brokerData<span class="token punctuation">.</span><span class="token function">getCluster</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> brokerData<span class="token punctuation">.</span><span class="token function">getBrokerName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token class-name">HashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Long</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">)</span> brokerData<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">clone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">//填充BrokerData信息到brokerDatas</span>
+                    brokerDataList<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>brokerDataClone<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    foundBrokerData <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+                    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">final</span> <span class="token class-name">String</span> brokerAddr <span class="token operator">:</span> brokerDataClone<span class="token punctuation">.</span><span class="token function">getBrokerAddrs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">values</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> filterServerList <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>filterServerTable<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        filterServerMap<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>brokerAddr<span class="token punctuation">,</span> filterServerList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//释放读锁</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">.</span><span class="token function">readLock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"pickupTopicRouteData Exception"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+log<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"pickupTopicRouteData {} {}"</span><span class="token punctuation">,</span> topic<span class="token punctuation">,</span> topicRouteData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">if</span> <span class="token punctuation">(</span>foundBrokerData <span class="token operator">&amp;&amp;</span> foundQueueData<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> topicRouteData<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+</code></pre> 
+<h4>
+<a id="35_864"></a>3.5总结</h4> 
+<p><img src="https://images2.imgbox.com/ff/47/MoC3VrtW_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li>
+<strong>路由注册</strong>：Broker启动之后会将自己的信息注册到NameServer，NameServer收到Broker心跳包之后会更新BrokerLiveTable中对应的Broker的相关信息，特别记录<code>lastUpdateTimestamp</code>。</li>
+<li>
+<strong>心跳机制</strong>：Broker会每隔30s向NameServer发送心跳包，告诉NameServer自己的运行状态良好。</li>
+<li>
+<strong>路由发现</strong>：NameServer中的主题Topic信息更新之后，NameServer并不会实时将数据推送给订阅方Producer，而需要Producer自行通过Topic来查询路由信息。</li>
+<li>
+<strong>路由删除</strong>： 
+  <ul>
+<li>Broker异常宕机：NameServer每隔10s扫描BrokerLiveTable，检查表中各个Broker最新的发送心跳包时间，如果这个时间与当前系统时间差超过120s，则该Broker会被视作已掉线，NameServer会将这个Broker从表中删除，并且更新各个表中与该Broker有关的所有信息。</li>
+<li>Broker正常下线：NameServer接受到BrokerController发送来的<code>UNREGISTER_BROKER</code>请求之后，会执行上述步骤，对路由信息进行更新。</li>
+</ul> </li>
+</ul> 
+<p><strong>以上。</strong></p> 
+<p><strong>本文仅作为个人学习使用，如有不足或者错误请指正！</strong></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Scala中使用SOFA jraft 实现rpc的优化 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Scala中使用SOFA jraft 实现rpc的优化</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_1"></a>背景</h2> 
+<p>项目基于sofa jraft构建，顺便使用了其自带的rpc服务，协议使用<code>protobuf</code>，使用jraft创建一个rpc服务<code>RaftRpcServerFactory.createRaftRpcServer(serverId.getEndpoint)</code>，并<br> 新增的rpc接口，这通常需要定义自己的Processor并继承<code>com.alipay.sofa.jraft.rpc.RpcRequestProcessor</code>，然后创建一个实例，使用<code>rpcServer.registerProcessor</code>将实例暴露的rpc注册到<code>RpcServer</code>中。这里的待改善问题是当我们的接口变多时，Processor并不容易管理，同时个人认为，定义Processor的过程是繁琐和枯燥的，几乎都是一个模板。而我很懒哈哈，不想一个个写，除了业务，不想来回写。下面看看怎么简化这个流程吧。</p> 
+<p>下面使用<a href="https://github.com/bitlap/bitlap">bitlap</a>的一个创建会话的Processor来说明</p> 
+<pre><code class="prism language-scala"><span class="token comment">// networkService是业务逻辑所在类</span>
+<span class="token keyword">class</span> OpenSessionProcessor<span class="token punctuation">(</span><span class="token keyword">private</span> <span class="token keyword">val</span> networkService<span class="token operator">:</span> NetworkService<span class="token punctuation">,</span> executor<span class="token operator">:</span> Executor <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+  <span class="token keyword">extends</span> BitlapRpcProcessor<span class="token punctuation">[</span>BOpenSessionReq<span class="token punctuation">]</span><span class="token punctuation">(</span>executor<span class="token punctuation">,</span> BOpenSessionResp<span class="token punctuation">.</span>getDefaultInstance<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// BitlapRpcProcessor将RpcRequestProcessor的handleRequest方法处理分为正常处理processRequest和processError异常处理</span>
+
+  <span class="token keyword">override</span> <span class="token keyword">def</span> processRequest<span class="token punctuation">(</span>request<span class="token operator">:</span> BOpenSessionReq<span class="token punctuation">,</span> done<span class="token operator">:</span> RpcRequestClosure<span class="token punctuation">)</span><span class="token operator">:</span> Message <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">import</span> <span class="token namespace">scala<span class="token punctuation">.</span>jdk<span class="token punctuation">.</span></span>CollectionConverters<span class="token punctuation">.</span>MapHasAsScala
+    <span class="token keyword">val</span> username <span class="token operator">=</span> request<span class="token punctuation">.</span>getUsername
+    <span class="token keyword">val</span> password <span class="token operator">=</span> request<span class="token punctuation">.</span>getPassword
+    <span class="token keyword">val</span> configurationMap <span class="token operator">=</span> request<span class="token punctuation">.</span>getConfigurationMap
+    <span class="token keyword">val</span> sessionHandle <span class="token operator">=</span> networkService<span class="token punctuation">.</span>openSession<span class="token punctuation">(</span>username<span class="token punctuation">,</span> password<span class="token punctuation">,</span>
+      configurationMap<span class="token punctuation">.</span>asScala<span class="token punctuation">.</span>toMap<span class="token punctuation">)</span>
+    BOpenSessionResp<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token punctuation">.</span>setSessionHandle<span class="token punctuation">(</span>sessionHandle<span class="token punctuation">.</span>toBSessionHandle<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+      <span class="token punctuation">.</span>setStatus<span class="token punctuation">(</span>success<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token keyword">override</span> <span class="token keyword">def</span> processError<span class="token punctuation">(</span>rpcCtx<span class="token operator">:</span> RpcContext<span class="token punctuation">,</span> exception<span class="token operator">:</span> Exception<span class="token punctuation">)</span><span class="token operator">:</span> Message <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    BOpenSessionResp<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>setStatus<span class="token punctuation">(</span>error<span class="token punctuation">(</span>exception<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token keyword">override</span> <span class="token keyword">def</span> interest<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">String</span> <span class="token operator">=</span> classOf<span class="token punctuation">[</span>BOpenSessionReq<span class="token punctuation">]</span><span class="token punctuation">.</span>getName
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里面其实没什么代码，主要是代码在<code>networkService</code>中，但是这里需要创建<code>OpenSessionProcessor</code>这个类，算是个模板类，这里虽然使用<code>BitlapRpcProcessor</code>做了一次优化，但是效果一般。（毕竟我是个懒人，能少写一行代码都是好的，哈哈）</p> 
+<p><code>BitlapRpcProcessor</code>的定义如下：</p> 
+<pre><code class="prism language-scala"><span class="token keyword">abstract</span> <span class="token keyword">class</span> BitlapRpcProcessor<span class="token punctuation">[</span>T <span class="token operator">&lt;</span><span class="token operator">:</span> Message<span class="token punctuation">]</span><span class="token punctuation">(</span>executor<span class="token operator">:</span> Executor<span class="token punctuation">,</span> <span class="token keyword">override</span> <span class="token keyword">val</span> defaultResp<span class="token operator">:</span> Message<span class="token punctuation">)</span>
+  <span class="token keyword">extends</span> RpcRequestProcessor<span class="token punctuation">[</span>T<span class="token punctuation">]</span><span class="token punctuation">(</span>executor<span class="token punctuation">,</span> defaultResp<span class="token punctuation">)</span>
+    <span class="token keyword">with</span> ProcessorHelper <span class="token keyword">with</span> LazyLogging <span class="token punctuation">{<!-- --></span>
+
+  <span class="token keyword">override</span> <span class="token keyword">def</span> handleRequest<span class="token punctuation">(</span>rpcCtx<span class="token operator">:</span> RpcContext<span class="token punctuation">,</span> request<span class="token operator">:</span> T<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">val</span> msg <span class="token operator">=</span> processRequest<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token keyword">new</span> RpcRequestClosure<span class="token punctuation">(</span>rpcCtx<span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">.</span>defaultResp<span class="token punctuation">)</span><span class="token punctuation">)</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>msg <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        rpcCtx<span class="token punctuation">.</span>sendResponse<span class="token punctuation">(</span>msg<span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> e<span class="token operator">:</span> Exception <span class="token keyword">=&gt;</span>
+        logger<span class="token punctuation">.</span>error<span class="token punctuation">(</span>s<span class="token string">"handleRequest $request failed"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+        rpcCtx<span class="token punctuation">.</span>sendResponse<span class="token punctuation">(</span>processError<span class="token punctuation">(</span>rpcCtx<span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token keyword">def</span> processError<span class="token punctuation">(</span>rpcCtx<span class="token operator">:</span> RpcContext<span class="token punctuation">,</span> exception<span class="token operator">:</span> Exception<span class="token punctuation">)</span><span class="token operator">:</span> Message
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_58"></a>使用宏方法进行优化</h2> 
+<p>根据如上所示，我们的目的是通过一种方法宏的处理，在不创建新的类文件的情况下创建<code>com.alipay.sofa.jraft.rpc.RpcRequestProcessor</code>的实例。这个宏定义为<code>Processable</code></p> 
+<p>考虑：</p> 
+<ol>
+<li>泛型、类型安全</li>
+<li>业务处理</li>
+<li>自定义拓展</li>
+</ol> 
+<p>一般Processor是使用<code>RpcRequestProcessor</code>的构造函数派生子类。这里的2个构造函数分别是执行请求的和protobuf <code>Message</code>类型的响应消息的默认实例</p> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token class-name">RpcRequestProcessor</span><span class="token punctuation">(</span><span class="token class-name">Executor</span> executor<span class="token punctuation">,</span> <span class="token class-name">Message</span> defaultResp<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>executor <span class="token operator">=</span> executor<span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>defaultResp <span class="token operator">=</span> defaultResp<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="Processable_76"></a>Processable宏的初步设计</h3> 
+<p>下面使用<strong>黑盒宏</strong>来实现。</p> 
+<p><strong>宏的定义</strong></p> 
+<pre><code class="prism language-scala"><span class="token keyword">def</span> apply<span class="token punctuation">[</span>Req <span class="token operator">&lt;</span><span class="token operator">:</span> Message<span class="token punctuation">,</span> Service<span class="token punctuation">,</span> Executor <span class="token operator">&lt;</span><span class="token operator">:</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>Executor<span class="token punctuation">]</span>
+    <span class="token punctuation">(</span>service<span class="token operator">:</span> Service<span class="token punctuation">,</span> defaultResp<span class="token operator">:</span> Message<span class="token punctuation">,</span> executor<span class="token operator">:</span> Executor<span class="token punctuation">)</span>
+    <span class="token punctuation">(</span>
+    processRequest<span class="token operator">:</span>   <span class="token punctuation">(</span>Service<span class="token punctuation">,</span> RpcRequestClosure<span class="token punctuation">,</span> Req<span class="token punctuation">)</span> ⇒ Message<span class="token punctuation">,</span>
+    processException<span class="token operator">:</span> <span class="token punctuation">(</span>Service<span class="token punctuation">,</span> RpcContext<span class="token punctuation">,</span> Exception<span class="token punctuation">)</span> ⇒ Message<span class="token punctuation">)</span><span class="token operator">:</span> CustomRpcProcessor<span class="token punctuation">[</span>Req<span class="token punctuation">]</span> 
+    <span class="token operator">=</span> macro ProcessableMacro<span class="token punctuation">.</span>processorImpl<span class="token punctuation">[</span>Req<span class="token punctuation">,</span> Service<span class="token punctuation">,</span> Executor<span class="token punctuation">]</span>
+</code></pre> 
+<p>泛型说明：</p> 
+<ul>
+<li>
+<code>Req</code> protobuf定义的类型，用于request的消息类型，必须是<code>com.google.protobuf.Message</code>的子类。</li>
+<li>
+<code>Service</code> 用户自定义的服务接口，用于处理业务逻辑，可以为任意类型。</li>
+<li>
+<code>Executor</code> 用于传递给<code>RpcRequestProcessor</code>的构造函数，必须是<code>java.util.concurrent.Executor</code>的子类。</li>
+</ul> 
+<p>参数说明：</p> 
+<ul>
+<li>
+<code>processRequest: (Service, RpcRequestClosure, Req) ⇒ Message</code> 一个处理请求的函数，可以实现任意业务逻辑，最重要的参数。</li>
+<li>
+<code>processException: (Service, RpcContext, Exception) ⇒ Message</code> 一个处理异常的函数。</li>
+<li>
+<code>service: Service</code> 操作业务所需要的实例对象。</li>
+<li>
+<code>defaultResp: Message</code> protobuf定义的类型的默认实例，用于传递给<code>RpcRequestProcessor</code>的构造函数。</li>
+<li>
+<code>executor: Executor</code> 用于传递给<code>RpcRequestProcessor</code>的构造函数，必须是<code>java.util.concurrent.Executor</code>的子类。</li>
+</ul> 
+<blockquote> 
+ <p>返回的<code>Message</code>通常是自己定义的用于响应的protobuf对象的子类</p> 
+</blockquote> 
+<p>初步的设计照搬了<code>OpenSessionProcessor</code>的实现，只是使用宏创建类的实例对象，所以乍一看参数很多，不便使用。<br> 考虑到大多数情况下并不需要这么灵活的定义，还是可以再简化一下宏定义的。先看protobuf例子。</p> 
+<p><strong>示例</strong></p> 
+<p>对于现有protobuf文件：</p> 
+<pre><code class="prism language-protobuf">message BOpenSession {
+    message BOpenSessionReq {
+        string username = 1;
+        string password = 2;
+        map&lt;string, string&gt; configuration = 3;
+    }
+    message BOpenSessionResp {
+        string status = 1;
+        map&lt;string, string&gt;  configuration = 2;
+        string session_handle = 3;
+    }
+}
+</code></pre> 
+<p>使用<code>Processable</code>宏:</p> 
+<pre><code class="prism language-scala">    <span class="token keyword">val</span> openSession <span class="token operator">=</span> Processable<span class="token punctuation">[</span>BOpenSessionReq<span class="token punctuation">,</span> NetService<span class="token punctuation">,</span> Executor<span class="token punctuation">]</span><span class="token punctuation">(</span>
+      <span class="token punctuation">(</span>service<span class="token punctuation">,</span> rpcRequestClosure<span class="token punctuation">,</span> req<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">import</span> <span class="token namespace">scala<span class="token punctuation">.</span>jdk<span class="token punctuation">.</span></span>CollectionConverters<span class="token punctuation">.</span>MapHasAsScala
+        <span class="token keyword">val</span> username <span class="token operator">=</span> req<span class="token punctuation">.</span>getUsername
+        <span class="token keyword">val</span> password <span class="token operator">=</span> req<span class="token punctuation">.</span>getPassword
+        <span class="token keyword">val</span> configurationMap <span class="token operator">=</span> req<span class="token punctuation">.</span>getConfigurationMap
+        <span class="token keyword">val</span> ret <span class="token operator">=</span> service<span class="token punctuation">.</span>openSession<span class="token punctuation">(</span>username<span class="token punctuation">,</span> password<span class="token punctuation">,</span> configurationMap<span class="token punctuation">.</span>asScala<span class="token punctuation">.</span>toMap<span class="token punctuation">)</span>
+        BOpenSessionResp<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>setSessionHandle<span class="token punctuation">(</span>ret<span class="token punctuation">)</span><span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token punctuation">}</span><span class="token punctuation">,</span>
+      <span class="token punctuation">(</span>service<span class="token punctuation">,</span> rpcContext<span class="token punctuation">,</span> exception<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+        BOpenSessionResp<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>setStatus<span class="token punctuation">(</span>exception<span class="token punctuation">.</span>getLocalizedMessage<span class="token punctuation">)</span><span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token punctuation">}</span><span class="token punctuation">,</span>
+      <span class="token keyword">new</span> NetService<span class="token punctuation">,</span> BOpenSessionResp<span class="token punctuation">.</span>getDefaultInstance<span class="token punctuation">,</span> <span class="token keyword">null</span>
+    <span class="token punctuation">)</span>
+</code></pre> 
+<h3>
+<a id="Processable__144"></a>Processable宏的改进 一</h3> 
+<p>本次改进不是为了拓展，而是为了在一般情况下，宏方法容易使用，目标当然是减少参数传递，但是哪些参数可以减少呢？<br> 下面列了2个参数一般都是默认值，所以就可以简化它。需要注意，这里简化并不是就不支持传递这些参数了，因为Scala object的<code>apply</code>方法是能重载的，所以是共存的。<br> 为什么我们要使用<code>apply</code>方法？object的<code>apply</code>能使得我们使用<code>Processable[T](xx)</code>的形式来调用，而不需要<code>Processable[T].toProcessor(xx)</code>，是不是更清爽了，哈哈。</p> 
+<p><strong>宏的定义</strong></p> 
+<pre><code class="prism language-scala"><span class="token keyword">def</span> apply<span class="token punctuation">[</span>Service<span class="token punctuation">,</span> Req <span class="token operator">&lt;</span><span class="token operator">:</span> Message<span class="token punctuation">,</span> Resp <span class="token operator">&lt;</span><span class="token operator">:</span> Message<span class="token punctuation">]</span><span class="token punctuation">(</span>service<span class="token operator">:</span> Service<span class="token punctuation">)</span>
+    <span class="token punctuation">(</span>
+    processRequest<span class="token operator">:</span>   <span class="token punctuation">(</span>Service<span class="token punctuation">,</span> RpcRequestClosure<span class="token punctuation">,</span> Req<span class="token punctuation">)</span> ⇒ Message<span class="token punctuation">,</span>
+    processException<span class="token operator">:</span> <span class="token punctuation">(</span>Service<span class="token punctuation">,</span> RpcContext<span class="token punctuation">,</span> Exception<span class="token punctuation">)</span> ⇒ Message<span class="token punctuation">)</span><span class="token operator">:</span> CustomRpcProcessor<span class="token punctuation">[</span>Req<span class="token punctuation">]</span> <span class="token operator">=</span> 
+    macro ProcessableMacro<span class="token punctuation">.</span>processorWithDefaultRespImpl<span class="token punctuation">[</span>Service<span class="token punctuation">,</span> Req<span class="token punctuation">,</span> Resp<span class="token punctuation">]</span>
+</code></pre> 
+<ul>
+<li>
+<code>executor</code> 直接使用<code>null</code>，不支持传入自定义参数。</li>
+<li>
+<code>defaultResp</code> 直接使用<code>Resp.getDefaultInstance</code>创建默认对象 ，不支持传入自定义参数。</li>
+</ul> 
+<p>与第一次定义很类似，仅是省略了<code>executor</code>和<code>defaultResp</code>参数，但是泛型参数都保留了，这是为了类型安全。这次由于没有传<code>defaultResp</code>，所以需要使用泛型<code>Resp</code>指定默认值的类型，其实内部仍是是使用了<code>getDefaultInstance</code>。这里也能观察到，灵活性和便捷性是不可都得的。</p> 
+<p><strong>示例</strong></p> 
+<pre><code class="prism language-scala">    <span class="token keyword">val</span> openSession <span class="token operator">=</span> Processable<span class="token punctuation">[</span>NetService<span class="token punctuation">,</span> BOpenSessionReq<span class="token punctuation">,</span> BOpenSessionResp<span class="token punctuation">]</span><span class="token punctuation">(</span><span class="token keyword">new</span> NetService<span class="token punctuation">)</span><span class="token punctuation">(</span>
+      <span class="token punctuation">(</span>service<span class="token punctuation">,</span> _<span class="token punctuation">,</span> req<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">import</span> <span class="token namespace">scala<span class="token punctuation">.</span>jdk<span class="token punctuation">.</span></span>CollectionConverters<span class="token punctuation">.</span>MapHasAsScala
+        <span class="token keyword">val</span> username <span class="token operator">=</span> req<span class="token punctuation">.</span>getUsername
+        <span class="token keyword">val</span> password <span class="token operator">=</span> req<span class="token punctuation">.</span>getPassword
+        <span class="token keyword">val</span> configurationMap <span class="token operator">=</span> req<span class="token punctuation">.</span>getConfigurationMap
+        <span class="token keyword">val</span> ret <span class="token operator">=</span> service<span class="token punctuation">.</span>openSession<span class="token punctuation">(</span>username<span class="token punctuation">,</span> password<span class="token punctuation">,</span> configurationMap<span class="token punctuation">.</span>asScala<span class="token punctuation">.</span>toMap<span class="token punctuation">)</span>
+        BOpenSessionResp<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>setSessionHandle<span class="token punctuation">(</span>ret<span class="token punctuation">)</span><span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token punctuation">}</span><span class="token punctuation">,</span>
+      <span class="token punctuation">(</span>_<span class="token punctuation">,</span> _<span class="token punctuation">,</span> exception<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+        BOpenSessionResp<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>setStatus<span class="token punctuation">(</span>exception<span class="token punctuation">.</span>getLocalizedMessage<span class="token punctuation">)</span><span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">)</span>
+</code></pre> 
+<h3>
+<a id="Processable__183"></a>Processable宏的改进 二</h3> 
+<p>到上面为止，其实差不多可以了，再次简化就只能是连<code>service</code>都不传了。可以做到吗？答案是肯定的，我们可以用运行时反射来创建对象。<br> 虽然之前都做的是编译期反射，这次结合编译期和运行期来看看具体应用。</p> 
+<ul>
+<li>为<code>Service</code>泛型反射出对象，不再需要传 <code>service</code> 参数</li>
+<li>仅支持非抽象类且必须含有默认无参构造函数</li>
+</ul> 
+<p>Scala如何反射一个类来创建对象呢？</p> 
+<p>我们定义一个<code>Creator</code>，通过参数<code>T:WeakTypeTag</code>反射。<code>WeakTypeTag</code>由编译器创建，使用<code>T</code>的<code>tpe</code>属性可以反射<code>T</code>。<br> <code>WeakTypeTag</code>力求尽可能是具体的类型，即如果<code>TypeTag</code>可用于引用的类型参数或抽象类型，则它们用于将具体类型嵌入<code>WeakTypeTag</code>。<br> 否则<code>WeakTypeTag</code>将包含对抽象类型的引用。当人们期望<code>T</code>可能是部分抽象的，但需要特别小心来处理这种情况时，这种行为是有用的。<br> 但是，如果<code>T</code>应该是完全已知的，则应该使用<code>TypeTag</code>，它静态地保证了这个属性。<code>TypeTag</code>它不包含任何对未解析类型参数或抽象类型的引用。</p> 
+<p>Scala的抽象语法树除了三个字段外，是不可变的。这三个就是<code>symbol</code>，<code>pos</code>，<code>tpe</code>。对于编译器而言，类型检查不是一步到位的，所以<code>pos</code>，<code>tpe</code>，<code>symbol</code>这种属性，可能在某阶段是没有值的。<br> 而在typechecked后就能获取到实际值。这在编译期反射中很有用。</p> 
+<pre><code class="prism language-scala"><span class="token keyword">class</span> Creator<span class="token punctuation">[</span>T<span class="token operator">:</span> WeakTypeTag<span class="token punctuation">]</span> <span class="token punctuation">{<!-- --></span>
+
+  <span class="token keyword">def</span> createInstance<span class="token punctuation">(</span>args<span class="token operator">:</span> <span class="token builtin">AnyRef</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">(</span>ctor<span class="token operator">:</span> <span class="token builtin">Int</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token operator">:</span> T <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">val</span> tt <span class="token operator">=</span> weakTypeTag<span class="token punctuation">[</span>T<span class="token punctuation">]</span>
+    currentMirror<span class="token punctuation">.</span>reflectClass<span class="token punctuation">(</span>tt<span class="token punctuation">.</span>tpe<span class="token punctuation">.</span>typeSymbol<span class="token punctuation">.</span>asClass<span class="token punctuation">)</span><span class="token punctuation">.</span>reflectConstructor<span class="token punctuation">(</span>
+      tt<span class="token punctuation">.</span>tpe<span class="token punctuation">.</span>members<span class="token punctuation">.</span>filter<span class="token punctuation">(</span>m <span class="token keyword">=&gt;</span>
+        m<span class="token punctuation">.</span>isMethod <span class="token operator">&amp;&amp;</span> m<span class="token punctuation">.</span>asMethod<span class="token punctuation">.</span>isConstructor
+      <span class="token punctuation">)</span><span class="token punctuation">.</span>iterator<span class="token punctuation">.</span>toSeq<span class="token punctuation">(</span>ctor<span class="token punctuation">)</span><span class="token punctuation">.</span>asMethod
+    <span class="token punctuation">)</span><span class="token punctuation">(</span>args<span class="token operator">:</span> _<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">.</span>asInstanceOf<span class="token punctuation">[</span>T<span class="token punctuation">]</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>有了反射功能，我们只需要将<code>NetService</code>传入作为<code>Service</code>的类型，在宏中使用运行时反射构造对象即可。</p> 
+<pre><code class="prism language-scala">    <span class="token comment">// 这里即使与上面相比少了个service参数，但是因为编译器识别时有点问题，会和上面那个重载的apply定义冲突，所以把泛型的位置改了下，把Service泛型放到最后。</span>
+    <span class="token keyword">val</span> openSession <span class="token operator">=</span> Processable<span class="token punctuation">[</span>BOpenSessionReq<span class="token punctuation">,</span> BOpenSessionResp<span class="token punctuation">,</span> NetService<span class="token punctuation">]</span><span class="token punctuation">(</span>
+      <span class="token punctuation">(</span>service<span class="token punctuation">,</span> rpc<span class="token punctuation">,</span> req<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">import</span> <span class="token namespace">scala<span class="token punctuation">.</span>jdk<span class="token punctuation">.</span></span>CollectionConverters<span class="token punctuation">.</span>MapHasAsScala
+        <span class="token keyword">val</span> username <span class="token operator">=</span> req<span class="token punctuation">.</span>getUsername
+        <span class="token keyword">val</span> password <span class="token operator">=</span> req<span class="token punctuation">.</span>getPassword
+        <span class="token keyword">val</span> configurationMap <span class="token operator">=</span> req<span class="token punctuation">.</span>getConfigurationMap
+        <span class="token keyword">val</span> ret <span class="token operator">=</span> service<span class="token punctuation">.</span>openSession<span class="token punctuation">(</span>username<span class="token punctuation">,</span> password<span class="token punctuation">,</span> configurationMap<span class="token punctuation">.</span>asScala<span class="token punctuation">.</span>toMap<span class="token punctuation">)</span>
+        BOpenSessionResp<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>setSessionHandle<span class="token punctuation">(</span>ret<span class="token punctuation">)</span><span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token punctuation">}</span><span class="token punctuation">,</span>
+      <span class="token punctuation">(</span>service<span class="token punctuation">,</span> rpc<span class="token punctuation">,</span> exception<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+        BOpenSessionResp<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>setStatus<span class="token punctuation">(</span>exception<span class="token punctuation">.</span>getLocalizedMessage<span class="token punctuation">)</span><span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">)</span>
+</code></pre> 
+<p>到目前为止，再一般情况下，我们甚至只需要提供2个函数就能实现任意Processor的定义了，再也不用创建类了，哈哈。</p> 
+<p>宏的实现是比较难懂的，这里没有贴代码，感兴趣的可以看看源码。https://github.com/jxnu-liguobin/scala-macro-tools/tree/master/src/main/scala/io/github/dreamylost/sofa。</p> 
+<blockquote> 
+ <p>如果对你有帮助可以点个star。</p> 
+</blockquote>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

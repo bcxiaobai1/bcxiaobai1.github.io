@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>前沿科技探究之AI工具：Anomaly-detection - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">前沿科技探究之AI工具：Anomaly-detection</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>概述</h1> 
+<p>anomaly_detection是openGauss集成的、可以用于数据库指标采集、预测指标趋势变化、慢SQL根因分析以及异常监控与诊断的AI工具，是DBMind套间中的一个组件。支持采集的信息分为三块，分别是os_exporter、database_exporter、wdr，os_exporter主要包括IO_Read、IO_Write、IO_Wait、CPU_Usage、Memory_Usage、数据库数据目录磁盘空间占用Disk_space；database_exporter主要包括QPS、部分关键GUC参数（work_mem、shared_buffers、max_connections）、数据库临时文件、外部进程情况、外部连接数；wdr包括慢SQL文本、SQL开始执行时间、SQL结束执行时间相关信息。在异常监控方面，anomaly_detection可以同时对IO_Read、IO_Write、IO_Wait、CPU_Usage、Memory_Usage和Disk_Space多个指标的未来变化趋势进行预测，当发现某个指标在未来某段时间或者某个时刻会超出人工设置的阈值，该工具会通过日志进行报警。在慢SQL根因分析方面，工具会定期从WDR报告中拉取慢SQL信息，并对慢SQL的根因进行诊断，最后将诊断结果存放到日志文件中，同时该工具还支持用户交互式慢SQL诊断，即对用户输入的慢SQL进行根因分析，并将结果反馈给用户。</p> 
+<p>anomaly_detection由agent和detector两大模块组成。agent和openGauss数据库环境部署在同一个服务器上，该模块主要有两个作用。一个是定时采集数据库指标数据，并将采集到的数据存放到缓冲队列中；另一个作用是将缓冲队列中数据定时发送到detector的collector子模块中。</p> 
+<p>detector模块由collector模块和monitor模块组成，collector模块和agent模块通过http或https进行通信，接受agent模块push的数据并存储到本地。monitor模块基于本地数据对指标的未来变化趋势进行预测和异常报警，另外结合系统和WDR报告等各种相关联信息，分析慢SQL的根因。</p> 
+<h1>
+<a id="_6"></a>使用准备</h1> 
+<h2>
+<a id="_7"></a>前提条件与使用事项</h2> 
+<ul>
+<li>数据库状态正常。</li>
+<li>工具运行过程中，如果系统时间被篡改，可能会造成慢SQL数据采集失效。</li>
+<li>工具不支持在备节点上采集。</li>
+<li>使用登录到数据库宿主机上的Linux用户，需要将$GAUSSHOME/bin添加到PATH环境变量中，即能够直接运行gsql、gs_guc、gs_ctl等数据库运维工具。</li>
+<li>Python版本建议为Python3.6及以上，且运行环境中已经安装相应依赖，并能够正常启动调优程序。</li>
+<li>本工具由Agent和Detector组成，Agent和Detector之间通过’http’或者’https’方式传递数据，因此需要保证Agent服务器和Detector服务器之间能够正常通信。</li>
+<li>Detector模块运行collector和monitor服务， 需要分别启动。</li>
+<li>如果使用’https’方式进行通信，需要准备CA证书以及Agent和Detector的证书和密钥，并分别放入项目根目录certificate下的ca、agent、collector中，同时将密钥加密密码放入certificate的pwf中，并将其权限设置为600，防止其他用户进行读写操作。用户也可以使用share中的脚本生成证书和密钥。</li>
+<li>建议用户配置自己的python环境，以免影响其他功能使用（例如使用miniconda）。</li>
+<li>慢SQL的根因分析功能需要WDR报告，用户需要开启track_stmt_stat_level=‘OFF,L1’, log_min_duration_statement=3000（慢SQL阈值，用户可按需设定），单位ms。</li>
+<li>如果将detecor和数据库部署在同一服务器上，则collector服务端口不能和数据库本地端口相同，否则将无法启动进程。</li>
+</ul> 
+<h2>
+<a id="_20"></a>原理简介</h2> 
+<p>图1 anomaly_detection结构图<img src="https://images2.imgbox.com/03/48/ORjnJLXF_o.png" alt="在这里插入图片描述"><br> anomaly_detection是一个独立于数据库内核之外的工具，其结构如图1所示，anomaly_detection主要由agent和detector模块组成；</p> 
+<ul>
+<li>agent：数据代理模块，由Source、Channel以及Sink组成。部署在数据库环境上，用于采集数据库中的指标，并通过http或者https方式将其传送给远端检测器模块。</li>
+<li>detector：检测器模块，负责收集Agent推送的数据并存储，同时该模块基于时序预测和异常检测等算法对数据库指标进行监控和异常检测，同时提供慢SQL根因服务功能。</li>
+</ul> 
+<h2>
+<a id="anomaly_detection_25"></a>anomaly_detection的运行和安装方法</h2> 
+<p>1、切换到anomaly_detection目录下。对于openGauss社区代码来说，该路径在openGauss-server/src/gausskernel/dbmind/tools/anomaly_detection。对于已经安装的数据库系统，则该源代码路径为 $GAUSSHOME/bin/dbmind/anomaly_detection。<br> 2、 在当前目录下可以看到 requirements.txt 等文件，通过pip包管理工具根据该 requirements.txt 文件安装依赖：</p> 
+<pre><code>pip install -r requirements.txt
+</code></pre> 
+<p>3、 安装成功后可执行main.py。以获取帮助信息为例，则可以执行：</p> 
+<pre><code>python main.py --help  # 可以直接通过该命令执行获取帮助的动作，其他功能使用方法类似
+</code></pre> 
+<h2>
+<a id="_40"></a>证书生成</h2> 
+<p>证书生成当使用https方式进行通信时，需要用户提供证书，anomaly_detection也提供了证书生成工具。</p> 
+<p>生成CA根证书，在anomaly_detection的share目录下，执行以下命令：</p> 
+<pre><code>sh gen_ca_certificate.sh 
+</code></pre> 
+<p>该脚本会在anomaly_detection根目录下创建certificate目录，其中包括ca、server、agent三个子目录，ca中存放根证书ca.crt和密钥文件ca.key。</p> 
+<p>生成server端证书和密钥文件，在anomaly_detection的share目录下，执行以下命令：</p> 
+<pre><code>sh gen_certificate.sh
+   
+# please input the basename of ssl certificate: ../certificate/server
+   
+# please input the filename of ssl certificate: server
+   
+# please input the local host: 127.0.0.1
+   
+# please input the password of ca and ssl separated by space:
+</code></pre> 
+<p>该脚本需要用户分别输入生成证书与密钥文件存放目录、证书与密钥文件名称、detector端服务器IP地址、ca证书密码和当前证书密码(用空格分开)。脚本最后会在certificate的server下生成server.crt和server.key。</p> 
+<p>1、生成agent端证书密钥和文件，在anomaly_detection的share目录下，执行以下命令：</p> 
+<pre><code>sh gen_certificate.sh
+   
+# please input the basename of ssl certificate: ../certificate/agent
+   
+# please input the filename of ssl certificate: agent
+   
+# please input the local host: 127.0.0.1
+   
+# please input the password of ca and ssl separated by space:
+</code></pre> 
+<p>该脚本需要用户分别输入生成证书与密钥文件存放目录、证书与密钥文件名称、agent端服务器IP地址、ca证书密码和当前证书密码(用空格分开)。脚本最后会在certificate的agent下生成agent.crt和agent.key。</p> 
+<h2>
+<a id="anomaly_detection_79"></a>anomaly_detection的配置文件说明</h2> 
+<p>anomaly_detection 在运行前需要加载a-detection.conf和metric_task.conf两个配置文件，可以通过 python main.py –help 命令查看配置文件路径：</p> 
+<p>a-detection.conf：该配置文件包含agent、server、database、security、forecast、log六个section，参数解释如下：</p> 
+<pre><code>[database]
+storage_duration = 12H  # 数据存储时间长度，默认12小时
+database_dir = ./data  # 数据存储目录
+
+[security]
+tls = False
+ca = ./certificate/ca/ca.crt
+server_cert = ./certificate/server/server.crt
+server_key = ./certificate/server/server.key
+agent_cert = ./certificate/agent/agent.crt
+agent_key = ./certificate/agent/agent.key
+
+[server]
+host = 0.0.0.0  # 服务端IP地址
+listen_host = 0.0.0.0
+listen_port = 8080
+white_host = 0.0.0.0  # IP白名单
+white_port = 8000  # 端口号白名单
+
+[agent]
+source_timer_interval = 10S  # agent端数据采集频率
+sink_timer_interval = 10S  # agent端数据发送频率
+channel_capacity = 1000  # 缓冲队列最大长度
+db_host = 0.0.0.0  # agent节点IP地址
+db_port = 8080  # agent节点端口号
+db_type = single  # agent节点类型, single: 单机，cn： CN节点、dn： DN节点
+
+[forecast]
+forecast_alg = auto_arima  # 时序预测算法，auto_arima、fbprophet(需要用户自行安装)
+[log]
+log_dir = ./log  # 日志文件位置
+</code></pre> 
+<p>metric_task.conf: 该配置文件包括detector method, os_expoeterhe trend_parameter三个sections，参数结束如下：</p> 
+<pre><code>[detector_method]
+trend = os_exporter # 用于时序预测的表名
+slow_sql = wdr # 用户慢SQL诊断的表名
+
+[os_exporter]
+cpu_usage_minimum = 1 # cpu_usage的下限值
+cpu_usage_maximum = 10 # cpu_usage的上限值
+memory_usage_minimum = 1 # memory_usage的下限值
+memory_usage_maximum = 10 # memory_usage的上限值
+io_read_minimum = 1
+io_read_maximum = 10
+io_write_minimum = 1
+io_write_maximum = 10
+io_wait_minimum = 1
+io_wait_maximum = 10
+disk_space_minimum = 1
+disk_space_maximum = 10
+
+[common_parameter]
+data_period = 1000S # 是用于时序预测的历史数据长度，支持整数加时间单位（如：100S、2M、10D）。
+interval = 20S # 监控间隔
+freq = 3S # 趋势预测频率
+period = 2 # 趋势预测长度
+</code></pre> 
+<p>说明： - 支持的时间单位：</p> 
+<ul>
+<li>‘S’：second，秒。</li>
+<li>‘M’：minute，分。</li>
+<li>‘H’：hour，小时。</li>
+<li>‘D’：day，天。</li>
+<li>‘W’：week，周。</li>
+<li>minimum和maximum至少提供一个，不能都不提供。</li>
+<li>freq和period共同决定时序预测结果，例子：freq=2S，period=5, 则会预测未来2S、4S、6S、8S、10S的值。</li>
+<li>建议参数配置的时候，保证训练数据长度大于预测长度，否则预测效果会受影响。</li>
+</ul> 
+<h1>
+<a id="_155"></a>添加监控参数</h1> 
+<p>工具只针对os_exporter中的指标进行趋势预测与阈值异常检测，支持用户添加新的监控参数，步骤如下：</p> 
+<p>1、在task/os_exporter.py的OS_exporter中编写获取指标的功能函数，并将该函数加入到output的result列表中，例如：</p> 
+<pre><code>@staticmethod
+def new_metric():
+    return metric_value
+        
+def output(self):
+    result = [self.cpu_usage(), self.io_wait(), self.io_read(),
+              self.io_write(), self.memory_usage(), self.disk_space(), self.new_metric()]
+    return result
+    
+</code></pre> 
+<p>2、在table.json的os_exporter中，将new_metric字段加入到“create table“中，并在“insert”中加上字段类型信息，例如：</p> 
+<pre><code>"os_exporter": {
+  "create_table": "create table  os_exporter(timestamp bigint, cpu_usage text, io_wait text, io_read text, io_write text, memory_usage text, disk_space text, new_metric text);",
+  "insert": "insert into os_exporter values(%d, "%s", "%s", "%s", "%s", "%s", "%s", "%s");",
+</code></pre> 
+<p>3、在task/metric_task.conf中添加指标的上限值或者下限值，例如：</p> 
+<pre><code>[os_exporter]
+new_metric_minimum = 0
+new_metric_maximum = 10
+</code></pre> 
+<h1>
+<a id="_185"></a>获取帮助</h1> 
+<p>启动调优程序之前，可以通过如下命令获取帮助信息：</p> 
+<pre><code>源码方式：python main.py --help
+</code></pre> 
+<p>输出帮助信息结果如下：</p> 
+<pre><code>usage:
+    python main.py start [--role {<!-- -->{agent,collector,monitor}}] # start local service.
+    python main.py stop [--role {<!-- -->{agent,collector,monitor}}] # stop local service.
+    python main.py start [--user USER] [--host HOST] [--project-path PROJECT_PATH] [--role {<!-- -->{agent,collector,monitor}}]
+    # start the remote service.
+    python main.py stop [--user USER] [--host HOST] [--project-path PROJECT_PATH] [--role {<!-- -->{agent,collector,
+    monitor}}] # stop the remote service.
+    python main.py deploy [--user USER] [--host HOST] [--project-path PROJECT_PATH] # deploy project in remote host.
+    python main.py diagnosis [--query] [--start_time] [--finish_time] # rca for slow SQL.
+    python main.py show_metrics # display all monitored metrics(can only be executed on 'detector' machine).
+    python main.py forecast [--metric-name METRIC_NAME] [--period] [--freq]
+     [--forecast-method {<!-- -->{auto_arima, fbprophet}}] [--save-path SAVE_PATH] # forecast future trend of
+     metric(can only be executed on 'detector' machine).
+
+Anomaly-detection: a time series forecast and anomaly detection tool.
+
+positional arguments:
+  {start,stop,deploy,show_metrics,forecast,diagnosis}
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --user USER           User of remote server.
+  --host HOST           IP of remote server.
+  --project-path PROJECT_PATH
+                        Project location in remote server.
+  --role {agent,collector,monitor}
+                        Run as 'agent', 'collector', 'monitor'. Notes: ensure
+                        the normal operation of the openGauss in agent.
+  --metric-name METRIC_NAME
+                        Metric name to be predicted, you must provide an specified metric name.
+.
+  --query QUERY         target sql for RCA.
+                        Currently, the join operator is not supported, and the accuracy of the result 
+                        is not guaranteed for SQL syntax containing "not null and".
+  --start_time START_TIME
+                        start time of query
+  --finish_time FINISH_TIME
+                        finish time of query
+  --period PERIOD       Forecast periods of metric, it should be integernotes:
+                        the specific value should be determined to the
+                        trainnig data.if this parameter is not provided, the
+                        default value '100S' will be used.
+  --freq FREQ           forecast gap, time unit: S: Second, M: Minute, H:
+                        Hour, D: Day, W: Week.
+  --forecast-method FORECAST_METHOD
+                        Forecast method, default method is 'auto_arima',if
+                        want to use 'fbprophet', you should install fbprophet
+                        first.
+  --save-path SAVE_PATH
+                        Save the results to this path using csv format, if
+                        this parameter is not provided,, the result wil not be
+                        saved.
+  -v, --version         show program's version number and exit
+
+epilog:
+     the 'a-detection.conf' and 'metric_task.conf' will be read when the program is running,
+     the location of them is:
+     a-detection.conf: /openGauss-server/src/gausskernel/dbmind/tools/anomaly_detection/a-detection.conf.
+     metric_config: /openGauss-server/src/gausskernel/dbmind/tools/anomaly_detection/task/metric_task.conf.
+</code></pre> 
+<h1>
+<a id="_254"></a>使用示例</h1> 
+<p>为了方便用户理解部署过程，假设当前数据库节点信息如下：</p> 
+<pre><code>IP: 10.90.110.130
+PORT: 8000
+type: single
+</code></pre> 
+<p>detector服务器信息：</p> 
+<pre><code>IP: 10.90.110.131
+listen_host = 0.0.0.0
+listen_port = 8080
+</code></pre> 
+<p>部署的启动流程如下：</p> 
+<h2>
+<a id="_270"></a>配置文件修改</h2> 
+<p>首先需要更改配置文件 a-detection.conf，主要涉及其中的两个session：</p> 
+<pre><code>[database]
+storage_duration = 12H  # 数据存储时间长度，默认12小时
+database_dir = ./data  # 数据存储目录
+
+[security]
+tls = False
+ca = ./certificate/ca/ca.crt
+server_cert = ./certificate/server/server.crt
+server_key = ./certificate/server/server.key
+agent_cert = ./certificate/agent/agent.crt
+agent_key = ./certificate/agent/agent.key
+
+[server]
+host = 10.90.110.131
+listen_host = 0.0.0.0
+listen_port = 8080
+white_host =  10.90.110.130
+white_port = 8000
+[agent]
+source_timer_interval = 10S
+sink_timer_interval = 10S
+channel_capacity = 1000
+db_host =  10.90.110.130
+db_port = 8080
+db_type = single
+
+[forecast]
+forecast_alg = auto_arima
+
+[log]
+log_dir = ./log
+
+</code></pre> 
+<h2>
+<a id="_307"></a>服务启动与停止</h2> 
+<p>启动本地agent服务：</p> 
+<pre><code>python main.py start --role agent
+
+</code></pre> 
+<p>停止本地agent服务：</p> 
+<pre><code>python main.py stop --role agent
+
+</code></pre> 
+<p>启动本地collector服务：</p> 
+<pre><code>python main.py start --role collector 
+
+</code></pre> 
+<p>停止本地collector服务：</p> 
+<pre><code>python main.py stop --role collector 
+
+</code></pre> 
+<p>启动本地monitor服务：</p> 
+<pre><code>python main.py start --role monitor 
+
+</code></pre> 
+<p>停止本地monitor服务：</p> 
+<pre><code>python main.py stop --role monitor 
+
+</code></pre> 
+<h1>
+<a id="_344"></a>命令参考</h1> 
+<p>表 1 命令行参数</p> 
+<table>
+<thead><tr>
+<th>参数</th>
+<th>参数说明</th>
+<th>取值范围</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>mode</td>
+<td>指定运行模式</td>
+<td>start,stop,forecast,show_metrics,deploy,diagnosis</td>
+</tr>
+<tr>
+<td>–user</td>
+<td>远程服务器用户</td>
+<td>-</td>
+</tr>
+<tr>
+<td>–host</td>
+<td>远程服务器IP</td>
+<td>-</td>
+</tr>
+<tr>
+<td>–project-path</td>
+<td>远程服务器anomaly_detection项目路径</td>
+<td>-</td>
+</tr>
+<tr>
+<td>–role</td>
+<td>启动角色选择</td>
+<td>agent，collector，monitor</td>
+</tr>
+<tr>
+<td>–metric-name</td>
+<td>指标名称</td>
+<td>-</td>
+</tr>
+<tr>
+<td>–query</td>
+<td>根因分析RCA目标query</td>
+<td>-</td>
+</tr>
+<tr>
+<td>–start_time</td>
+<td>query执行的开始时间</td>
+<td>-</td>
+</tr>
+<tr>
+<td>–finish_time</td>
+<td>query执行的结束时间</td>
+<td>-</td>
+</tr>
+<tr>
+<td>–forecast-periods</td>
+<td>未来预测周期</td>
+<td>整数，具体值应该根据training数据决定。如果未提供此参数，则将使用默认值“100S”。</td>
+</tr>
+<tr>
+<td>–freq FREQ</td>
+<td>预测间隔</td>
+<td>时间单位，包括（S(second),M(minute),H(hour),D(day),W(week)）。</td>
+</tr>
+<tr>
+<td>–forecast-method</td>
+<td>预测方法</td>
+<td>auto_arima， fbprophet</td>
+</tr>
+<tr>
+<td>–save-path</td>
+<td>预测结果存放地址</td>
+<td>-</td>
+</tr>
+<tr>
+<td>–version, -v</td>
+<td>返回当前工具版本号</td>
+<td>-</td>
+</tr>
+</tbody>
+</table>
+<h2>
+<a id="AI_SERVER_363"></a>AI_SERVER</h2> 
+<p>ai_server为anomaly_detection特性的分离特性，在原anomaly_detection数据采集功能的基础上增加了采集类型、采集项、数据存储模式，仅用于数据采集，后续将整合到anomaly_detection中，该特性主要包含server组件和agent组件，agent须部署到数据库节点，用于数据采集，server部署在独立节点进行数据收集存储。</p> 
+<p>数据存储方式包括：sqlite、mongodb、influxdb。</p> 
+<p>采集项如表1：</p> 
+<p>表 1 采集项说明<br> 采集类型：database</p> 
+<table>
+<thead><tr>
+<th>采集项</th>
+<th>描述</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>work_mem</td>
+<td>数据库内存相关GUC参数，对涉及到排序任务的sql，检测分配的空间是否足够。</td>
+</tr>
+<tr>
+<td>shared_buffers</td>
+<td>数据库内存相关GUC参数，不合适的shared_buffer会导致数据库性能变差。</td>
+</tr>
+<tr>
+<td>max_connections</td>
+<td></td>
+</tr>
+<tr>
+<td>数据库最大连接数。</td>
+<td></td>
+</tr>
+<tr>
+<td>current connections</td>
+<td>数据库当前连接数。</td>
+</tr>
+<tr>
+<td>qps</td>
+<td>数据库性能指标。</td>
+</tr>
+</tbody>
+</table>
+<p>采集类型：OS</p> 
+<table>
+<thead><tr>
+<th>采集项</th>
+<th>描述</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>cpu usage</td>
+<td>cpu使用率。</td>
+</tr>
+<tr>
+<td>memory usage</td>
+<td>内存使用率。</td>
+</tr>
+<tr>
+<td>io wait</td>
+<td>系统因为io导致的进程wait。</td>
+</tr>
+<tr>
+<td>io write</td>
+<td>数据磁盘写吞吐量。</td>
+</tr>
+<tr>
+<td>io read</td>
+<td>数据磁盘读吞吐量。</td>
+</tr>
+<tr>
+<td>disk used</td>
+<td>磁盘已使用的大小。</td>
+</tr>
+</tbody>
+</table>
+<h2>
+<a id="AI_MANAGER_391"></a>AI_MANAGER</h2> 
+<p>ai_manager是AI特性部署工具，旨在为ai特性提供自动化、高效便捷的部署及卸载方式，可通过指定模块名称、操作类型及参数文件进行相应ai特性的自动化部署和卸载，实现了版本管理、操作日志记录及日志管理、安装信息记录等功能，支持特性级横向扩展，该工具目前仅支持ai_server的安装及卸载。</p> 
+<h2>
+<a id="_393"></a>使用准备</h2> 
+<ul>
+<li>项目部署路径为/dbs/AI-tools，需保证该路径存在并有读写执行权限，安装/卸载操作中会清理该路径下的内容，不要将其它文件保存在该路径下。</li>
+<li>需要安装python3环境及特性所需python库,依赖库请参考包内的requirements.txt文件。</li>
+<li>如开启https，需准备相应的根证书，秘钥文件及密码。</li>
+<li>agent节点已启动GaussDB Kernel数据库。</li>
+<li>安装agent节点须使用集群用户操作。</li>
+<li>如果agent节点集群用户的~/.bashrc文件中没有正确的PGHOST配置，需要将PGHOST配置到/dbs/AI-tools/ai_env文件中。</li>
+</ul> 
+<h2>
+<a id="_401"></a>示例</h2> 
+<p>安装命令示例：</p> 
+<pre><code>python3 ai_manager --module anomaly_detection --action install --param_file opengauss.json
+
+</code></pre> 
+<p>卸载命令示例：</p> 
+<pre><code>python3 ai_manager --module anomaly_detection--action uninstall --param_file opengauss.json
+
+</code></pre> 
+<p>参数文件示例：</p> 
+<pre><code>{
+  "scene": "opengauss",                                       # 场景，openGauss安装server及agent,huaweiyun仅安装server
+  "module": "anomaly_detection",                              # 模块（特性）名称，目前仅支持anomaly_detection
+  "action": "install",                                        # 操作类型，支持install及uninstall
+  "ca_info": {
+    "ca_cert_path": "/home/Ruby/CA_AI/ca.crt",                # 根证书路径
+    "ca_key_path": "/home/Ruby/CA_AI/ca.crt.key",             # 根证书秘钥路径
+    "ca_password": "GHJAyusa241~"                             # 根证书密码
+  },
+  "agent_nodes": [
+    {
+      "node_ip": "10.000.00.000",                             # agent节点IP
+      "username": "Ruby",                                     # agent节点用户
+      "password": "password"                                  # agent节点密码
+    }
+  ],
+  "config_info": {
+    "server": {
+      "host": "10.000.00.000",                                # server部署节点IP（执行节点）
+      "listen_host": "0.0.0.0",                               # server 监听IP
+      "listen_port": "20060",                                 # server 监听端口
+      "pull_kafka": "False"                                   # 是否拉取kafka数据，暂不支持拉取。
+    },
+    "database": {
+      "name": "sqlite",                                       # 数据存储方式，支持sqlite、mongodb、influxdb
+      "host": "127.0.0.1",                                    # 数据库ip
+      "port": "2937",                                         # 数据库端口
+      "user": "Ruby",                                         # 数据库用户
+      "size": "175000000",                                    # mongodb 最大存储容量
+      "max_rows": "1000000"                                   # mongodb 最大存储条数
+    },
+    "agent": {
+      "cluster_name": "my_cluster",                           # 采集数据库的名称
+      "collection_type": "os",                                # 采集类型，支持os、database、all
+      "collection_item": [["dn", "10.000.00.000", "33700"]],  # agent节点采集数据类型（dn/cn），采集节点IP，端口
+      "channel_capacity": "1000",                             # 队列容量
+      "source_timer_interval": "5S",                          # 采集间隔
+      "sink_timer_interval": "5S"                             # 发送间隔
+    },
+    "security": {
+      "tls": "True"                                           # 是否开启https
+    }
+  }
+}
+
+</code></pre>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

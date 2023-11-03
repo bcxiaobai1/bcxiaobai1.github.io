@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Android | Activity 启动流程分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android | Activity 启动流程分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h3>
+<a id="_0"></a>前言</h3> 
+<p><code>Activity</code> 类是 android 应用的关键组件，在日常开发中，绝对少不了组件。既然用了这么久，你知道他的启动流程?？作为一个应用层开发者，大多数人可能觉得学习这些对日常开发可能没有太大帮助。但是多了解一下 framework 的代码还是很有必要的，了解系统组件机制，对于一些问题我们也能快速的定位找到问题的所在点，并且在面试的时候也是一个加分项。</p> 
+<p>本文基于 Android 12 版本源码，从 <code>startActivity</code> 作为切入点，对整个启动流程进行分析。</p> 
+<h3>
+<a id="Activity__6"></a>Activity 启动方式</h3> 
+<p>启动一个 Activity，通常有两种情况，一种是在应用内部启动 Activity，另一种是 Launcher 启动。</p> 
+<ul>
+<li> <p>应用内启动</p> <p>通过 startActivity 来启动 Activity</p> </li>
+<li> <p>Launcher 进程启动</p> <p>Launcher 就是我们桌面程序，当系统开机后， Launcher 也随之被启动，然后将已经安装的 app 显示在桌面上，等到点击某一个 app 的时候就会 fock 一个新的进程，然后启动 Activity</p> </li>
+</ul> 
+<p>这篇文章主要来看一下应用内启动 Activity 是一个怎样的流程</p> 
+<h3>
+<a id="Activity__ATMS_20"></a>一，Activity -&gt; ATMS</h3> 
+<p>众所周知，一般情况下Activity 的启动方式有下面种：</p> 
+<ul>
+<li>startActivity(Intent intent)：直接启动一个 Activity</li>
+<li>startActivityForResult(Intent intent, int requestCode)：带返回值的启动方式，这种启动方式已经被官方所废弃，取而代之的是 <code>registerForActivityResult(contract, mActivityResultRegistry, callback)</code>
+</li>
+</ul> 
+<p>我们从 startActivity 来一步步往下看：</p> 
+<pre><code>public void startActivity(Intent intent) {
+    this.startActivity(intent, null);
+}
+</code></pre> 
+<pre><code>public void startActivity(Intent intent, @Nullable Bundle options) {
+    if (options != null) {
+        startActivityForResult(intent, -1, options);
+    } else {
+        startActivityForResult(intent, -1);
+    }
+}
+</code></pre> 
+<pre><code>public void startActivityForResult(@RequiresPermission Intent intent, int requestCode) {
+    startActivityForResult(intent, requestCode, null);
+}
+</code></pre> 
+<pre><code>public void startActivityForResult(@RequiresPermission Intent intent, int requestCode,
+        @Nullable Bundle options) {
+    if (mParent == null) {
+        ......
+        //execStartActivity
+        Instrumentation.ActivityResult ar =
+            mInstrumentation.execStartActivity(
+                this, mMainThread.getApplicationThread(), mToken, this,
+                intent, requestCode, options);
+        if (ar != null) {
+            //分析启动结果
+            mMainThread.sendActivityResult(
+                mToken, mEmbeddedID, requestCode, ar.getResultCode(),
+                ar.getResultData());
+        }
+        ......
+    } else {
+        if (options != null) {
+            //这里最终也是调用 execStartActivity 方法
+            mParent.startActivityFromChild(this, intent, requestCode, options);
+        } else {
+            mParent.startActivityFromChild(this, intent, requestCode);
+        }
+    }
+}
+</code></pre> 
+<p>上面代码中，调用了 execStartActivity 方法，该方法会返回一个启动结果。最下面的的 startActivityFromChild 方法最终也是调用的 execStartActivity。</p> 
+<p>我们先看一下该方法的参数：</p> 
+<pre><code>public ActivityResult execStartActivity(
+        Context who, IBinder contextThread, IBinder token, Activity target,
+        Intent intent, int requestCode, Bundle options) {
+}
+</code></pre> 
+<ol>
+<li> <p>Context who ：传入的是 this，用来启动 Activity 的对象</p> </li>
+<li> <p>Ibinder contextThread：Binder 对象，具有跨进程通信的能力，传入的是 mMainThread.getApplicationThread()</p> <pre><code>public ApplicationThread getApplicationThread(){
+    return mAppThread;
+}
+final ApplicationThread mAppThread = new ApplicationThread();
+
+private class ApplicationThread extends IApplicationThread.Stub {
+	.....
+}
+</code></pre> <p>ApplicationThread 是 Activitythread 的内部类，就是通过 AIDL 创建的一个远程服务的接口，用来与服务端进行交互，该对象会被传入到 AMS 中，在 AMS 中回保存他的 client（客户端），这样 AMS 就可以与应用进程进行通信了</p> </li>
+<li> <p>IBinder token：Binder 对象，指向了服务端一个 ActivityRecord 对象</p> </li>
+<li> <p>Activity target：当前的 Activity</p> </li>
+<li> <p>Intent intent, int requestCode, Bundle options ：Intent 对象，请求码和参数。</p> </li>
+</ol> 
+<p>下面我们来看一下 <code>execStartActivity</code> 方法：</p> 
+<pre><code>public ActivityResult execStartActivity(
+        Context who, IBinder contextThread, IBinder token, Activity target,
+        Intent intent, int requestCode, Bundle options) {
+    //应用端 AIDL 实现类
+    IApplicationThread whoThread = (IApplicationThread) contextThread;
+    .......
+    try {
+        intent.migrateExtraStreamToClipData(who);
+        intent.prepareToLeaveProcess(who);
+        //通过 Binder 调用 ATMS 启动 Activity
+        int result = ActivityTaskManager.getService().startActivity(whoThread,
+                who.getOpPackageName(), who.getAttributionTag(), intent,
+                intent.resolveTypeIfNeeded(who.getContentResolver()), token,
+                target != null ? target.mEmbeddedID : null, requestCode, 0, null, options);
+        checkStartActivityResult(result, intent);
+    } catch (RemoteException e) {
+        throw new RuntimeException("Failure from system", e);
+    }
+    return null;
+}
+</code></pre> 
+<pre><code>public static IActivityTaskManager getService() {
+    return IActivityTaskManagerSingleton.get();
+}
+//获取单例
+@UnsupportedAppUsage(trackingBug = 129726065)
+private static final Singleton&lt;IActivityTaskManager&gt; IActivityTaskManagerSingleton =
+        new Singleton&lt;IActivityTaskManager&gt;() {
+            @Override
+            protected IActivityTaskManager create() {
+                final IBinder b = ServiceManager.getService(Context.ACTIVITY_TASK_SERVICE);
+                return IActivityTaskManager.Stub.asInterface(b);
+            }
+        };
+</code></pre> 
+<p>我们可以用一张图来表示上述的流程：</p> 
+<p><img src="https://images2.imgbox.com/42/ca/5waotvqN_o.png" alt="image-20221221164643149"></p> 
+<p>上面代码中通过 <code>getService</code> 获取到 Binder 对象，然后将 Binder 转成 AIDL 接口所属的类型，接着就可以调用 AIDL 中的方法与服务端进行通信了。</p> 
+<p>接着调用 ATMS 中的 <code>startActivity()</code> 方法发起启动 Activity 请求，获得启动结果 result。在调用 <code>checkStartActivityResult</code> 方法，传入 result，来判断能否启动 Activity，不能启动就会抛出异常，例如 activity 未在 manifest 中声明等。</p> 
+<h3>
+<a id="_ATMS_162"></a>二 、ATMS</h3> 
+<p>通过上面的代码可以看出已经调用到了系统的 ATMS 当中，我们来看一下具体的流程</p> 
+<pre><code>#ActivityTaskManagerService.java
+@Override
+public final int startActivity(IApplicationThread caller, String callingPackage,
+        String callingFeatureId, Intent intent, String resolvedType, IBinder resultTo,
+        String resultWho, int requestCode, int startFlags, ProfilerInfo profilerInfo,
+        Bundle bOptions) {
+    return startActivityAsUser(caller, callingPackage, callingFeatureId, intent, resolvedType,
+            resultTo, resultWho, requestCode, startFlags, profilerInfo, bOptions,
+            UserHandle.getCallingUserId());
+}
+</code></pre> 
+<pre><code>#ActivityTaskManagerService.java
+public int startActivityAsUser(IApplicationThread caller, String callingPackage,
+        String callingFeatureId, Intent intent, String resolvedType, IBinder resultTo,
+        String resultWho, int requestCode, int startFlags, ProfilerInfo profilerInfo,
+        Bundle bOptions, int userId) {
+    return startActivityAsUser(caller, callingPackage, callingFeatureId, intent, resolvedType,
+            resultTo, resultWho, requestCode, startFlags, profilerInfo, bOptions, userId,
+            true /*validateIncomingUser*/);
+}
+</code></pre> 
+<pre><code>#ActivityTaskManagerService.java
+private int startActivityAsUser(IApplicationThread caller, String callingPackage,
+        @Nullable String callingFeatureId, Intent intent, String resolvedType,
+        IBinder resultTo, String resultWho, int requestCode, int startFlags,
+        ProfilerInfo profilerInfo, Bundle bOptions, int userId, boolean validateIncomingUser) {
+    //检查调用者权限
+    userId = getActivityStartController().checkTargetUser(userId, validateIncomingUser,
+            Binder.getCallingPid(), Binder.getCallingUid(), "startActivityAsUser");
+    // TODO: Switch to user app stacks here.
+    return getActivityStartController().obtainStarter(intent, "startActivityAsUser")
+            .setCaller(caller)
+            .setCallingPackage(callingPackage)
+            .setCallingFeatureId(callingFeatureId)
+            .setResolvedType(resolvedType)
+            .setResultTo(resultTo)
+            .setResultWho(resultWho)
+            .setRequestCode(requestCode)
+            .setStartFlags(startFlags)
+            .setProfilerInfo(profilerInfo)
+            .setActivityOptions(bOptions)
+            .setUserId(userId)
+            .execute();
+}
+</code></pre> 
+<p>上面代码最终调用到了 <code>startActivityAsUser</code> 方法，在内部将所有点的参数都交给了 ActivityStarter ，该类包含了启动的所有逻辑，比如 Intent 解析以及任务栈等。</p> 
+<p>接着调用了<code>obtainStarter</code> ，该方法通过工厂模式创建了 ActivityStarter 对象，如下所示：</p> 
+<pre><code>#ActivityStarter.java
+static class DefaultFactory implements Factory {
+    /**
+     * ActivitySatrter 最大数量
+     */
+    private final int MAX_STARTER_COUNT = 3;
+    ......
+		//同步池
+    private SynchronizedPool&lt;ActivityStarter&gt; mStarterPool =
+            new SynchronizedPool&lt;&gt;(MAX_STARTER_COUNT);
+
+    DefaultFactory(ActivityTaskManagerService service,
+            ActivityTaskSupervisor supervisor, ActivityStartInterceptor interceptor) {
+        mService = service;
+        mSupervisor = supervisor;
+        mInterceptor = interceptor;
+    }
+
+    @Override
+    public void setController(ActivityStartController controller) {
+        mController = controller;
+    }
+
+    @Override
+    public ActivityStarter obtain() {
+        //从同步池中获取 ActivityStarter 对象
+        ActivityStarter starter = mStarterPool.acquire();
+        if (starter == null) {
+            if (mService.mRootWindowContainer == null) {
+                throw new IllegalStateException("Too early to start activity.");
+            }
+            starter = new ActivityStarter(mController, mService, mSupervisor, mInterceptor);
+        }
+        return starter;
+    }
+
+    @Override
+    public void recycle(ActivityStarter starter) {
+        starter.reset(true /* clearRequest*/);
+        mStarterPool.release(starter);
+    }
+}
+</code></pre> 
+<p>可以看到，默认的工厂在提供了一个容量为 3 的同步缓存池来缓存 ActivityStarter 对象，该对象创建完成之后，该对象创建完成之后，AMTS 就会将接下来启动 Activity 的操作交给 ActivityStarter 来完成。</p> 
+<pre><code>#ActivityStarter.java
+//根据前面传入的参数解析一下必要的信息，并开始启动 Activity
+int execute() {
+    try {
+        int res;
+        synchronized (mService.mGlobalLock) {
+            .....
+            res = executeRequest(mRequest);//开始执行请求
+            .....
+            return getExternalResult(res);
+        }
+    } finally {
+        onExecutionComplete();
+    }
+}
+</code></pre> 
+<pre><code>#ActivityStarter.java
+private int executeRequest(Request request) {
+    .......
+  	//检测Activity启动的权限
+    boolean abort = !mSupervisor.checkStartAnyActivityPermission(intent, aInfo, 							resultWho,requestCode, callingPid, callingUid, callingPackage, 										callingFeatureId,request.ignoreTargetSecurity, inTask != null, 										callerApp, resultRecord, resultRootTask);
+    abort |= !mService.mIntentFirewall.checkStartActivity(intent, callingUid,
+            callingPid, resolvedType, aInfo.applicationInfo);
+    abort |= !mService.getPermissionPolicyInternal().checkStartActivity(intent, callingUid,
+            callingPackage);
+
+    final ActivityRecord r = new ActivityRecord.Builder(mService)
+            .setCaller(callerApp)
+            .setLaunchedFromPid(callingPid)
+            .setLaunchedFromUid(callingUid)
+            .setLaunchedFromPackage(callingPackage)
+            .setLaunchedFromFeature(callingFeatureId)
+            .setIntent(intent)
+            .setResolvedType(resolvedType)
+            .setActivityInfo(aInfo)
+            .setConfiguration(mService.getGlobalConfiguration())
+            .setResultTo(resultRecord)
+            .setResultWho(resultWho)
+            .setRequestCode(requestCode)
+            .setComponentSpecified(request.componentSpecified)
+            .setRootVoiceInteraction(voiceSession != null)
+            .setActivityOptions(checkedOptions)
+            .setSourceRecord(sourceRecord)
+            .build();
+
+    mLastStartActivityRecord = r;
+
+    mLastStartActivityResult = startActivityUnchecked(r, sourceRecord, voiceSession,
+            request.voiceInteractor, startFlags, true /* doResume */, checkedOptions, inTask,
+            restrictedBgActivity, intentGrants);
+
+    return mLastStartActivityResult;
+}
+</code></pre> 
+<p>上面代码中会进行一些校验和判断权限，包括进程检查，intent检查，权限检查等，后面就会创建 <code>ActivityRecord</code> ，每个 Activity 都会对应一个 <code>ActivityRecord</code> 对象，接着就会调用 <code>startActivityUnchecked</code> 方法对要启动的 Activity 做任务栈管理。</p> 
+<pre><code>#ActivityStarter.java
+private int startActivityUnchecked(final ActivityRecord r, ActivityRecord sourceRecord,
+            IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
+            int startFlags, boolean doResume, ActivityOptions options, Task inTask,
+            boolean restrictedBgActivity, NeededUriGrants intentGrants) {
+    int result = START_CANCELED;
+    final Task startedActivityRootTask;
+    try {
+        mService.deferWindowLayout();
+        Trace.traceBegin(Trace.TRACE_TAG_WINDOW_MANAGER, "startActivityInner");
+        result = startActivityInner(r, sourceRecord, voiceSession, voiceInteractor,
+                startFlags, doResume, options, inTask, restrictedBgActivity, intentGrants);
+    } finally {
+        Trace.traceEnd(Trace.TRACE_TAG_WINDOW_MANAGER);
+        startedActivityRootTask = handleStartResult(r, result);
+        mService.continueWindowLayout();
+    }
+
+    postStartActivityProcessing(r, result, startedActivityRootTask);
+
+    return result;
+}
+</code></pre> 
+<p>在大多数初步检查已经完成的情况下开始进行下一步确认拥有必要的权限。 上面的核心方法就是 <code>startActivityInner()</code> 用来检查启动所必须要有的权限</p> 
+<pre><code>#ActivityStarter.java
+int startActivityInner(final ActivityRecord r, ActivityRecord sourceRecord,
+        IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
+        int startFlags, boolean doResume, ActivityOptions options, Task inTask,
+        boolean restrictedBgActivity, NeededUriGrants intentGrants) {
+  	//设置初始化状态
+    setInitialState(r, options, inTask, doResume, startFlags, sourceRecord, voiceSession,
+            voiceInteractor, restrictedBgActivity);
+		//判断启动模式，并且在 mLaunchFlags 上追加对应标记
+    computeLaunchingTaskFlags();
+		//设置 Activity 的栈
+    computeSourceRootTask();
+		//设置 LaunchFlags 到 intent 上
+    mIntent.setFlags(mLaunchFlags);
+
+  	//决定是否应将新活动插入现有任务中。返回null, 如果不是则应将新活动添加到其中的任务进行活动记录
+    final Task reusedTask = getReusableTask();
+
+    ......
+
+    //reusedTask 为 null 则计算是否存在可以使用的任务栈
+    final Task targetTask = reusedTask != null ? reusedTask : computeTargetTask();
+    //是否需要创建栈  
+    final boolean newTask = targetTask == null;
+    mTargetTask = targetTask;
+
+    computeLaunchParams(r, sourceRecord, targetTask);
+
+    //检查是否允许在给定任务或新任务上启动活动
+    int startResult = isAllowedToStart(r, newTask, targetTask);
+    if (startResult != START_SUCCESS) {
+        return startResult;
+    }
+
+    final ActivityRecord targetTaskTop = newTask
+            ? null : targetTask.getTopNonFinishingActivity();
+    if (targetTaskTop != null) {
+        // Recycle the target task for this launch.
+        startResult = recycleTask(targetTask, targetTaskTop, reusedTask, intentGrants);
+        if (startResult != START_SUCCESS) {
+            return startResult;
+        }
+    } else {
+        mAddingToTask = true;
+    }
+
+  	//如果正在启动的活动与当前位于顶部的活动相同
+    //则需要检查它是否应该只启动一次
+    final Task topRootTask = mPreferredTaskDisplayArea.getFocusedRootTask();
+    if (topRootTask != null) {
+        startResult = deliverToCurrentTopIfNeeded(topRootTask, intentGrants);
+        if (startResult != START_SUCCESS) {
+            return startResult;
+        }
+    }
+
+    //复用或者创建新栈
+    if (mTargetRootTask == null) {
+        mTargetRootTask = getLaunchRootTask(mStartActivity, mLaunchFlags, targetTask, mOptions);
+    }
+    if (newTask) {
+      	//新建一个 Task
+        final Task taskToAffiliate = (mLaunchTaskBehind &amp;&amp; mSourceRecord != null)
+                ? mSourceRecord.getTask() : null;
+        setNewTask(taskToAffiliate);
+    } else if (mAddingToTask) {
+        //复用之前的 Task
+        addOrReparentStartingActivity(targetTask, "adding to task");
+    }
+
+ 		......
+    if (mDoResume) {
+			// 调用 resumeFocusedTasksTopActivities方法
+      mRootWindowContainer.resumeFocusedTasksTopActivities(
+                    mTargetRootTask, mStartActivity, mOptions, mTransientLaunch);
+    }
+    mRootWindowContainer.updateUserRootTask(mStartActivity.mUserId, mTargetRootTask);
+    .....
+    return START_SUCCESS;
+}
+</code></pre> 
+<p>在上面方法中，根据启动模式计算出 flag，然后在根据 flag 等条件判断要启动的 Activity 的 ActivityRecord 是需要新创建 Task 栈 还是加入到现有的 Task 栈。</p> 
+<p>在为 Activity 准备好 Task 栈之后，调用了 mRootWindowContainer.resumeFocuredTasksTopActivities 方法。</p> 
+<pre><code>#RootWindowContainer.java
+boolean resumeFocusedTasksTopActivities(
+        Task targetRootTask, ActivityRecord target, ActivityOptions targetOptions,
+        boolean deferPause) {
+    boolean result = false;
+    if (targetRootTask != null &amp;&amp; (targetRootTask.isTopRootTaskInDisplayArea()
+            || getTopDisplayFocusedRootTask() == targetRootTask)) {
+        result = targetRootTask.resumeTopActivityUncheckedLocked(target, targetOptions,deferPause);
+    }
+    return result;
+}
+</code></pre> 
+<pre><code>#Task.java
+boolean resumeTopActivityUncheckedLocked(ActivityRecord prev, ActivityOptions options,boolean deferPause) {
+    if (mInResumeTopActivity) {
+        // Don't even start recursing.
+        return false;
+    }
+
+    boolean someActivityResumed = false;
+    try {
+        // Protect against recursion.
+        mInResumeTopActivity = true;
+        ....
+        someActivityResumed = resumeTopActivityInnerLocked(prev,options,deferPause);
+    } finally {
+        mInResumeTopActivity = false;
+    }
+
+    return someActivityResumed;
+}
+</code></pre> 
+<pre><code>#Task.java
+private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOptions options,
+        boolean deferPause) {
+    if (!mAtmService.isBooting() &amp;&amp; !mAtmService.isBooted()) {
+        // Not ready yet!
+        return false;
+    }
+
+    // 在当前 Task 栈中找到最上层正在运行的 Activity
+    // 如果这个 Activity 没有获取焦点，那这个 Activity 将会被重新启动
+    ActivityRecord next = topRunningActivity(true /* focusableOnly */);
+
+    if (next.attachedToProcess()) {
+        ......
+    } else {
+        ......
+        //调用 ActivityTaskSupervisor.startSpecificActivity
+        mTaskSupervisor.startSpecificActivity(next, true, true);
+    }
+
+    return true;
+}
+</code></pre> 
+<pre><code>#ActivityTaskSupervisor.java
+void startSpecificActivity(ActivityRecord r, boolean andResume, boolean checkConfig) {
+        // 获取目标进程
+        final WindowProcessController wpc =
+                mService.getProcessController(r.processName, r.info.applicationInfo.uid);
+
+        boolean knownToBeDead = false;
+        if (wpc != null &amp;&amp; wpc.hasThread()) {
+            try {
+                //如果进程存在，启动 Activity 并返回
+                realStartActivityLocked(r, wpc, andResume, checkConfig);
+                return;
+            } catch (RemoteException e) {
+
+            }
+            knownToBeDead = true;
+        }
+        r.notifyUnknownVisibilityLaunchedForKeyguardTransition();
+        final boolean isTop = andResume &amp;&amp; r.isTopRunningActivity();
+        // 进程不存在，则创建进程，并启动 Activity
+        mService.startProcessAsync(r, knownToBeDead, isTop, isTop ? "top-activity" : "activity");
+    }
+
+</code></pre> 
+<p>如果进程不存在，则会创建进程，如果进程存在，则执行此方法</p> 
+<pre><code>boolean realStartActivityLocked(ActivityRecord r, WindowProcessController proc,
+        boolean andResume, boolean checkConfig) throws RemoteException {
+
+    // 创建启动 Activity 的事务
+    // proc.getThread() 获取的是一个 IApplicationThread 对象
+    final ClientTransaction clientTransaction = ClientTransaction.obtain(
+              proc.getThread(), r.appToken);
+
+    final boolean isTransitionForward = r.isTransitionForward();
+    // 为事务设置 Callback LaunchActivityItem，在客户端时会被调用
+    clientTransaction.addCallback(LaunchActivityItem.obtain(new Intent(r.intent), 											System.identityHashCode(r), r.info,
+            mergedConfiguration.getGlobalConfiguration(),
+            mergedConfiguration.getOverrideConfiguration(), r.compat,
+            r.launchedFromPackage, task.voiceInteractor, proc.getReportedProcState(),
+            r.getSavedState(), r.getPersistentSavedState(), results, newIntents,
+            r.takeOptions(), isTransitionForward,
+            proc.createProfilerInfoIfNeeded(), r.assistToken, 					
+            activityClientController,
+            r.createFixedRotationAdjustmentsIfNeeded(), r.shareableActivityToken,
+            r.getLaunchedFromBubble()));
+
+     // 生命周期对象
+     final ActivityLifecycleItem lifecycleItem;
+     if (andResume) {
+         lifecycleItem = ResumeActivityItem.obtain(isTransitionForward);
+     } else {
+         lifecycleItem = PauseActivityItem.obtain();
+     }
+     // 设置生命周期请求
+     clientTransaction.setLifecycleStateRequest(lifecycleItem);
+
+     // 执行事务
+     mService.getLifecycleManager().scheduleTransaction(clientTransaction);
+
+    return true;
+}
+</code></pre> 
+<p>上面代码的核心就是创建事务实例，然后来启动 Activity 。</p> 
+<p>ClientTransaction 是一个容器，里面包含了一些列的消息，这些消息会被发送到客户端，这些消息包括了一系列的回调和一个最终的生命周期状态。</p> 
+<p>ActivityLifecycleItem 用来请求 Activity 应该到达那个生命周期。</p> 
+<p>ClientLifecycleManager 用来执行事务</p> 
+<p>接着上面的代码往下走，就到了 <code>scheduleTransaction()</code>：</p> 
+<pre><code>void scheduleTransaction(ClientTransaction transaction) throws RemoteException {
+    // AIDL 接口，在客户端被实现，也就是 app 中
+    final IApplicationThread client = transaction.getClient();
+    //执行事务
+    transaction.schedule();
+    if (!(client instanceof Binder)) {
+        transaction.recycle();
+    }
+}
+</code></pre> 
+<pre><code>public void schedule() throws RemoteException {
+    mClient.scheduleTransaction(this);
+}
+</code></pre> 
+<p>mClient 就是 IApplicationThread 的实例，这里是一个 IPC 调用，会直接调用到 App 进程中，并传入了 this，也就是 ClientTransaction 对象。</p> 
+<p>IApplicationThread 是 ApplicationThread 所实现的，<strong>他是 ActivityThread 的内部类</strong>：</p> 
+<pre><code>private class ApplicationThread extends IApplicationThread.Stub {
+    @Override
+    public void scheduleTransaction(ClientTransaction transaction) throws RemoteException {
+        ActivityThread.this.scheduleTransaction(transaction);
+    }
+}
+</code></pre> 
+<p>我们用一张图来描述一下上面的流程</p> 
+<p><img src="https://images2.imgbox.com/14/b0/1unqYvJk_o.png" alt=""></p> 
+<p>在上面代码中检查 intent 以及各种权限，并且会获取启动模式，设置启动 Activity 的Task，最后判断 Activity 所在的进程是否存活，如果不存在则创建，如果存在则会通过 IPC 回调到 ApplicationThread 中去。</p> 
+<h3>
+<a id="ActivityThread_617"></a>三、ActivityThread</h3> 
+<p>通过上面，我们知道了启动 Activity 最终有回调到 ApplicationThread，而它又是 ActivityThread 的子类。所以 上面代码最终调用到了 ActivityThread 的父类 ClientTransactionHandler 中:</p> 
+<pre><code>void scheduleTransaction(ClientTransaction transaction) {
+    transaction.preExecute(this);//处理
+  	//发送消息
+    sendMessage(ActivityThread.H.EXECUTE_TRANSACTION, transaction);
+}
+</code></pre> 
+<pre><code>//创建的时候传入了 ActivityThread 实例
+private final TransactionExecutor mTransactionExecutor = new TransactionExecutor(this);
+
+#ActivityThread$H
+case EXECUTE_TRANSACTION:
+    final ClientTransaction transaction = (ClientTransaction) msg.obj;
+    mTransactionExecutor.execute(transaction);
+    if (isSystem()) {
+        transaction.recycle();
+    }
+    break;
+</code></pre> 
+<p>上面代码中通过 <code>TransactionExecutor</code> 来执行事务:</p> 
+<pre><code>public void execute(ClientTransaction transaction) {
+    //执行回调
+    executeCallbacks(transaction);
+    //处理生命周期状态
+    executeLifecycleState(transaction);
+    mPendingActions.clear();
+    if (DEBUG_RESOLVER) Slog.d(TAG, tId(transaction) + "End resolving transaction");
+}
+
+//处理生命周期状态
+private void executeLifecycleState(ClientTransaction transaction) {
+    final ActivityLifecycleItem lifecycleItem = transaction.getLifecycleStateRequest();
+    if (lifecycleItem == null) {
+        // No lifecycle request, return early.
+        return;
+    }
+
+    final IBinder token = transaction.getActivityToken();
+    final ActivityClientRecord r = mTransactionHandler.getActivityClient(token);
+    if (DEBUG_RESOLVER) {
+        Slog.d(TAG, tId(transaction) + "Resolving lifecycle state: "
+                + lifecycleItem + " for activity: "
+                + getShortActivityName(token, mTransactionHandler));
+    }
+
+    if (r == null) {
+        // Ignore requests for non-existent client records for now.
+        return;
+    }
+
+    // 切换到对应的生命周期
+    cycleToPath(r, lifecycleItem.getTargetState(), true /* excludeLastState */, transaction);
+
+    // Execute the final transition with proper parameters.
+    lifecycleItem.execute(mTransactionHandler, token, mPendingActions);
+    lifecycleItem.postExecute(mTransactionHandler, token, mPendingActions);
+}
+
+private void cycleToPath(ActivityClientRecord r, int finish, boolean excludeLastState,
+        ClientTransaction transaction) {
+    final int start = r.getLifecycleState();
+
+    final IntArray path = mHelper.getLifecyclePath(start, finish, excludeLastState);
+    performLifecycleSequence(r, path, transaction);
+}
+
+//执行生命周期状态
+private void performLifecycleSequence(ActivityClientRecord r, IntArray path,
+        ClientTransaction transaction) {
+    final int size = path.size();
+    for (int i = 0, state; i &lt; size; i++) {
+        state = path.get(i);
+        switch (state) {
+            case ON_CREATE:
+                mTransactionHandler.handleLaunchActivity(r, mPendingActions,
+                        null /* customIntent */);
+                break;
+            case ON_START:
+                mTransactionHandler.handleStartActivity(r, mPendingActions,
+                        null /* activityOptions */);
+                break;
+            case ON_RESUME:
+                mTransactionHandler.handleResumeActivity(r, false /* finalStateRequest */,
+                        r.isForward, "LIFECYCLER_RESUME_ACTIVITY");
+                break;
+            case ON_PAUSE:
+                mTransactionHandler.handlePauseActivity(r, false /* finished */,
+                        false /* userLeaving */, 0 /* configChanges */, mPendingActions,
+                        "LIFECYCLER_PAUSE_ACTIVITY");
+                break;
+            case ON_STOP:
+                mTransactionHandler.handleStopActivity(r, 0 /* configChanges */,
+                        mPendingActions, false /* finalStateRequest */,
+                        "LIFECYCLER_STOP_ACTIVITY");
+                break;
+            case ON_DESTROY:
+                mTransactionHandler.handleDestroyActivity(r, false /* finishing */,
+                        0 /* configChanges */, false /* getNonConfigInstance */,
+                        "performLifecycleSequence. cycling to:" + path.get(size - 1));
+                break;
+            case ON_RESTART:
+                mTransactionHandler.performRestartActivity(r, false /* start */);
+                break;
+            default:
+                throw new IllegalArgumentException("Unexpected lifecycle state: " + state);
+        }
+    }
+}
+</code></pre> 
+<p>由于是新启动的 Activity，所以最开始执行的是 <code>ON_CREATE</code> 状态，也就是 <code>handleLaunchActivity</code> 方法, 而 mTransactionHandler 则是从构造方法中传入的，所以这里调用你的就是 ActivityThread 中的方法。</p> 
+<pre><code>#ActivityThread.java
+public Activity handleLaunchActivity(ActivityClientRecord r,
+        PendingTransactionActions pendingActions, Intent customIntent) {
+
+	  //获取 Activity 的实例
+    final Activity a = performLaunchActivity(r, customIntent);
+
+    return a;
+}
+</code></pre> 
+<pre><code>#ActivityThread.java
+private Activity performLaunchActivity(ActivityClientRecord r, Intent customIntent) {
+    ActivityInfo aInfo = r.activityInfo;
+
+    ContextImpl appContext = createBaseContextForActivity(r);
+    Activity activity = null;
+    try {
+        //反射创建 Activity 
+        java.lang.ClassLoader cl = appContext.getClassLoader();
+        activity = mInstrumentation.newActivity(
+                cl, component.getClassName(), r.intent);
+        ......
+    } catch (Exception e) {
+        if (!mInstrumentation.onException(activity, e)) {
+            throw new RuntimeException(
+                "Unable to instantiate activity " + component
+                + ": " + e.toString(), e);
+        }
+    }
+
+    try {
+        //如果没有 Application ，则进行创建
+        Application app = r.packageInfo.makeApplication(false, mInstrumentation);
+
+        ......
+        if (activity != null) {
+            Window window = null;
+            if (r.mPendingRemoveWindow != null &amp;&amp; r.mPreserveWindow) {
+                window = r.mPendingRemoveWindow;
+                r.mPendingRemoveWindow = null;
+                r.mPendingRemoveWindowManager = null;
+            }
+ 						....
+            // 加载资源
+            appContext.getResources().addLoaders(
+                    app.getResources().getLoaders().toArray(new ResourcesLoader[0]));
+            // 调用 attach 方法
+            activity.attach(appContext, this, getInstrumentation(), r.token,
+                    r.ident, app, r.intent, r.activityInfo, title, r.parent,
+                    r.embeddedID, r.lastNonConfigurationInstances, config,
+                    r.referrer, r.voiceInteractor, window, r.configCallback,
+                    r.assistToken, r.shareableActivityToken);
+
+            //回调 onCreate 方法
+            if (r.isPersistable()) {
+                mInstrumentation.callActivityOnCreate(activity, r.state, r.persistentState);
+            } else {
+                mInstrumentation.callActivityOnCreate(activity, r.state);
+            }
+
+        }
+        //设置当前状态
+        r.setState(ON_CREATE);
+				......
+    } 
+    return activity;
+}
+</code></pre> 
+<p>回调到 ActivityThread 后，会发送一个 EXECUTE_TRANSACTION 消息，处理 system_server 传过来的 ClientTransaction。</p> 
+<p>具体的处理是在 TransactionExecutor 的 execute 方法中完成的，在里面会先执行各种回调，然后处理并切换到对应的生命周期。在根据对应的什么周期执行对应的方法。由于这里是新建的 aCTIVITY ，所以状态是 ON_CREATE，就会执行 handleLaunchActivity 方法。</p> 
+<p>接着就会调用 performLaunchActivity 创建 Activity 的实例，调用 attach 初始化 activity，最后回调 activity 中的 onCreate 方法。</p> 
+<h3>
+<a id="_816"></a>总结一下流程</h3> 
+<ol>
+<li>调用 Activity 的 startActivity 方法来启动目标 Activity</li>
+<li>接着就会调用到 Instrunmentation 的 execStartActivity 方法，通过获取 ATMS 的 binder 代理对象，然后调用到 ATMS 的 startActivity 中去</li>
+<li>调用到 ATMS 中后，会执行到<code>ActivityStarter</code> 的 execute 方法，内部最终执行到了 executeRequest ，接着就会进行一些校验和判断权限，包括进程检查，intent检查，权限检查等，后面就会创建 <code>ActivityRecord</code> ，用来保存 Activity 的相关信息，</li>
+<li>然后就会根据启动模式计算 flag ，设置启动 Activity 的 Task 栈。</li>
+<li>在 ActivityTaskSupervisor 中检查要启动的 Activity 进程是否存在，存在则向客户端进程 ApplicationThread 回调启动 Activity，否则就创建进程。</li>
+<li>会调到 ActivityThread 后在 TransactionExecute 中开始执行system_server回调回来的事务，处理各种回调，切换到对应的生命周期</li>
+<li>最后又回调到 ActivityThread 的 handleLaunchActivity 来启动 Activity。在其中调用了 performLaunchActivity 方法。</li>
+<li>在 performLaunchActivity 中通过反射创建 Activity 实例，如果没有 Application 则先进行创建，然后再调用Activity 的 attach 方法进行初始化，最后回调 activity 的 onCreate 方法。</li>
+</ol> 
+<h3>
+<a id="_827"></a>参考</h3> 
+<p><a href="https://link.juejin.cn?target=https%3A%2F%2Fwww.jianshu.com%2Fp%2F56023d8902ee" title="https://www.jianshu.com/p/56023d8902ee">Activity 启动流程</a></p> 
+<p><a href="https://juejin.cn/post/6976795559755513863" title="https://juejin.cn/post/6976795559755513863">Android 深入研究之 ✨ Activity启动流程</a></p> 
+<p><a href="https://juejin.cn/post/7129778558469144613" title="https://juejin.cn/post/7129778558469144613">ramework | Activity启动流程(android-31)</a></p> 
+<h3>
+<a id="_835"></a>最后</h3> 
+<p>文章到这里就结束了，本文主要是分析了一下应用内 Activity 的启动过程，由于我对整个启动的细节也不是非常了解，所以文章中可能有一些错误的地方，如果有还请指出，谢谢。如果对你有用请用你发财的小手点个赞！</p> 
+<blockquote> 
+ <p>作者：345丶<br> 链接：https://juejin.cn/post/7179901192229617724</p> 
+</blockquote> 
+<h2>
+<a id="_843"></a>最后</h2> 
+<p>如果想要成为架构师或想突破20~30K薪资范畴，那就不要局限在编码，业务，要会选型、扩展，提升编程思维。此外，良好的职业规划也很重要，学习的习惯很重要，但是最重要的还是要能持之以恒，任何不能坚持落实的计划都是空谈。</p> 
+<p>如果你没有方向，这里给大家分享一套由阿里高级架构师编写的《Android八大模块进阶笔记》，帮大家将杂乱、零散、碎片化的知识进行体系化的整理，让大家系统而高效地掌握Android开发的各个知识点。</p> 
+<p><img src="https://images2.imgbox.com/fa/f7/YlDwo6T7_o.png" alt="在这里插入图片描述"><br> 相对于我们平时看的碎片化内容，这份笔记的知识点更系统化，更容易理解和记忆，是严格按照知识体系编排的。</p> 
+<h3>
+<a id="_854"></a>全套视频资料：</h3> 
+<p><strong>一、面试合集</strong><br> <img src="https://images2.imgbox.com/36/c4/tDwckC7P_o.png" alt="在这里插入图片描述"><br> <strong>二、源码解析合集</strong></p> 
+<p><img src="https://images2.imgbox.com/8f/d3/WYN84tzy_o.png" alt="在这里插入图片描述"><br> <strong>三、开源框架合集</strong></p> 
+<p><img src="https://images2.imgbox.com/26/02/cyfEQA83_o.png" alt="在这里插入图片描述"><br> <strong>欢迎大家一键三连支持，若需要文中资料，直接点击文末CSDN官方认证微信卡片免费领取↓↓↓</strong></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

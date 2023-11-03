@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>pytorch--从零实现一个BERT模型 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">pytorch--从零实现一个BERT模型</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    
+                        
+                    
+                    <p>本文主要从代码的角度一步步来讲解一下BERT模型是如何实现的。(后附完整代码)<br> 关于BERT的理论解析现在随便一搜就可以找到很多，在这里就不在赘述。</p> 
+<p></p>
+<div class="toc">
+ <h3>BERT源码</h3>
+ <ul>
+<li><a href="#_6">模型架构</a></li>
+<li><a href="#_36">模型实现</a></li>
+<li>
+<ul>
+<li><a href="#_38">定义超参</a></li>
+<li><a href="#_55">文本预处理</a></li>
+<li><a href="#make_batch_100">make_batch()</a></li>
+<li><a href="#model_216">model</a></li>
+<li>
+<ul>
+<li><a href="#Embedding_254">Embedding</a></li>
+<li><a href="#get_attn_pad_mask_286">get_attn_pad_mask</a></li>
+<li><a href="#layers_304">layers</a></li>
+<li>
+<ul>
+<li><a href="#MultiHeadAttention_325">MultiHeadAttention</a></li>
+<li>
+<ul><li><a href="#ScaledDotProductAttention_362">ScaledDotProductAttention</a></li></ul>
+     </li>
+<li><a href="#PoswiseFeedForwardNet_394">PoswiseFeedForwardNet</a></li>
+</ul>
+   </li>
+</ul>
+   </li>
+<li><a href="#Loss_435">Loss</a></li>
+<li><a href="#_452">总结：</a></li>
+<li><a href="#_468">完整源码</a></li>
+<li><a href="#_720">特别鸣谢：</a></li>
+</ul>
+ </li>
+</ul>
+</div>
+<p></p> 
+<h1>
+<a id="_6"></a>模型架构</h1> 
+<p>首先先说一下大佬传授的技巧 ?<br> 写模型代码要注意两点：<br> <mark>1.从整体到局部；</mark><br> <mark>2.数据流动形状；</mark><br> 怎么理解呢？对于一个模型的搭建我们不可能一蹴而就，要先从整体入手，先把大框搭起来，然后在实现每个函数具体的功能。<br> 对于“数据流动形状”，要着重关注这个函数输入输出，比如经过Embedding层，原数据肯定会多一个维度，增加的这个维度后续我们会怎么处理。</p> 
+<p>先大概说一下我们这个模型要干什么事，先对bert这个模型有个大概一下印象。<br> <img src="https://images2.imgbox.com/b9/25/m84FbG3q_o.png" alt="在这里插入图片描述"></p> 
+<ol>
+<li>对文本处理得到原始标签</li>
+<li>对原始标签做mask</li>
+<li>做Embedding</li>
+<li>送入bert</li>
+<li>对输出部分做处理<br> a. 第一个字符 &lt; cls&gt;对应的输出接一个linear层做一个二分类即NSP任务;<br> b.mask对应位置的输出接一个解码层 将768维的Embedding映射成词表大小，然后与真实标签做loss。</li>
+</ol> 
+<p>再来看一下4.中的bert都干了些什么？<br> 首先将输入文本做一个Embedding(①)，然后送入多头注意力机制中(②)，输出接一个Layer Normalization和残差连接(③)最后送入两个linear层中(④)<br> 这就是上图中一个Encoder做的事情。<br> <img src="https://images2.imgbox.com/32/3c/LLesg3Ga_o.png" alt="在这里插入图片描述"><br> 到这大家对我们要干什么脑海里应该有了一个模糊的框架。<br> 接下来就是代码部分。完全按照上面描绘的走~</p> 
+<p>下面代码的一个整体框架,其中<mark>make_batch ，model</mark>部分是重点<br> 而model中的<mark>layers</mark>又是重重之中<br> <img src="https://images2.imgbox.com/2f/fc/Is4p2x9f_o.png" alt="在这里插入图片描述"></p> 
+<h1>
+<a id="_36"></a>模型实现</h1> 
+<p>我们先从整体 即“main”入手：</p> 
+<h2>
+<a id="_38"></a>定义超参</h2> 
+<pre><code class="prism language-python"><span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">'__main__'</span><span class="token punctuation">:</span>
+    <span class="token comment"># BERT Parameters</span>
+    maxlen <span class="token operator">=</span> <span class="token number">30</span> <span class="token comment"># 句子的最大长度</span>
+    batch_size <span class="token operator">=</span> <span class="token number">6</span> <span class="token comment"># 每一组有多少个句子一起送进去模型</span>
+    max_pred <span class="token operator">=</span> <span class="token number">5</span>  <span class="token comment"># max tokens of prediction</span>
+    n_layers <span class="token operator">=</span> <span class="token number">6</span> <span class="token comment"># number of Encoder of Encoder Layer</span>
+    n_heads <span class="token operator">=</span> <span class="token number">12</span> <span class="token comment"># number of heads in Multi-Head Attention</span>
+    d_model <span class="token operator">=</span> <span class="token number">768</span> <span class="token comment"># Embedding Size</span>
+    d_ff <span class="token operator">=</span> <span class="token number">3072</span>  <span class="token comment"># 4*d_model, FeedForward dimension</span>
+    d_k <span class="token operator">=</span> d_v <span class="token operator">=</span> <span class="token number">64</span>  <span class="token comment"># dimension of K(=Q), V</span>
+    n_segments <span class="token operator">=</span> <span class="token number">2</span> <span class="token comment"># 用于NSP任务</span>
+</code></pre> 
+<p>首先是定义一些超参，具体作用均已标注。<br> 其中需要注意的一个参数是：<strong>max_pred</strong> 它表示的是一个句子中最多可以有多少个mask，怎么用后面我们会谈到（一个坑，在make_batch()部分会讲到）</p> 
+<h2>
+<a id="_55"></a>文本预处理</h2> 
+<p>因为我们注重的是模型的实现，所以数据部分就自己定义了一些对话语句，在实际应用中往往会是海量的文本。</p> 
+<pre><code class="prism language-python">    text <span class="token operator">=</span> <span class="token punctuation">(</span>
+        <span class="token string">'Hello, how are you? I am Romeo.n'</span>
+        <span class="token string">'Hello, Romeo My name is Juliet. Nice to meet you.n'</span>
+        <span class="token string">'Nice meet you too. How are you today?n'</span>
+        <span class="token string">'Great. My baseball team won the competition.n'</span>
+        <span class="token string">'Oh Congratulations, Julietn'</span>
+        <span class="token string">'Thanks you Romeo'</span>
+    <span class="token punctuation">)</span>
+</code></pre> 
+<p>数据有了，接下来就是对数据进行处理</p> 
+<pre><code class="prism language-python">    sentences <span class="token operator">=</span> re<span class="token punctuation">.</span>sub<span class="token punctuation">(</span><span class="token string">"[.,!?\-]"</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">,</span> text<span class="token punctuation">.</span>lower<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token string">'n'</span><span class="token punctuation">)</span>  <span class="token comment"># filter '.', ',', '?', '!'</span>
+</code></pre> 
+<p>通过re.sub函数将数据中的特殊字符清除掉 并将大写字符全部转变为小写字符<br> 效果：<img src="https://images2.imgbox.com/d3/bc/1AdhPAmo_o.png" alt="在这里插入图片描述"></p> 
+<pre><code class="prism language-python">    word_list <span class="token operator">=</span> <span class="token builtin">list</span><span class="token punctuation">(</span><span class="token builtin">set</span><span class="token punctuation">(</span><span class="token string">" "</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>sentences<span class="token punctuation">)</span><span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    word_dict <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'[PAD]'</span><span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token string">'[CLS]'</span><span class="token punctuation">:</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token string">'[SEP]'</span><span class="token punctuation">:</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token string">'[MASK]'</span><span class="token punctuation">:</span> <span class="token number">3</span><span class="token punctuation">}</span>
+    <span class="token keyword">for</span> i<span class="token punctuation">,</span> w <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>word_list<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        word_dict<span class="token punctuation">[</span>w<span class="token punctuation">]</span> <span class="token operator">=</span> i <span class="token operator">+</span> <span class="token number">4</span>
+    number_dict <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>i<span class="token punctuation">:</span> w <span class="token keyword">for</span> i<span class="token punctuation">,</span> w <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>word_dict<span class="token punctuation">)</span><span class="token punctuation">}</span>
+    vocab_size <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>word_dict<span class="token punctuation">)</span>
+</code></pre> 
+<p>word_list：根据“ ”空格切分后的单词列表<br> word_dict: 加入特殊字符生成的词典<br> number_dict：将word_dict的键值对调换(预测时候会用到)<br> 效果：<br> <img src="https://images2.imgbox.com/57/93/aphGSpyh_o.png" alt="在这里插入图片描述"></p> 
+<pre><code class="prism language-python">    <span class="token comment"># 把文本转化成数字</span>
+    token_list <span class="token operator">=</span> <span class="token builtin">list</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> sentence <span class="token keyword">in</span> sentences<span class="token punctuation">:</span>
+        arr <span class="token operator">=</span> <span class="token punctuation">[</span>word_dict<span class="token punctuation">[</span>s<span class="token punctuation">]</span> <span class="token keyword">for</span> s <span class="token keyword">in</span> sentence<span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">]</span>
+        token_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>arr<span class="token punctuation">)</span>
+</code></pre> 
+<p>根据刚刚生成好的word_dict 将sentences 中的字符转换成数字 方便后面处理<br> 效果：<br> <img src="https://images2.imgbox.com/ef/9a/dJUhx3yc_o.png" alt="在这里插入图片描述" width="50%" height="50%"><br> 文本预处理完~~~~~~</p> 
+<p>继续往下看就是最重要的数据构建部分了</p> 
+<h2>
+<a id="make_batch_100"></a>make_batch()</h2> 
+<pre><code class="prism language-python">    batch <span class="token operator">=</span> make_batch<span class="token punctuation">(</span><span class="token punctuation">)</span>  <span class="token comment"># 最重要的一部分  预训练任务的数据构建部分</span>
+    input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_tokens<span class="token punctuation">,</span> masked_pos<span class="token punctuation">,</span> isNext <span class="token operator">=</span> <span class="token builtin">map</span><span class="token punctuation">(</span>torch<span class="token punctuation">.</span>LongTensor<span class="token punctuation">,</span> <span class="token builtin">zip</span><span class="token punctuation">(</span><span class="token operator">*</span>batch<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token comment"># map把函数依次作用在list中的每一个元素上，得到一个新的list并返回。注意，map不改变原list，而是返回一个新list。</span>
+</code></pre> 
+<p>通过 make_batch() 对数据进行处理，<br> 得到 <strong>input_ids, segment_ids, masked_tokens, masked_pos, isNext</strong><br> 我们跳到make_batch()函数部分看一下这几个代表的是什么，和它具体是怎么处理的。</p> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">make_batch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    batch <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token comment"># list</span>
+    positive <span class="token operator">=</span> negative <span class="token operator">=</span> <span class="token number">0</span>  <span class="token comment"># 计数器 为了记录NSP任务中的正样本和负样本的个数，比例最好是在一个batch中接近1：1</span>
+    <span class="token keyword">while</span> positive <span class="token operator">!=</span> batch_size<span class="token operator">/</span><span class="token number">2</span> <span class="token keyword">or</span> negative <span class="token operator">!=</span> batch_size<span class="token operator">/</span><span class="token number">2</span><span class="token punctuation">:</span>
+        <span class="token comment">#  抽出来两句话 先随机sample两个index 再通过index找出样本</span>
+        tokens_a_index<span class="token punctuation">,</span> tokens_b_index<span class="token operator">=</span> randrange<span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>sentences<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> randrange<span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>sentences<span class="token punctuation">)</span><span class="token punctuation">)</span>  <span class="token comment"># 比如tokens_a_index=3，tokens_b_index=1；从整个样本中抽取对应的样本；</span>
+        tokens_a<span class="token punctuation">,</span> tokens_b<span class="token operator">=</span> token_list<span class="token punctuation">[</span>tokens_a_index<span class="token punctuation">]</span><span class="token punctuation">,</span> token_list<span class="token punctuation">[</span>tokens_b_index<span class="token punctuation">]</span><span class="token comment">## 根据索引获取对应样本：tokens_a=[5, 23, 26, 20, 9, 13, 18] tokens_b=[27, 11, 23, 8, 17, 28, 12, 22, 16, 25]</span>
+        <span class="token comment"># 拼接</span>
+        input_ids <span class="token operator">=</span> <span class="token punctuation">[</span>word_dict<span class="token punctuation">[</span><span class="token string">'[CLS]'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">+</span> tokens_a <span class="token operator">+</span> <span class="token punctuation">[</span>word_dict<span class="token punctuation">[</span><span class="token string">'[SEP]'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">+</span> tokens_b <span class="token operator">+</span> <span class="token punctuation">[</span>word_dict<span class="token punctuation">[</span><span class="token string">'[SEP]'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token comment">## 加上特殊符号，CLS符号是1，sep符号是2：[1, 5, 23, 26, 20, 9, 13, 18, 2, 27, 11, 23, 8, 17, 28, 12, 22, 16, 25, 2]</span>
+        segment_ids <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">+</span> <span class="token builtin">len</span><span class="token punctuation">(</span>tokens_a<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>tokens_b<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token comment">##分割句子符号：[0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]</span>
+</code></pre> 
+<p>实现的效果：<br> <img src="https://images2.imgbox.com/67/82/eWmtCkBv_o.png" alt="在这里插入图片描述"><br> <mark>input_ids 是下图中的Token Embeddings</mark><br> <mark>segment_ids就是下图中的Segment Embeddings</mark></p> 
+ 
+ <img src="https://images2.imgbox.com/6a/cf/V897H49c_o.png" width="70%"> 
+
+<p>接下来是要对刚刚拼接好的input_ids进行mask处理：</p> 
+<pre><code class="prism language-python">        <span class="token comment"># MASK LM</span>
+        n_pred <span class="token operator">=</span> <span class="token builtin">min</span><span class="token punctuation">(</span>max_pred<span class="token punctuation">,</span> <span class="token builtin">max</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token builtin">round</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">0.15</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>  <span class="token comment"># n_pred=3；整个句子的15%的字符可以被mask掉，这里取和max_pred中的最小值，确保每次计算损失的时候没有那么多字符以及信息充足，有15%做控制就够了；其实可以不用加这个，单个句子少了，就要加上足够的训练样本</span>
+        <span class="token comment"># 不让特殊字符参与mask</span>
+        cand_maked_pos <span class="token operator">=</span> <span class="token punctuation">[</span>i <span class="token keyword">for</span> i<span class="token punctuation">,</span> token <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span>
+                          <span class="token keyword">if</span> token <span class="token operator">!=</span> word_dict<span class="token punctuation">[</span><span class="token string">'[CLS]'</span><span class="token punctuation">]</span> <span class="token keyword">and</span> token <span class="token operator">!=</span> word_dict<span class="token punctuation">[</span><span class="token string">'[SEP]'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token comment">## cand_maked_pos=[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]；整个句子input_ids中可以被mask的符号必须是非cls和sep符号的，要不然没意义</span>
+        shuffle<span class="token punctuation">(</span>cand_maked_pos<span class="token punctuation">)</span><span class="token comment">## 打乱顺序：cand_maked_pos=[6, 5, 17, 3, 1, 13, 16, 10, 12, 2, 9, 7, 11, 18, 4, 14, 15]  其实取mask对应的位置有很多方法，这里只是一种使用shuffle的方式</span>
+</code></pre> 
+<p>在这部分就要用到我们最开始提到的那个值得注意的超参：max_pred（填坑）<br> 为什么需要max_pred？<br> 比如在mask时候，一个句子被mask了3个单词，另一个句子被mask了7个单词。<br> 很难把这两个句子组成一个有效的矩阵。我们之前做了一个最大长度的截断，这max_pred也相当一个截断参数。<br> cand_maked_pos的作用是去掉特殊字符&lt; CLS &gt; &lt; SEP&gt;,整个句子input_ids中可以被mask的符号必须是非cls和sep符号的，要不然没意义</p> 
+<pre><code class="prism language-python">        masked_tokens<span class="token punctuation">,</span> masked_pos <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token keyword">for</span> pos <span class="token keyword">in</span> cand_maked_pos<span class="token punctuation">[</span><span class="token punctuation">:</span>n_pred<span class="token punctuation">]</span><span class="token punctuation">:</span>  <span class="token comment"># 取其中的三个；masked_pos=[6, 5, 17] 注意这里对应的是position信息；masked_tokens=[13, 9, 16] 注意这里是被mask的元素之前对应的原始单字数字；</span>
+            masked_pos<span class="token punctuation">.</span>append<span class="token punctuation">(</span>pos<span class="token punctuation">)</span>
+            masked_tokens<span class="token punctuation">.</span>append<span class="token punctuation">(</span>input_ids<span class="token punctuation">[</span>pos<span class="token punctuation">]</span><span class="token punctuation">)</span>  
+            <span class="token keyword">if</span> random<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0.8</span><span class="token punctuation">:</span>  <span class="token comment"># 80%</span>
+                input_ids<span class="token punctuation">[</span>pos<span class="token punctuation">]</span> <span class="token operator">=</span> word_dict<span class="token punctuation">[</span><span class="token string">'[MASK]'</span><span class="token punctuation">]</span>  <span class="token comment"># make mask</span>
+            <span class="token keyword">elif</span> random<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0.5</span><span class="token punctuation">:</span>  <span class="token comment"># 10%</span>
+                index <span class="token operator">=</span> randint<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> vocab_size <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token comment"># random index in vocabulary</span>
+                input_ids<span class="token punctuation">[</span>pos<span class="token punctuation">]</span> <span class="token operator">=</span> word_dict<span class="token punctuation">[</span>number_dict<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token comment"># replace</span>
+</code></pre> 
+<p><mark>masked_tokens对应的是被mask元素之前的原始的单字数字</mark>,<br> <mark>masked_pos 对应的是position信息</mark><br> 然后对其按照8/1/1比例mask<br> 想要实现的效果：<br> <img src="https://images2.imgbox.com/e3/3e/g2zdO0q4_o.png" alt="在这里插入图片描述"><br> 接下来是补零操作：</p> 
+<pre><code class="prism language-python">        <span class="token comment"># Zero Paddings</span>
+        n_pad <span class="token operator">=</span> maxlen <span class="token operator">-</span> <span class="token builtin">len</span><span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span><span class="token comment">##maxlen=30；n_pad=10</span>
+        input_ids<span class="token punctuation">.</span>extend<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> n_pad<span class="token punctuation">)</span>
+        segment_ids<span class="token punctuation">.</span>extend<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> n_pad<span class="token punctuation">)</span><span class="token comment"># 这里有一个问题，0和之前的重了</span>
+
+        <span class="token comment"># Zero Padding (100% - 15%) tokens 是为了计算一个batch中句子的mlm损失的时候可以组成一个有效矩阵放进去；不然第一个句子预测5个字符，第二句子预测7个字符，第三个句子预测8个字符，组不成一个有效的矩阵；</span>
+        <span class="token comment">## 这里非常重要，为什么是对masked_tokens是补零，而不是补其他的字符？</span>
+        <span class="token comment">## 我补1可不可以？ 后面会讲到</span>
+        <span class="token keyword">if</span> max_pred <span class="token operator">&gt;</span> n_pred<span class="token punctuation">:</span>
+            n_pad <span class="token operator">=</span> max_pred <span class="token operator">-</span> n_pred
+            masked_tokens<span class="token punctuation">.</span>extend<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> n_pad<span class="token punctuation">)</span><span class="token comment">##  masked_tokens= [13, 9, 16, 0, 0] masked_tokens 对应的是被mask的元素的原始真实标签是啥，也就是groundtruth</span>
+            masked_pos<span class="token punctuation">.</span>extend<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> n_pad<span class="token punctuation">)</span><span class="token comment">## masked_pos= [6, 5, 17，0，0] masked_pos是记录哪些位置被mask了</span>
+
+        <span class="token keyword">if</span> tokens_a_index <span class="token operator">+</span> <span class="token number">1</span> <span class="token operator">==</span> tokens_b_index <span class="token keyword">and</span> positive <span class="token operator">&lt;</span> batch_size<span class="token operator">/</span><span class="token number">2</span><span class="token punctuation">:</span>
+            batch<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token punctuation">[</span>input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_tokens<span class="token punctuation">,</span> masked_pos<span class="token punctuation">,</span> <span class="token boolean">True</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token comment"># IsNext</span>
+            positive <span class="token operator">+=</span> <span class="token number">1</span>
+        <span class="token keyword">elif</span> tokens_a_index <span class="token operator">+</span> <span class="token number">1</span> <span class="token operator">!=</span> tokens_b_index <span class="token keyword">and</span> negative <span class="token operator">&lt;</span> batch_size<span class="token operator">/</span><span class="token number">2</span><span class="token punctuation">:</span>
+            batch<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token punctuation">[</span>input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_tokens<span class="token punctuation">,</span> masked_pos<span class="token punctuation">,</span> <span class="token boolean">False</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token comment"># NotNext</span>
+            negative <span class="token operator">+=</span> <span class="token number">1</span>
+    <span class="token keyword">return</span> batch
+</code></pre> 
+<p><mark>为什么要补零呢？</mark><br> 是为了计算一个batch中句子的mlm损失的时候可以组成一个有效矩阵放进去；不然第一个句子预测5个字符，第二句子预测7个字符，第三个句子预测8个字符，组不成一个有效的矩阵；<br> 还有一个点，<mark>为什么补的是零，而不是其他值？</mark><br> 在后面的loss部分会给出解释。</p> 
+<p>通过 batch.append添加的字段就是我们要得到 <strong>input_ids, segment_ids, masked_tokens, masked_pos, isNext</strong><br> <mark>input_ids 是bert输入的Token Embeddings</mark><br> <mark>segment_idsbert输入的Segment Embeddings</mark><br> <mark>masked_tokens对应的是被mask元素之前的原始的单字数字</mark>,<br> <mark>masked_pos 对应的是position信息</mark><br> <mark>isNext 代表这两个句子是否是相邻的上下文</mark></p> 
+<p>make_batch()完~~~~~~<br> 回到main()继续往下看</p> 
+<p>定义模型，损失函数 和 优化策略</p> 
+<pre><code class="prism language-python">    model <span class="token operator">=</span> BERT<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    criterion <span class="token operator">=</span> nn<span class="token punctuation">.</span>CrossEntropyLoss<span class="token punctuation">(</span>ignore_index<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">)</span> <span class="token comment"># 只计算mask位置的损失</span>
+    optimizer <span class="token operator">=</span> optim<span class="token punctuation">.</span>Adam<span class="token punctuation">(</span>model<span class="token punctuation">.</span>parameters<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> lr<span class="token operator">=</span><span class="token number">0.001</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这里有一个细节是nn.CrossEntropyLoss(ignore_index=0) 我们定义了一个ignore_index为0，<br> <img src="https://images2.imgbox.com/e9/b0/sYyBWriZ_o.png" alt="在这里插入图片描述" width="90%" height="90%"></p> 
+<p>我们可以看到loss 中给出的解释的我们可以指定一个值，这个值不参与计算。也就是说我们后面在<mark>计算loss的时候，0不参与计算，即我们对masked_tokens补零后不影响结果。</mark></p> 
+<p>接下来是main()中的调用部分</p> 
+<pre><code class="prism language-python">   <span class="token keyword">for</span> epoch <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        optimizer<span class="token punctuation">.</span>zero_grad<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment"># logits_lm 语言词表的输出</span>
+        <span class="token comment"># logits_clsf 二分类的输出</span>
+        <span class="token comment"># logits_lm：[batch_size, max_pred, n_vocab]</span>
+        logits_lm<span class="token punctuation">,</span> logits_clsf <span class="token operator">=</span> model<span class="token punctuation">(</span>input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_pos<span class="token punctuation">)</span><span class="token comment">## logits_lm 【6，5，29】 bs*max_pred*voca  logits_clsf:[6*2]</span>
+</code></pre> 
+<h2>
+<a id="model_216"></a>model</h2> 
+<p>我们传给model 三个参数input_ids, segment_ids, masked_pos，分别为<br> <mark>input_ids ：bert输入的Token Embeddings</mark><br> <mark>segment_ids ：bert输入的Segment Embeddings</mark><br> <mark>masked_pos ：对应的是选中那15%的position信息</mark></p> 
+<p>我们刚刚在make_baatch已经说的很清楚了，还是不太明白的可以在回去看一下~<br> 我们来看一下model = BERT()的详细处理过程：<br> 首先是一些定义</p> 
+<pre><code class="prism language-python"><span class="token keyword">class</span> <span class="token class-name">BERT</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>BERT<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>embedding <span class="token operator">=</span> Embedding<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token comment">## 词向量层，构建词表矩阵</span>
+        self<span class="token punctuation">.</span>layers <span class="token operator">=</span> nn<span class="token punctuation">.</span>ModuleList<span class="token punctuation">(</span><span class="token punctuation">[</span>EncoderLayer<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>n_layers<span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token comment">## 把N个encoder堆叠起来，具体encoder实现一会看</span>
+        self<span class="token punctuation">.</span>fc <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span> <span class="token comment">## 前馈神经网络-cls</span>
+        self<span class="token punctuation">.</span>activ1 <span class="token operator">=</span> nn<span class="token punctuation">.</span>Tanh<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token comment">## 激活函数-cls</span>
+        self<span class="token punctuation">.</span>linear <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span><span class="token comment">#-mlm</span>
+        self<span class="token punctuation">.</span>activ2 <span class="token operator">=</span> gelu <span class="token comment">## 激活函数--mlm</span>
+        self<span class="token punctuation">.</span>norm <span class="token operator">=</span> nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">(</span>d_model<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>classifier <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token comment">## cls 这是一个分类层，维度是从d_model到2，对应我们架构图中就是这种：</span>
+        <span class="token comment"># decoder is shared with embedding layer</span>
+        <span class="token comment"># 注意这部分的decoder不是transformer中的decoder 而是将‘mlm任务’输出解码到词表大小的一个映射</span>
+        embed_weight <span class="token operator">=</span> self<span class="token punctuation">.</span>embedding<span class="token punctuation">.</span>tok_embed<span class="token punctuation">.</span>weight
+        n_vocab<span class="token punctuation">,</span> n_dim <span class="token operator">=</span> embed_weight<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>decoder <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>n_dim<span class="token punctuation">,</span> n_vocab<span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>decoder<span class="token punctuation">.</span>weight <span class="token operator">=</span> embed_weight
+        self<span class="token punctuation">.</span>decoder_bias <span class="token operator">=</span> nn<span class="token punctuation">.</span>Parameter<span class="token punctuation">(</span>torch<span class="token punctuation">.</span>zeros<span class="token punctuation">(</span>n_vocab<span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>其中值得关注的是<strong>self.embedding，self.layers</strong> 这也是我们要重点讲的</p> 
+<p>下面是BERT的实现部分</p> 
+<pre><code class="prism language-python">    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_pos<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># 将input_ids，segment_ids，pos_embed加和得到input</span>
+        <span class="token builtin">input</span> <span class="token operator">=</span> self<span class="token punctuation">.</span>embedding<span class="token punctuation">(</span>input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">)</span> 
+</code></pre> 
+<p>我们将input_ids, segment_ids传给Embedding，那Embedding会进行什么操作呢？</p> 
+<h3>
+<a id="Embedding_254"></a>Embedding</h3> 
+<pre><code class="prism language-python"><span class="token keyword">class</span> <span class="token class-name">Embedding</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>Embedding<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>tok_embed <span class="token operator">=</span> nn<span class="token punctuation">.</span>Embedding<span class="token punctuation">(</span>vocab_size<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span>  <span class="token comment"># token embedding</span>
+        self<span class="token punctuation">.</span>pos_embed <span class="token operator">=</span> nn<span class="token punctuation">.</span>Embedding<span class="token punctuation">(</span>maxlen<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span>  <span class="token comment"># position embedding</span>
+        self<span class="token punctuation">.</span>seg_embed <span class="token operator">=</span> nn<span class="token punctuation">.</span>Embedding<span class="token punctuation">(</span>n_segments<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span>  <span class="token comment"># segment(token type) embedding</span>
+        <span class="token comment"># self.norm = nn.LayerNorm(d_model)</span>
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">)</span>
+        seq_len <span class="token operator">=</span> input_ids<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token comment"># input_ids：batch_size x len x d_model</span>
+        pos <span class="token operator">=</span> torch<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>seq_len<span class="token punctuation">,</span> dtype<span class="token operator">=</span>torch<span class="token punctuation">.</span><span class="token builtin">long</span><span class="token punctuation">)</span> <span class="token comment">#生成数组</span>
+        pos <span class="token operator">=</span> pos<span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">.</span>expand_as<span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span>  <span class="token comment"># (seq_len,) -&gt; (batch_size, seq_len)</span>
+        embedding <span class="token operator">=</span> self<span class="token punctuation">.</span>tok_embed<span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span> <span class="token operator">+</span> self<span class="token punctuation">.</span>pos_embed<span class="token punctuation">(</span>pos<span class="token punctuation">)</span> <span class="token operator">+</span> self<span class="token punctuation">.</span>seg_embed<span class="token punctuation">(</span>segment_ids<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> embedding
+</code></pre> 
+<p>首先是在定义部分（ <strong>init</strong> ）定义了三个映射规则<br> 然后在实现部分（ forward ）通过arange生成一个与input_ids 维度一致的数组(已填充好的)，然后将传入的input_ids, segment_ids和生成的pos 相加<mark>得到bert的最终输入，即下图中的input</mark>。</p> 
+ 
+ <img src="https://images2.imgbox.com/6a/cf/V897H49c_o.png" width="70%"> 
+
+<p>arange函数的效果：</p> 
+<p><img src="https://images2.imgbox.com/d8/f8/rznAb5or_o.png" alt="在这里插入图片描述" width="70%" height="70%"><br> Embedding完~~~~~~<br> 回到model部分我们继续往下看</p> 
+<p>是一个get_attn_pad_mask函数，它的作用是为了得到句子中pad的位置信息，给到模型后面，在计算自注意力和交互注意力的时候去掉pad符号的影响。</p> 
+<pre><code class="prism language-python">		<span class="token comment">##get_attn_pad_mask是为了得到句子中pad的位置信息，给到模型后面，在计算自注意力和交互注意力的时候去掉pad符号的影响</span>
+        enc_self_attn_pad <span class="token operator">=</span> get_attn_pad_mask<span class="token punctuation">(</span>input_ids<span class="token punctuation">,</span> input_ids<span class="token punctuation">)</span>
+</code></pre> 
+<p>下面我们来具体看一下这个函数</p> 
+<h3>
+<a id="get_attn_pad_mask_286"></a>get_attn_pad_mask</h3> 
+<pre><code class="prism language-python"><span class="token keyword">def</span> <span class="token function">get_attn_pad_mask</span><span class="token punctuation">(</span>seq_q<span class="token punctuation">,</span> seq_k<span class="token punctuation">)</span><span class="token punctuation">:</span> <span class="token comment"># 在自注意力层q k是一致的</span>
+    batch_size<span class="token punctuation">,</span> len_q <span class="token operator">=</span> seq_q<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    batch_size<span class="token punctuation">,</span> len_k <span class="token operator">=</span> seq_k<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token comment"># eq(zero) is PAD token</span>
+    <span class="token comment"># eq(0)表示和0相等的返回True，不相等返回False。</span>
+    pad_attn_mask <span class="token operator">=</span> seq_k<span class="token punctuation">.</span>data<span class="token punctuation">.</span>eq<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>  <span class="token comment"># batch_size x 1 x len_k(=len_q), one is masking</span>
+    <span class="token keyword">return</span> pad_attn_mask<span class="token punctuation">.</span>expand<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> len_q<span class="token punctuation">,</span> len_k<span class="token punctuation">)</span>  <span class="token comment"># 重复了len_q次  batch_size x len_q x len_k 不懂可以看一下例子</span>
+</code></pre> 
+<p>内容不多也很好懂，seq_k.data.eq(0)是将input_ids中=0的置为True 其他置为False，.unsqueeze(1)的作用是增加一维，然后通过.expand函数重复 len_q次 ，最终会return我们想要的 <mark>符号矩阵</mark>。</p> 
+
+ <img src="https://images2.imgbox.com/c9/32/oRo8hvIe_o.png" width="60%"> 
+
+<p>.expand函数：<br> <img src="https://images2.imgbox.com/d2/74/TtTarfGT_o.png" alt="在这里插入图片描述" width="50%" height="70%"><br> get_attn_pad_mask完~~~~~~</p> 
+<p>回到model部分我们继续往下看</p> 
+<h3>
+<a id="layers_304"></a>layers</h3> 
+<pre><code class="prism language-python">        <span class="token keyword">for</span> layer <span class="token keyword">in</span> self<span class="token punctuation">.</span>layers<span class="token punctuation">:</span>
+            output<span class="token punctuation">,</span> enc_self_attn <span class="token operator">=</span> layer<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">,</span> enc_self_attn_pad<span class="token punctuation">)</span> <span class="token comment">## enc_self_attn这里是QK转置相乘之后softmax之后的矩阵值，代表的是每个单词和其他单词相关性；</span>
+        <span class="token comment"># output : [batch_size, len, d_model], attn : [batch_size, n_heads, d_mode, d_model]</span>
+</code></pre> 
+<p>对于layers是我们在最开始就提到它是整个模型的重中之中，因为我们要在layer部分实现最重要的多头注意力机制和 pos_ffn<br> <img src="https://images2.imgbox.com/2a/9a/fg4lVZO5_o.png" alt="在这里插入图片描述"></p> 
+<pre><code class="prism language-python"><span class="token keyword">class</span> <span class="token class-name">EncoderLayer</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>EncoderLayer<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>enc_self_attn <span class="token operator">=</span> MultiHeadAttention<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>pos_ffn <span class="token operator">=</span> PoswiseFeedForwardNet<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> enc_inputs<span class="token punctuation">,</span> enc_self_attn_pad<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        enc_outputs<span class="token punctuation">,</span> attn <span class="token operator">=</span> self<span class="token punctuation">.</span>enc_self_attn<span class="token punctuation">(</span>enc_inputs<span class="token punctuation">,</span> enc_inputs<span class="token punctuation">,</span> enc_inputs<span class="token punctuation">,</span> enc_self_attn_pad<span class="token punctuation">)</span> <span class="token comment"># enc_inputs to same Q,K,V enc_self_attn_mask是pad符号矩阵</span>
+
+</code></pre> 
+<p>对于多头注意力机制我们的输入有四个<strong>enc_inputs, enc_inputs, enc_inputs, enc_self_attn_pad</strong> 分别代表<strong>Q K V</strong> 和我们之前求出的<strong>符号矩阵</strong>。</p> 
+<h4>
+<a id="MultiHeadAttention_325"></a>MultiHeadAttention</h4> 
+<pre><code class="prism language-python">lass MultiHeadAttention<span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>MultiHeadAttention<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment">## 输入进来的QKV是相等的，使用映射linear做一个映射得到参数矩阵Wq, Wk,Wv</span>
+        self<span class="token punctuation">.</span>W_Q <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_k <span class="token operator">*</span> n_heads<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>W_K <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_k <span class="token operator">*</span> n_heads<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>W_V <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_v <span class="token operator">*</span> n_heads<span class="token punctuation">)</span>
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> Q<span class="token punctuation">,</span> K<span class="token punctuation">,</span> V<span class="token punctuation">,</span> attn_pad<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">## 这个多头分为这几个步骤，首先映射分头，然后计算atten_scores，然后计算atten_value;</span>
+        <span class="token comment">## 输入进来的数据形状： Q: [batch_size x len_q x d_model], K: [batch_size x len_k x d_model], V: [batch_size x len_k x d_model]</span>
+        <span class="token comment"># q: [batch_size x len_q x d_model], k: [batch_size x len_k x d_model], v: [batch_size x len_k x d_model]</span>
+        residual<span class="token punctuation">,</span> batch_size <span class="token operator">=</span> Q<span class="token punctuation">,</span> Q<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+        <span class="token comment"># (B, S, D) -proj-&gt; (B, S, D) -split-&gt; (B, S, H, W) -trans-&gt; (B, H, S, W)</span>
+        <span class="token comment">##下面这个就是先映射，后分头；一定要注意的是q和k分头之后维度是一致额，所以这里都是dk</span>
+        q_s <span class="token operator">=</span> self<span class="token punctuation">.</span>W_Q<span class="token punctuation">(</span>Q<span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads<span class="token punctuation">,</span> d_k<span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span>  <span class="token comment"># q_s: [batch_size x n_heads x len_q x d_k]</span>
+        k_s <span class="token operator">=</span> self<span class="token punctuation">.</span>W_K<span class="token punctuation">(</span>K<span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads<span class="token punctuation">,</span> d_k<span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span>  <span class="token comment"># k_s: [batch_size x n_heads x len_k x d_k]</span>
+        v_s <span class="token operator">=</span> self<span class="token punctuation">.</span>W_V<span class="token punctuation">(</span>V<span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads<span class="token punctuation">,</span> d_v<span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span>  <span class="token comment"># v_s: [batch_size x n_heads x len_k x d_v]</span>
+        <span class="token comment">## 输入进行的attn_pad形状是 batch_size x len_q x len_k，然后经过下面这个代码得到 新的attn_pad : [batch_size x n_heads x len_q x len_k]，就是把pad信息重复了n个头上</span>
+        attn_pad <span class="token operator">=</span> attn_pad<span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">.</span>repeat<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span>    <span class="token comment"># repeat 对张量重复扩充</span>
+</code></pre> 
+<p>首先使用映射linear做一个映射得到参数矩阵Wq, Wk,Wv 注意这里的参数矩阵的维度是<mark>d_k * n_heads</mark> 是‘多头’之后的<br> q_s = self.W_Q(Q).view(batch_size, -1, n_heads, d_k).transpose(1,2)<br> 的意思是先通过映射得到参数矩阵，在通过.view将其“分头”并调整维度顺序<br> .view函数效果：<br> <img src="https://images2.imgbox.com/b0/bb/SklUcRX7_o.png" alt="在这里插入图片描述" width="50%" height="70%"><br> 然后通过打分函数得到注意力矩阵context, 注意力分数attn（没乘V之前的矩阵）</p> 
+<pre><code class="prism language-python">        <span class="token comment"># context: [batch_size x n_heads x len_q x d_v], attn: [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]</span>
+        context<span class="token punctuation">,</span> attn <span class="token operator">=</span> ScaledDotProductAttention<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>q_s<span class="token punctuation">,</span> k_s<span class="token punctuation">,</span> v_s<span class="token punctuation">,</span> attn_pad<span class="token punctuation">)</span>
+        context <span class="token operator">=</span> context<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">.</span>contiguous<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads <span class="token operator">*</span> d_v<span class="token punctuation">)</span> <span class="token comment"># context: [batch_size x len_q x n_heads * d_v]</span>
+        output <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>n_heads <span class="token operator">*</span> d_v<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span><span class="token punctuation">(</span>context<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">(</span>d_model<span class="token punctuation">)</span><span class="token punctuation">(</span>output <span class="token operator">+</span> residual<span class="token punctuation">)</span><span class="token punctuation">,</span> attn <span class="token comment"># output: [batch_size x len_q x d_model]</span>
+</code></pre> 
+<p>ScaledDotProductAttention部分要实现的就是点积注意力计算公式：</p> 
+<h5>
+<a id="ScaledDotProductAttention_362"></a>ScaledDotProductAttention</h5> 
+<p>点积注意力计算公式：<br> <img src="https://images2.imgbox.com/0f/a1/QuYfInED_o.png" alt="在这里插入图片描述" width="60%" height="60%"></p> 
+<pre><code class="prism language-python"><span class="token keyword">class</span> <span class="token class-name">ScaledDotProductAttention</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>ScaledDotProductAttention<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> Q<span class="token punctuation">,</span> K<span class="token punctuation">,</span> V<span class="token punctuation">,</span> attn_pad<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">## 输入进来的维度分别是 [batch_size x n_heads x len_q x d_k]  K： [batch_size x n_heads x len_k x d_k]  V: [batch_size x n_heads x len_k x d_v]</span>
+        <span class="token comment">##首先经过matmul函数得到的scores形状是 : [batch_size x n_heads x len_q x len_k]</span>
+        scores <span class="token operator">=</span> torch<span class="token punctuation">.</span>matmul<span class="token punctuation">(</span>Q<span class="token punctuation">,</span> K<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">/</span> np<span class="token punctuation">.</span>sqrt<span class="token punctuation">(</span>d_k<span class="token punctuation">)</span> <span class="token comment"># scores : [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]</span>
+        <span class="token comment">## 然后关键词地方来了，下面这个就是用到了我们之前重点讲的attn_pad，把被pad的地方置为无限小，softmax之后基本就是0，对q的单词不起作用</span>
+        scores<span class="token punctuation">.</span>masked_fill_<span class="token punctuation">(</span>attn_pad<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1e9</span><span class="token punctuation">)</span> <span class="token comment"># Fills elements of self tensor with value where mask is one.</span>
+        attn <span class="token operator">=</span> nn<span class="token punctuation">.</span>Softmax<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">(</span>scores<span class="token punctuation">)</span>
+        context <span class="token operator">=</span> torch<span class="token punctuation">.</span>matmul<span class="token punctuation">(</span>attn<span class="token punctuation">,</span> V<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> context<span class="token punctuation">,</span> attn
+</code></pre> 
+<p>其中一个值的注意的点是我们通过<strong>scores.masked_fill_(attn_pad, -1e9)</strong> 将符号矩阵对应的位置 置为无穷小，这样经过softmax后它就不会对q的单词起作用。也就实现了我们想要的去除掉pad对其他单词影响的效果。</p> 
+<p>MultiHeadAttention完~~~~~~<br> 回到layers我们继续看</p> 
+<pre><code class="prism language-python">       enc_outputs <span class="token operator">=</span> self<span class="token punctuation">.</span>pos_ffn<span class="token punctuation">(</span>enc_outputs<span class="token punctuation">)</span> <span class="token comment"># enc_outputs: [batch_size x len_q x d_model]</span>
+       <span class="token keyword">return</span> enc_outputs<span class="token punctuation">,</span> attn
+</code></pre> 
+<p>将刚刚通过多头注意力机制得到的enc_outputs 送入PoswiseFeedForwardNet ，得到layers最终的结果</p> 
+<h4>
+<a id="PoswiseFeedForwardNet_394"></a>PoswiseFeedForwardNet</h4> 
+<pre><code class="prism language-python"><span class="token keyword">class</span> <span class="token class-name">PoswiseFeedForwardNet</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span> <span class="token comment"># 对每个字的增强语义向量再做两次线性变换，以增强整个模型的表达能力。</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>PoswiseFeedForwardNet<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>fc1 <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_ff<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>fc2 <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_ff<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># (batch_size, len_seq, d_model) -&gt; (batch_size, len_seq, d_ff) -&gt; (batch_size, len_seq, d_model)</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>fc2<span class="token punctuation">(</span>gelu<span class="token punctuation">(</span>self<span class="token punctuation">.</span>fc1<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这部分就是一个两层的linear层，没什么好说的，对每个字的增强语义向量再做两次线性变换，以增强整个模型的表达能力。这里，变换后的向量与原向量保持长度相同。<br> pos_ffn完~~~~~~</p> 
+<p>layers 完~~~~~~</p> 
+<p>回到model部分我们继续往下看</p> 
+<pre><code class="prism language-python">        h_pooled <span class="token operator">=</span> self<span class="token punctuation">.</span>activ1<span class="token punctuation">(</span>self<span class="token punctuation">.</span>fc<span class="token punctuation">(</span>output<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token comment"># [batch_size, d_model] cls 对应的位置 可以看一下例子</span>
+        logits_clsf <span class="token operator">=</span> self<span class="token punctuation">.</span>classifier<span class="token punctuation">(</span>h_pooled<span class="token punctuation">)</span> <span class="token comment"># [batch_size, 2]</span>
+
+        masked_pos <span class="token operator">=</span> masked_pos<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">]</span><span class="token punctuation">.</span>expand<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> output<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token comment"># [batch_size, max_pred, d_model]  其中一个 masked_pos= [6, 5, 17，0，0]</span>
+        <span class="token comment"># get masked position from final output of transformer.</span>
+        h_masked <span class="token operator">=</span> torch<span class="token punctuation">.</span>gather<span class="token punctuation">(</span>output<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> masked_pos<span class="token punctuation">)</span> <span class="token comment">#在output取出一维对应masked_pos数据 masking position [batch_size, max_pred, d_model]</span>
+        h_masked <span class="token operator">=</span> self<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>self<span class="token punctuation">.</span>activ2<span class="token punctuation">(</span>self<span class="token punctuation">.</span>linear<span class="token punctuation">(</span>h_masked<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        logits_lm <span class="token operator">=</span> self<span class="token punctuation">.</span>decoder<span class="token punctuation">(</span>h_masked<span class="token punctuation">)</span> <span class="token operator">+</span> self<span class="token punctuation">.</span>decoder_bias <span class="token comment"># [batch_size, max_pred, n_vocab]</span>
+        <span class="token keyword">return</span> logits_lm<span class="token punctuation">,</span> logits_clsf
+</code></pre> 
+<p>通过output[:, 0]切片的方式得到cls对应位置的信息 将其送入一个linear层得到h_pooled 再将其送入一个二分类的linear 得到<mark>nsp任务的结果：logits_clsf</mark><br> 通过torch.gather 在output中取出一维masked_pos 对应的数据 h_masked 再将其送入linear层 并解码(decoder)得到<mark>mlm任务的结果： logits_lm</mark></p> 
+<p>model 完~~~~~~<br> <mark>model的返回值<br> logits_lm, 代表 mask对应位置的输出<br> logits_clsf，为nsp任务的输出。</mark></p> 
+<p>回到main()部分我们继续往下看</p> 
+<h2>
+<a id="Loss_435"></a>Loss</h2> 
+<pre><code class="prism language-python">        loss_lm <span class="token operator">=</span> criterion<span class="token punctuation">(</span>logits_lm<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span> masked_tokens<span class="token punctuation">)</span> <span class="token comment"># for masked LM ;masked_tokens [6,5]</span>
+        loss_lm <span class="token operator">=</span> <span class="token punctuation">(</span>loss_lm<span class="token punctuation">.</span><span class="token builtin">float</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>mean<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        loss_clsf <span class="token operator">=</span> criterion<span class="token punctuation">(</span>logits_clsf<span class="token punctuation">,</span> isNext<span class="token punctuation">)</span> <span class="token comment"># for sentence classification</span>
+        loss <span class="token operator">=</span> loss_lm <span class="token operator">+</span> loss_clsf
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>epoch <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">%</span> <span class="token number">10</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+            <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'Epoch:'</span><span class="token punctuation">,</span> <span class="token string">'%04d'</span> <span class="token operator">%</span> <span class="token punctuation">(</span>epoch <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">'cost ='</span><span class="token punctuation">,</span> <span class="token string">'{:.6f}'</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>loss<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        loss<span class="token punctuation">.</span>backward<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        optimizer<span class="token punctuation">.</span>step<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>BERT 的损失函数由两部分组成，第一部分是来自 Mask-LM 的「单词级别分类任务」，另一部分是「句子级别的分类任务」。通过这两个任务的联合学习，可以使得 BERT 学习到的表征既有 token 级别信息，同时也包含了句子级别的语义信息。</p> 
+<p>最后再来看一下我们一开始提到的模型框架图，是不是很轻松就能理解了 ?<br> <img src="https://images2.imgbox.com/b7/f6/6Nm8VG8F_o.png" alt="在这里插入图片描述" width="90%" height="90%"></p> 
+<h2>
+<a id="_452"></a>总结：</h2> 
+<p>BERT文章作者提出了两个预训练任务：<mark>Masked LM和Next Sentence Prediction</mark><br> BERT的第一个任务是采用 <mark>MaskLM</mark> 的方式来训练语言模型，通俗地说就是在输入一句话的时<br> 候，随机地选一些要预测的词，然后用一个特殊的符号[MASK]来代替它们，因为我们知道被盖起来的部分是什么，但BERT不知道，所以BERT学习的目标就是 <strong>：输出跟盖起来的越接近越好</strong>。思想来源于 <strong>「完形填空」</strong> 的 任 务 。 具体来说 ， 文章作者在一句话中随机选择 <strong>15%</strong> 的 词汇用于预 测 。 对于在原句中被 抹 去 的 词 汇 ：<br> <strong>80%</strong> 情况下采用 一 个特殊符号 [MASK] 替 换 ，<br> <strong>10%</strong> 情况下采用 一 个任意词替换，<br> 剩余 <strong>10%</strong> 情况下保持原词汇不变<br> 这样做的好处是，BERT 并不知道[MASK]替换的是这 15%个 Token 中的哪一个词(<strong>「注意：这里意思是输入的时候不知道[MASK]</strong> <strong>替换的是哪一个词，但是输出还是知道要预测哪个词的」</strong>)</p> 
+<p><mark>Next Sentence Prediction</mark> 的任务描述为：给定一篇文章中的两句话，判断第二句话在文本中是否紧跟在第一句话之后。<br> 这个类似于 <strong>「段落重排序」</strong> 的任务<br> 只考虑两句话，判断是否是一篇文章中的前后句。在实际预训练过程中，<br> 文章作者从文本语料库中随机选择 50% 正确语句对和 50% 错误语句对进行训练，在第一个句子的首部会加上一个[CLS] token，在两个句子中间以及最后一个句子的尾部会加上一个[SEP] token。<br> 这样能让模型去学习一下句子层面的信息。<br> 本文完~~~~~~</p> 
+<h2>
+<a id="_468"></a>完整源码</h2> 
+<pre><code class="prism language-python"><span class="token triple-quoted-string string">"""
+orginal from ：
+https://github.com/graykode/nlp-tutorial/tree/master/5-2.BERT
+"""</span>
+<span class="token keyword">import</span> math
+<span class="token keyword">import</span> re
+<span class="token keyword">from</span> random <span class="token keyword">import</span> <span class="token operator">*</span>
+<span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> torch
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>nn <span class="token keyword">as</span> nn
+<span class="token keyword">import</span> torch<span class="token punctuation">.</span>optim <span class="token keyword">as</span> optim
+
+<span class="token comment"># 数据预处理</span>
+<span class="token keyword">def</span> <span class="token function">make_batch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    batch <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token comment"># list</span>
+    positive <span class="token operator">=</span> negative <span class="token operator">=</span> <span class="token number">0</span>  <span class="token comment"># 计数器 为了记录NSP任务中的正样本和负样本的个数，比例最好是在一个batch中接近1：1</span>
+    <span class="token keyword">while</span> positive <span class="token operator">!=</span> batch_size<span class="token operator">/</span><span class="token number">2</span> <span class="token keyword">or</span> negative <span class="token operator">!=</span> batch_size<span class="token operator">/</span><span class="token number">2</span><span class="token punctuation">:</span>
+        <span class="token comment">#  抽出来两句话 先随机sample两个index 再通过index找出样本</span>
+        tokens_a_index<span class="token punctuation">,</span> tokens_b_index<span class="token operator">=</span> randrange<span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>sentences<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> randrange<span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>sentences<span class="token punctuation">)</span><span class="token punctuation">)</span>  <span class="token comment"># 比如tokens_a_index=3，tokens_b_index=1；从整个样本中抽取对应的样本；</span>
+        tokens_a<span class="token punctuation">,</span> tokens_b<span class="token operator">=</span> token_list<span class="token punctuation">[</span>tokens_a_index<span class="token punctuation">]</span><span class="token punctuation">,</span> token_list<span class="token punctuation">[</span>tokens_b_index<span class="token punctuation">]</span><span class="token comment">## 根据索引获取对应样本：tokens_a=[5, 23, 26, 20, 9, 13, 18] tokens_b=[27, 11, 23, 8, 17, 28, 12, 22, 16, 25]</span>
+        <span class="token comment"># 拼接</span>
+        input_ids <span class="token operator">=</span> <span class="token punctuation">[</span>word_dict<span class="token punctuation">[</span><span class="token string">'[CLS]'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">+</span> tokens_a <span class="token operator">+</span> <span class="token punctuation">[</span>word_dict<span class="token punctuation">[</span><span class="token string">'[SEP]'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">+</span> tokens_b <span class="token operator">+</span> <span class="token punctuation">[</span>word_dict<span class="token punctuation">[</span><span class="token string">'[SEP]'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token comment">## 加上特殊符号，CLS符号是1，sep符号是2：[1, 5, 23, 26, 20, 9, 13, 18, 2, 27, 11, 23, 8, 17, 28, 12, 22, 16, 25, 2]</span>
+        segment_ids <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">+</span> <span class="token builtin">len</span><span class="token punctuation">(</span>tokens_a<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>tokens_b<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token comment">##分割句子符号：[0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]</span>
+
+        <span class="token comment"># MASK LM</span>
+        n_pred <span class="token operator">=</span> <span class="token builtin">min</span><span class="token punctuation">(</span>max_pred<span class="token punctuation">,</span> <span class="token builtin">max</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token builtin">round</span><span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">0.15</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>  <span class="token comment"># n_pred=3；整个句子的15%的字符可以被mask掉，这里取和max_pred中的最小值，确保每次计算损失的时候没有那么多字符以及信息充足，有15%做控制就够了；其实可以不用加这个，单个句子少了，就要加上足够的训练样本</span>
+        <span class="token comment"># 不让特殊字符参与mask</span>
+        cand_maked_pos <span class="token operator">=</span> <span class="token punctuation">[</span>i <span class="token keyword">for</span> i<span class="token punctuation">,</span> token <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span>
+                          <span class="token keyword">if</span> token <span class="token operator">!=</span> word_dict<span class="token punctuation">[</span><span class="token string">'[CLS]'</span><span class="token punctuation">]</span> <span class="token keyword">and</span> token <span class="token operator">!=</span> word_dict<span class="token punctuation">[</span><span class="token string">'[SEP]'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token comment">## cand_maked_pos=[1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]；整个句子input_ids中可以被mask的符号必须是非cls和sep符号的，要不然没意义</span>
+        shuffle<span class="token punctuation">(</span>cand_maked_pos<span class="token punctuation">)</span><span class="token comment">## 打乱顺序：cand_maked_pos=[6, 5, 17, 3, 1, 13, 16, 10, 12, 2, 9, 7, 11, 18, 4, 14, 15]  其实取mask对应的位置有很多方法，这里只是一种使用shuffle的方式</span>
+        masked_tokens<span class="token punctuation">,</span> masked_pos <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token keyword">for</span> pos <span class="token keyword">in</span> cand_maked_pos<span class="token punctuation">[</span><span class="token punctuation">:</span>n_pred<span class="token punctuation">]</span><span class="token punctuation">:</span>  <span class="token comment"># 取其中的三个；masked_pos=[6, 5, 17] 注意这里对应的是position信息；masked_tokens=[13, 9, 16] 注意这里是被mask的元素之前对应的原始单字数字；</span>
+            masked_pos<span class="token punctuation">.</span>append<span class="token punctuation">(</span>pos<span class="token punctuation">)</span>
+            masked_tokens<span class="token punctuation">.</span>append<span class="token punctuation">(</span>input_ids<span class="token punctuation">[</span>pos<span class="token punctuation">]</span><span class="token punctuation">)</span>  <span class="token comment"># 回到ppt看一下</span>
+            <span class="token keyword">if</span> random<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0.8</span><span class="token punctuation">:</span>  <span class="token comment"># 80%</span>
+                input_ids<span class="token punctuation">[</span>pos<span class="token punctuation">]</span> <span class="token operator">=</span> word_dict<span class="token punctuation">[</span><span class="token string">'[MASK]'</span><span class="token punctuation">]</span>  <span class="token comment"># make mask</span>
+            <span class="token keyword">elif</span> random<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0.5</span><span class="token punctuation">:</span>  <span class="token comment"># 10%</span>
+                index <span class="token operator">=</span> randint<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> vocab_size <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token comment"># random index in vocabulary</span>
+                input_ids<span class="token punctuation">[</span>pos<span class="token punctuation">]</span> <span class="token operator">=</span> word_dict<span class="token punctuation">[</span>number_dict<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token comment"># replace</span>
+
+        <span class="token comment"># Zero Paddings</span>
+        n_pad <span class="token operator">=</span> maxlen <span class="token operator">-</span> <span class="token builtin">len</span><span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span><span class="token comment">##maxlen=30；n_pad=10</span>
+        input_ids<span class="token punctuation">.</span>extend<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> n_pad<span class="token punctuation">)</span>
+        segment_ids<span class="token punctuation">.</span>extend<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> n_pad<span class="token punctuation">)</span><span class="token comment"># 这里有一个问题，0和之前的重了</span>
+
+        <span class="token comment"># Zero Padding (100% - 15%) tokens 是为了计算一个batch中句子的mlm损失的时候可以组成一个有效矩阵放进去；不然第一个句子预测5个字符，第二句子预测7个字符，第三个句子预测8个字符，组不成一个有效的矩阵；</span>
+        <span class="token comment">## 这里非常重要，为什么是对masked_tokens是补零，而不是补其他的字符？？？？我补1可不可以？？</span>
+        <span class="token keyword">if</span> max_pred <span class="token operator">&gt;</span> n_pred<span class="token punctuation">:</span>
+            n_pad <span class="token operator">=</span> max_pred <span class="token operator">-</span> n_pred
+            masked_tokens<span class="token punctuation">.</span>extend<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> n_pad<span class="token punctuation">)</span><span class="token comment">##  masked_tokens= [13, 9, 16, 0, 0] masked_tokens 对应的是被mask的元素的原始真实标签是啥，也就是groundtruth</span>
+            masked_pos<span class="token punctuation">.</span>extend<span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">*</span> n_pad<span class="token punctuation">)</span><span class="token comment">## masked_pos= [6, 5, 17，0，0] masked_pos是记录哪些位置被mask了</span>
+
+        <span class="token keyword">if</span> tokens_a_index <span class="token operator">+</span> <span class="token number">1</span> <span class="token operator">==</span> tokens_b_index <span class="token keyword">and</span> positive <span class="token operator">&lt;</span> batch_size<span class="token operator">/</span><span class="token number">2</span><span class="token punctuation">:</span>
+            batch<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token punctuation">[</span>input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_tokens<span class="token punctuation">,</span> masked_pos<span class="token punctuation">,</span> <span class="token boolean">True</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token comment"># IsNext</span>
+            positive <span class="token operator">+=</span> <span class="token number">1</span>
+        <span class="token keyword">elif</span> tokens_a_index <span class="token operator">+</span> <span class="token number">1</span> <span class="token operator">!=</span> tokens_b_index <span class="token keyword">and</span> negative <span class="token operator">&lt;</span> batch_size<span class="token operator">/</span><span class="token number">2</span><span class="token punctuation">:</span>
+            batch<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token punctuation">[</span>input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_tokens<span class="token punctuation">,</span> masked_pos<span class="token punctuation">,</span> <span class="token boolean">False</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token comment"># NotNext</span>
+            negative <span class="token operator">+=</span> <span class="token number">1</span>
+    <span class="token keyword">return</span> batch
+<span class="token comment"># 符号矩阵</span>
+<span class="token keyword">def</span> <span class="token function">get_attn_pad_mask</span><span class="token punctuation">(</span>seq_q<span class="token punctuation">,</span> seq_k<span class="token punctuation">)</span><span class="token punctuation">:</span> <span class="token comment"># 在自注意力层q k是一致的</span>
+    batch_size<span class="token punctuation">,</span> len_q <span class="token operator">=</span> seq_q<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    batch_size<span class="token punctuation">,</span> len_k <span class="token operator">=</span> seq_k<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token comment"># eq(zero) is PAD token</span>
+    <span class="token comment"># eq(0)表示和0相等的返回True，不相等返回False。</span>
+    pad_attn_mask <span class="token operator">=</span> seq_k<span class="token punctuation">.</span>data<span class="token punctuation">.</span>eq<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>  <span class="token comment"># batch_size x 1 x len_k(=len_q), one is masking</span>
+    <span class="token keyword">return</span> pad_attn_mask<span class="token punctuation">.</span>expand<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> len_q<span class="token punctuation">,</span> len_k<span class="token punctuation">)</span>  <span class="token comment"># 重复了len_q次  batch_size x len_q x len_k 不懂可以看一下例子</span>
+<span class="token keyword">def</span> <span class="token function">gelu</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token string">"Implementation of the gelu activation function by Hugging Face"</span>
+    <span class="token keyword">return</span> x <span class="token operator">*</span> <span class="token number">0.5</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token number">1.0</span> <span class="token operator">+</span> torch<span class="token punctuation">.</span>erf<span class="token punctuation">(</span>x <span class="token operator">/</span> math<span class="token punctuation">.</span>sqrt<span class="token punctuation">(</span><span class="token number">2.0</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+<span class="token comment">#Embedding层</span>
+<span class="token keyword">class</span> <span class="token class-name">Embedding</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>Embedding<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>tok_embed <span class="token operator">=</span> nn<span class="token punctuation">.</span>Embedding<span class="token punctuation">(</span>vocab_size<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span>  <span class="token comment"># token embedding</span>
+        self<span class="token punctuation">.</span>pos_embed <span class="token operator">=</span> nn<span class="token punctuation">.</span>Embedding<span class="token punctuation">(</span>maxlen<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span>  <span class="token comment"># position embedding</span>
+        self<span class="token punctuation">.</span>seg_embed <span class="token operator">=</span> nn<span class="token punctuation">.</span>Embedding<span class="token punctuation">(</span>n_segments<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span>  <span class="token comment"># segment(token type) embedding</span>
+        self<span class="token punctuation">.</span>norm <span class="token operator">=</span> nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">(</span>d_model<span class="token punctuation">)</span>
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">)</span><span class="token punctuation">:</span><span class="token comment"># x对应input_ids, seg对应segment_ids</span>
+        seq_len <span class="token operator">=</span> input_ids<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+        pos <span class="token operator">=</span> torch<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>seq_len<span class="token punctuation">,</span> dtype<span class="token operator">=</span>torch<span class="token punctuation">.</span><span class="token builtin">long</span><span class="token punctuation">)</span>
+        pos <span class="token operator">=</span> pos<span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">.</span>expand_as<span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span>  <span class="token comment"># (seq_len,) -&gt; (batch_size, seq_len)</span>
+        embedding <span class="token operator">=</span> self<span class="token punctuation">.</span>tok_embed<span class="token punctuation">(</span>input_ids<span class="token punctuation">)</span> <span class="token operator">+</span> self<span class="token punctuation">.</span>pos_embed<span class="token punctuation">(</span>pos<span class="token punctuation">)</span> <span class="token operator">+</span> self<span class="token punctuation">.</span>seg_embed<span class="token punctuation">(</span>segment_ids<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>embedding<span class="token punctuation">)</span>
+
+<span class="token comment"># 注意力打分函数</span>
+<span class="token keyword">class</span> <span class="token class-name">ScaledDotProductAttention</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>ScaledDotProductAttention<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> Q<span class="token punctuation">,</span> K<span class="token punctuation">,</span> V<span class="token punctuation">,</span> attn_pad<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">## 输入进来的维度分别是 [batch_size x n_heads x len_q x d_k]  K： [batch_size x n_heads x len_k x d_k]  V: [batch_size x n_heads x len_k x d_v]</span>
+        <span class="token comment">##首先经过matmul函数得到的scores形状是 : [batch_size x n_heads x len_q x len_k]</span>
+        scores <span class="token operator">=</span> torch<span class="token punctuation">.</span>matmul<span class="token punctuation">(</span>Q<span class="token punctuation">,</span> K<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">/</span> np<span class="token punctuation">.</span>sqrt<span class="token punctuation">(</span>d_k<span class="token punctuation">)</span> <span class="token comment"># scores : [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]</span>
+        <span class="token comment">## 然后关键词地方来了，下面这个就是用到了我们之前重点讲的attn_pad，把被pad的地方置为无限小，softmax之后基本就是0，对q的单词不起作用</span>
+        scores<span class="token punctuation">.</span>masked_fill_<span class="token punctuation">(</span>attn_pad<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1e9</span><span class="token punctuation">)</span> <span class="token comment"># Fills elements of self tensor with value where mask is one.</span>
+        attn <span class="token operator">=</span> nn<span class="token punctuation">.</span>Softmax<span class="token punctuation">(</span>dim<span class="token operator">=</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">(</span>scores<span class="token punctuation">)</span>
+        context <span class="token operator">=</span> torch<span class="token punctuation">.</span>matmul<span class="token punctuation">(</span>attn<span class="token punctuation">,</span> V<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> context<span class="token punctuation">,</span> attn
+
+<span class="token comment">#多头注意力机制</span>
+<span class="token keyword">class</span> <span class="token class-name">MultiHeadAttention</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>MultiHeadAttention<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment">## 输入进来的QKV是相等的，使用映射linear做一个映射得到参数矩阵Wq, Wk,Wv</span>
+        self<span class="token punctuation">.</span>W_Q <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_k <span class="token operator">*</span> n_heads<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>W_K <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_k <span class="token operator">*</span> n_heads<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>W_V <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_v <span class="token operator">*</span> n_heads<span class="token punctuation">)</span>
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> Q<span class="token punctuation">,</span> K<span class="token punctuation">,</span> V<span class="token punctuation">,</span> attn_pad<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">## 这个多头分为这几个步骤，首先映射分头，然后计算atten_scores，然后计算atten_value;</span>
+        <span class="token comment">## 输入进来的数据形状： Q: [batch_size x len_q x d_model], K: [batch_size x len_k x d_model], V: [batch_size x len_k x d_model]</span>
+        <span class="token comment"># q: [batch_size x len_q x d_model], k: [batch_size x len_k x d_model], v: [batch_size x len_k x d_model]</span>
+        residual<span class="token punctuation">,</span> batch_size <span class="token operator">=</span> Q<span class="token punctuation">,</span> Q<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+        <span class="token comment"># (B, S, D) -proj-&gt; (B, S, D) -split-&gt; (B, S, H, W) -trans-&gt; (B, H, S, W)</span>
+        <span class="token comment">##下面这个就是先映射，后分头；一定要注意的是q和k分头之后维度是一致额，所以这里都是dk</span>
+        q_s <span class="token operator">=</span> self<span class="token punctuation">.</span>W_Q<span class="token punctuation">(</span>Q<span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads<span class="token punctuation">,</span> d_k<span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span>  <span class="token comment"># q_s: [batch_size x n_heads x len_q x d_k]</span>
+        k_s <span class="token operator">=</span> self<span class="token punctuation">.</span>W_K<span class="token punctuation">(</span>K<span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads<span class="token punctuation">,</span> d_k<span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span>  <span class="token comment"># k_s: [batch_size x n_heads x len_k x d_k]</span>
+        v_s <span class="token operator">=</span> self<span class="token punctuation">.</span>W_V<span class="token punctuation">(</span>V<span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads<span class="token punctuation">,</span> d_v<span class="token punctuation">)</span><span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">)</span>  <span class="token comment"># v_s: [batch_size x n_heads x len_k x d_v]</span>
+        <span class="token comment">## 输入进行的attn_pad形状是 batch_size x len_q x len_k，然后经过下面这个代码得到 新的attn_pad : [batch_size x n_heads x len_q x len_k]，就是把pad信息重复了n个头上</span>
+        attn_pad <span class="token operator">=</span> attn_pad<span class="token punctuation">.</span>unsqueeze<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">.</span>repeat<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span>    <span class="token comment"># repeat 对张量重复扩充</span>
+        <span class="token comment"># context: [batch_size x n_heads x len_q x d_v], attn: [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]</span>
+        context<span class="token punctuation">,</span> attn <span class="token operator">=</span> ScaledDotProductAttention<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">(</span>q_s<span class="token punctuation">,</span> k_s<span class="token punctuation">,</span> v_s<span class="token punctuation">,</span> attn_pad<span class="token punctuation">)</span>
+        context <span class="token operator">=</span> context<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">.</span>contiguous<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>view<span class="token punctuation">(</span>batch_size<span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> n_heads <span class="token operator">*</span> d_v<span class="token punctuation">)</span> <span class="token comment"># context: [batch_size x len_q x n_heads * d_v]</span>
+        output <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>n_heads <span class="token operator">*</span> d_v<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span><span class="token punctuation">(</span>context<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">(</span>d_model<span class="token punctuation">)</span><span class="token punctuation">(</span>output <span class="token operator">+</span> residual<span class="token punctuation">)</span><span class="token punctuation">,</span> attn <span class="token comment"># output: [batch_size x len_q x d_model]</span>
+
+<span class="token comment">#基于位置的前馈神经网络</span>
+<span class="token keyword">class</span> <span class="token class-name">PoswiseFeedForwardNet</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span> <span class="token comment"># 对每个字的增强语义向量再做两次线性变换，以增强整个模型的表达能力。</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>PoswiseFeedForwardNet<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>fc1 <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_ff<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>fc2 <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_ff<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> x<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment"># (batch_size, len_seq, d_model) -&gt; (batch_size, len_seq, d_ff) -&gt; (batch_size, len_seq, d_model)</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>fc2<span class="token punctuation">(</span>gelu<span class="token punctuation">(</span>self<span class="token punctuation">.</span>fc1<span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+<span class="token comment">#Encoder</span>
+<span class="token keyword">class</span> <span class="token class-name">EncoderLayer</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>EncoderLayer<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>enc_self_attn <span class="token operator">=</span> MultiHeadAttention<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>pos_ffn <span class="token operator">=</span> PoswiseFeedForwardNet<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> enc_inputs<span class="token punctuation">,</span> enc_self_attn_pad<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        enc_outputs<span class="token punctuation">,</span> attn <span class="token operator">=</span> self<span class="token punctuation">.</span>enc_self_attn<span class="token punctuation">(</span>enc_inputs<span class="token punctuation">,</span> enc_inputs<span class="token punctuation">,</span> enc_inputs<span class="token punctuation">,</span> enc_self_attn_pad<span class="token punctuation">)</span> <span class="token comment"># enc_inputs to same Q,K,V enc_self_attn_mask是pad符号矩阵</span>
+        enc_outputs <span class="token operator">=</span> self<span class="token punctuation">.</span>pos_ffn<span class="token punctuation">(</span>enc_outputs<span class="token punctuation">)</span> <span class="token comment"># enc_outputs: [batch_size x len_q x d_model]</span>
+        <span class="token keyword">return</span> enc_outputs<span class="token punctuation">,</span> attn
+
+<span class="token comment">## 1. BERT模型整体架构</span>
+<span class="token keyword">class</span> <span class="token class-name">BERT</span><span class="token punctuation">(</span>nn<span class="token punctuation">.</span>Module<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">super</span><span class="token punctuation">(</span>BERT<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">.</span>__init__<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>embedding <span class="token operator">=</span> Embedding<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token comment">## 词向量层，构建词表矩阵</span>
+        self<span class="token punctuation">.</span>layers <span class="token operator">=</span> nn<span class="token punctuation">.</span>ModuleList<span class="token punctuation">(</span><span class="token punctuation">[</span>EncoderLayer<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">for</span> _ <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>n_layers<span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token comment">## 把N个encoder堆叠起来，具体encoder实现一会看</span>
+        self<span class="token punctuation">.</span>fc <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span> <span class="token comment">## 前馈神经网络-cls</span>
+        self<span class="token punctuation">.</span>activ1 <span class="token operator">=</span> nn<span class="token punctuation">.</span>Tanh<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token comment">## 激活函数-cls</span>
+        self<span class="token punctuation">.</span>linear <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> d_model<span class="token punctuation">)</span><span class="token comment">#-mlm</span>
+        self<span class="token punctuation">.</span>activ2 <span class="token operator">=</span> gelu <span class="token comment">## 激活函数--mlm</span>
+        self<span class="token punctuation">.</span>norm <span class="token operator">=</span> nn<span class="token punctuation">.</span>LayerNorm<span class="token punctuation">(</span>d_model<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>classifier <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>d_model<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token comment">## cls 这是一个分类层，维度是从d_model到2，对应我们架构图中就是这种：</span>
+
+        <span class="token comment"># decoder is shared with embedding layer</span>
+        embed_weight <span class="token operator">=</span> self<span class="token punctuation">.</span>embedding<span class="token punctuation">.</span>tok_embed<span class="token punctuation">.</span>weight
+        n_vocab<span class="token punctuation">,</span> n_dim <span class="token operator">=</span> embed_weight<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>decoder <span class="token operator">=</span> nn<span class="token punctuation">.</span>Linear<span class="token punctuation">(</span>n_dim<span class="token punctuation">,</span> n_vocab<span class="token punctuation">,</span> bias<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>decoder<span class="token punctuation">.</span>weight <span class="token operator">=</span> embed_weight
+        self<span class="token punctuation">.</span>decoder_bias <span class="token operator">=</span> nn<span class="token punctuation">.</span>Parameter<span class="token punctuation">(</span>torch<span class="token punctuation">.</span>zeros<span class="token punctuation">(</span>n_vocab<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">def</span> <span class="token function">forward</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_pos<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token builtin">input</span> <span class="token operator">=</span> self<span class="token punctuation">.</span>embedding<span class="token punctuation">(</span>input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">)</span> <span class="token comment"># 将input_ids，segment_ids，pos_embed加和</span>
+
+        <span class="token comment">##get_attn_pad_mask是为了得到句子中pad的位置信息，给到模型后面，在计算自注意力和交互注意力的时候去掉pad符号的影响，去看一下这个函数 4.</span>
+        enc_self_attn_pad <span class="token operator">=</span> get_attn_pad_mask<span class="token punctuation">(</span>input_ids<span class="token punctuation">,</span> input_ids<span class="token punctuation">)</span>
+        <span class="token keyword">for</span> layer <span class="token keyword">in</span> self<span class="token punctuation">.</span>layers<span class="token punctuation">:</span>
+            output<span class="token punctuation">,</span> enc_self_attn <span class="token operator">=</span> layer<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">,</span> enc_self_attn_pad<span class="token punctuation">)</span> <span class="token comment">## enc_self_attn这里是QK转置相乘之后softmax之后的矩阵值，代表的是每个单词和其他单词相关性；</span>
+        <span class="token comment"># output : [batch_size, len, d_model], attn : [batch_size, n_heads, d_mode, d_model]</span>
+        h_pooled <span class="token operator">=</span> self<span class="token punctuation">.</span>activ1<span class="token punctuation">(</span>self<span class="token punctuation">.</span>fc<span class="token punctuation">(</span>output<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token comment"># [batch_size, d_model] cls 对应的位置 可以看一下例子</span>
+        logits_clsf <span class="token operator">=</span> self<span class="token punctuation">.</span>classifier<span class="token punctuation">(</span>h_pooled<span class="token punctuation">)</span> <span class="token comment"># [batch_size, 2]</span>
+
+        masked_pos <span class="token operator">=</span> masked_pos<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token punctuation">:</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">]</span><span class="token punctuation">.</span>expand<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> output<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token comment"># [batch_size, max_pred, d_model]  其中一个 masked_pos= [6, 5, 17，0，0]</span>
+        <span class="token comment"># get masked position from final output of transformer.</span>
+        h_masked <span class="token operator">=</span> torch<span class="token punctuation">.</span>gather<span class="token punctuation">(</span>output<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> masked_pos<span class="token punctuation">)</span> <span class="token comment">#在output取出一维对应masked_pos数据 masking position [batch_size, max_pred, d_model]</span>
+        h_masked <span class="token operator">=</span> self<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>self<span class="token punctuation">.</span>activ2<span class="token punctuation">(</span>self<span class="token punctuation">.</span>linear<span class="token punctuation">(</span>h_masked<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        logits_lm <span class="token operator">=</span> self<span class="token punctuation">.</span>decoder<span class="token punctuation">(</span>h_masked<span class="token punctuation">)</span> <span class="token operator">+</span> self<span class="token punctuation">.</span>decoder_bias <span class="token comment"># [batch_size, max_pred, n_vocab]</span>
+
+        <span class="token keyword">return</span> logits_lm<span class="token punctuation">,</span> logits_clsf
+<span class="token comment"># 1.从整体到局部</span>
+<span class="token comment"># 2.数据流动形状（输入 输出）</span>
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">'__main__'</span><span class="token punctuation">:</span>
+    <span class="token comment"># BERT Parameters</span>
+    maxlen <span class="token operator">=</span> <span class="token number">30</span> <span class="token comment"># 句子的最大长度</span>
+    batch_size <span class="token operator">=</span> <span class="token number">6</span> <span class="token comment"># 每一组有多少个句子一起送进去模型</span>
+    max_pred <span class="token operator">=</span> <span class="token number">5</span>  <span class="token comment"># max tokens of prediction</span>
+    n_layers <span class="token operator">=</span> <span class="token number">6</span> <span class="token comment"># number of Encoder of Encoder Layer</span>
+    n_heads <span class="token operator">=</span> <span class="token number">12</span> <span class="token comment"># number of heads in Multi-Head Attention</span>
+    d_model <span class="token operator">=</span> <span class="token number">768</span> <span class="token comment"># Embedding Size</span>
+    d_ff <span class="token operator">=</span> <span class="token number">3072</span>  <span class="token comment"># 4*d_model, FeedForward dimension</span>
+    d_k <span class="token operator">=</span> d_v <span class="token operator">=</span> <span class="token number">64</span>  <span class="token comment"># dimension of K(=Q), V</span>
+    n_segments <span class="token operator">=</span> <span class="token number">2</span>
+
+    text <span class="token operator">=</span> <span class="token punctuation">(</span>
+        <span class="token string">'Hello, how are you? I am Romeo.n'</span>
+        <span class="token string">'Hello, Romeo My name is Juliet. Nice to meet you.n'</span>
+        <span class="token string">'Nice meet you too. How are you today?n'</span>
+        <span class="token string">'Great. My baseball team won the competition.n'</span>
+        <span class="token string">'Oh Congratulations, Julietn'</span>
+        <span class="token string">'Thanks you Romeo'</span>
+    <span class="token punctuation">)</span>
+    sentences <span class="token operator">=</span> re<span class="token punctuation">.</span>sub<span class="token punctuation">(</span><span class="token string">"[.,!?\-]"</span><span class="token punctuation">,</span> <span class="token string">''</span><span class="token punctuation">,</span> text<span class="token punctuation">.</span>lower<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token string">'n'</span><span class="token punctuation">)</span>  <span class="token comment"># filter '.', ',', '?', '!'</span>
+    word_list <span class="token operator">=</span> <span class="token builtin">list</span><span class="token punctuation">(</span><span class="token builtin">set</span><span class="token punctuation">(</span><span class="token string">" "</span><span class="token punctuation">.</span>join<span class="token punctuation">(</span>sentences<span class="token punctuation">)</span><span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    word_dict <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'[PAD]'</span><span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token string">'[CLS]'</span><span class="token punctuation">:</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token string">'[SEP]'</span><span class="token punctuation">:</span> <span class="token number">2</span><span class="token punctuation">,</span> <span class="token string">'[MASK]'</span><span class="token punctuation">:</span> <span class="token number">3</span><span class="token punctuation">}</span>
+    <span class="token keyword">for</span> i<span class="token punctuation">,</span> w <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>word_list<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        word_dict<span class="token punctuation">[</span>w<span class="token punctuation">]</span> <span class="token operator">=</span> i <span class="token operator">+</span> <span class="token number">4</span>
+    number_dict <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>i<span class="token punctuation">:</span> w <span class="token keyword">for</span> i<span class="token punctuation">,</span> w <span class="token keyword">in</span> <span class="token builtin">enumerate</span><span class="token punctuation">(</span>word_dict<span class="token punctuation">)</span><span class="token punctuation">}</span>
+    vocab_size <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>word_dict<span class="token punctuation">)</span>
+
+    <span class="token comment"># 把文本转化成数字</span>
+    token_list <span class="token operator">=</span> <span class="token builtin">list</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> sentence <span class="token keyword">in</span> sentences<span class="token punctuation">:</span>
+        arr <span class="token operator">=</span> <span class="token punctuation">[</span>word_dict<span class="token punctuation">[</span>s<span class="token punctuation">]</span> <span class="token keyword">for</span> s <span class="token keyword">in</span> sentence<span class="token punctuation">.</span>split<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">]</span>
+        token_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>arr<span class="token punctuation">)</span>
+
+    batch <span class="token operator">=</span> make_batch<span class="token punctuation">(</span><span class="token punctuation">)</span>  <span class="token comment"># 最重要的一部分  预训练任务的数据构建部分</span>
+    input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_tokens<span class="token punctuation">,</span> masked_pos<span class="token punctuation">,</span> isNext <span class="token operator">=</span> <span class="token builtin">map</span><span class="token punctuation">(</span>torch<span class="token punctuation">.</span>LongTensor<span class="token punctuation">,</span> <span class="token builtin">zip</span><span class="token punctuation">(</span><span class="token operator">*</span>batch<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token comment"># map把函数依次作用在list中的每一个元素上，得到一个新的list并返回。注意，map不改变原list，而是返回一个新list。</span>
+
+    model <span class="token operator">=</span> BERT<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    criterion <span class="token operator">=</span> nn<span class="token punctuation">.</span>CrossEntropyLoss<span class="token punctuation">(</span>ignore_index<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">)</span> <span class="token comment"># 只计算mask位置的损失</span>
+    optimizer <span class="token operator">=</span> optim<span class="token punctuation">.</span>Adam<span class="token punctuation">(</span>model<span class="token punctuation">.</span>parameters<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> lr<span class="token operator">=</span><span class="token number">0.001</span><span class="token punctuation">)</span>
+
+
+    <span class="token keyword">for</span> epoch <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        optimizer<span class="token punctuation">.</span>zero_grad<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment"># logits_lm 语言词表的输出</span>
+        <span class="token comment"># logits_clsf 二分类的输出</span>
+        <span class="token comment"># logits_lm：[batch_size, max_pred, n_vocab]</span>
+        logits_lm<span class="token punctuation">,</span> logits_clsf <span class="token operator">=</span> model<span class="token punctuation">(</span>input_ids<span class="token punctuation">,</span> segment_ids<span class="token punctuation">,</span> masked_pos<span class="token punctuation">)</span><span class="token comment">## logits_lm 【6，5，29】 bs*max_pred*voca  logits_clsf:[6*2]</span>
+        loss_lm <span class="token operator">=</span> criterion<span class="token punctuation">(</span>logits_lm<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span> masked_tokens<span class="token punctuation">)</span> <span class="token comment"># for masked LM ;masked_tokens [6,5]</span>
+        loss_lm <span class="token operator">=</span> <span class="token punctuation">(</span>loss_lm<span class="token punctuation">.</span><span class="token builtin">float</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>mean<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        loss_clsf <span class="token operator">=</span> criterion<span class="token punctuation">(</span>logits_clsf<span class="token punctuation">,</span> isNext<span class="token punctuation">)</span> <span class="token comment"># for sentence classification</span>
+        loss <span class="token operator">=</span> loss_lm <span class="token operator">+</span> loss_clsf
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>epoch <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">%</span> <span class="token number">10</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+            <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'Epoch:'</span><span class="token punctuation">,</span> <span class="token string">'%04d'</span> <span class="token operator">%</span> <span class="token punctuation">(</span>epoch <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">'cost ='</span><span class="token punctuation">,</span> <span class="token string">'{:.6f}'</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>loss<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        loss<span class="token punctuation">.</span>backward<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        optimizer<span class="token punctuation">.</span>step<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+</code></pre> 
+<h2>
+<a id="_720"></a>特别鸣谢：</h2> 
+<p><a href="https://mp.weixin.qq.com/s/GgqaRU2-FkMQN5pnO5x73A">DASOU</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

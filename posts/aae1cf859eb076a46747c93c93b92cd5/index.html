@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Mysql进阶（一）Mysql执行流程与架构 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Mysql进阶（一）Mysql执行流程与架构</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p></p> 
+<div class="toc"> 
+ <h3>文章目录</h3> 
+ <ul>
+<li><a href="#_1">一句查询语句是如何执行的？</a></li>
+<li>
+<ul>
+<li><a href="#_17">通信协议</a></li>
+<li><a href="#_104">通信方式</a></li>
+<li><a href="#_116">查询缓存</a></li>
+<li><a href="#_122">词法语法解析和预处理（解析器、预处理器）</a></li>
+<li><a href="#_134">查询优化器与查询执行计划</a></li>
+<li>
+<ul>
+<li><a href="#_136">什么是优化器</a></li>
+<li><a href="#_149">优化器可以做什么</a></li>
+<li><a href="#_159">优化器执行结果</a></li>
+</ul> 
+   </li>
+<li><a href="#_170">存储引擎</a></li>
+<li>
+<ul>
+<li><a href="#_172">基本介绍</a></li>
+<li><a href="#_193">存储引擎比较</a></li>
+<li><a href="#_240">如何选择存储引擎</a></li>
+</ul> 
+  </li>
+</ul> 
+  </li>
+<li><a href="#SQL_252">一条更新SQL是如何执行的？</a></li>
+<li>
+<ul>
+<li><a href="#_256">缓冲池</a></li>
+<li><a href="#InnoDB_276">InnoDB内存结构和磁盘结构</a></li>
+<li><a href="#Binlog_321">Binlog</a></li>
+</ul> 
+ </li>
+</ul> 
+</div> 
+<p></p> 
+<h1>
+<a id="_1"></a>一句查询语句是如何执行的？</h1> 
+<pre><code class="prism language-mysql">select id from student;
+</code></pre> 
+<p>​ 如上很简单的查询语句，从student表中查询id。那么Mysql是如何将这个条语句翻译成它所需要的指令从而去拿到数据返回给客户端？这里先放一张大致的流程图</p> 
+<p><img src="https://images2.imgbox.com/1b/4f/CG864E4O_o.png" alt="image-20220713165549179"></p> 
+<p>​ 首先数据是存储在Mysql服务器端的。应用程序或者工具都是客户端，客户端要去读取数据库，第一步就要跟数据库建立连接通信，那么客户端与服务器端又是如何通信的呢？</p> 
+<h2>
+<a id="_17"></a>通信协议</h2> 
+<p>​ Mysql支持多种通信协议，包括TCP/IP协议、Unix Socket协议、Share Memory协议、Named Pipes协议，可以使用同步/异步的方式，支持长连接/短链接</p> 
+<p><strong>通信类型：同步或者异步</strong></p> 
+<p><strong>同步</strong></p> 
+<pre><code>1. 同步通信依赖于被调用方，受限于被调用方的性能，也就是是说，应用操作数据库，线程会阻塞，等待数据返回
+2. 一般只能做到一对一，很难做到一对多的通信
+</code></pre> 
+<p><strong>异步</strong></p> 
+<ol>
+<li>异步可以避免应用阻塞等待，但不能计算sql执行时间。</li>
+<li>如果异步存在并发，每一个sql的执行都要单独建立一个链接，避免数据混乱，但是这样会给服务端带来巨大的压力（一个连接就是一个线程，线程切换占用大量cpu资源），另外异步通信还带来了编码的复杂度（ps:最近已经被公司Node.js项目搞得头大（异步io）），所以，一般不建议。如果使用异步，必须使用连接池，排队从连接池中获取连接而不是创建连接</li>
+</ol> 
+<p><em>一般来说我们链接数据库都是采用同步连接</em></p> 
+<p><strong>连接方式：长连接或者短连接</strong></p> 
+<p>Mysql既支持长连接也支持短连接，一般来说都是长连接，而且会把这个长连接放到客户端的连接池中</p> 
+<p>在服务器端可以通过show status命令查看Mysql当前有多少个连接</p> 
+<pre><code class="prism language-mysql">show global status like 'Thread%'
+</code></pre> 
+<p><img src="https://images2.imgbox.com/92/23/4CogI6f8_o.png" alt="image-20220713172916527"></p> 
+<p>每产生一个连接或者一个会话，在服务器端都会创建一个线程来处理。</p> 
+<table>
+<thead><tr>
+<th>字段</th>
+<th>含义</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>Threads_cached</td>
+<td>缓存中的线程连接数</td>
+</tr>
+<tr>
+<td>Threads_connected</td>
+<td>当前打开的连接数</td>
+</tr>
+<tr>
+<td>Threads_created</td>
+<td>为处理连接创建的线程数</td>
+</tr>
+<tr>
+<td>Threads_running</td>
+<td>非睡眠状态的连接数，通常指并发连接数</td>
+</tr>
+</tbody>
+</table> 
+<p>保持长连接会消耗内存，长时间不活动的连接，Mysql服务器会自动断开，默认时间为8小时，28800秒</p> 
+<pre><code class="prism language-mysql">show global variables like 'wait_timeout' --非交互式超时时间，如JDBC程序
+show global variables like 'interactive_timeout' --交互式超时时间，如数据库工具navicat
+</code></pre> 
+<p><img src="https://images2.imgbox.com/15/86/M2qHSvkL_o.png" alt="image-20220713174022203"></p> 
+<p>Mysql服务允许的最大连接数默认是15个，最大的可以设置成10000。</p> 
+<pre><code class="prism language-mysql">show variables like 'max_connections'
+</code></pre> 
+<p><img src="https://images2.imgbox.com/0a/a7/6LblEOpG_o.png" alt="image-20220713183251988"></p> 
+<p>**参数级别说明：**Mysql中的参数分为session和global级别，分别是在当前会话中生效和全局生效，但并不是每个参数都有两个级别，比如max_connections就只有全局级别。当没有带参数的时候，默认就是session级别，包括查询和修改，比如修改了一个参数后，在本窗口查询已经生效，但在其他窗口不生效，常见的修改事务提交方式就是如此</p> 
+<pre><code class="prism language-mysql">show variables like 'autocommit';
+set autocommit = on; --默认为session级别，只在当前窗口有效
+</code></pre> 
+<p><strong>通信协议</strong></p> 
+<ol><li><strong>TCP/IP协议</strong></li></ol> 
+<p>通常我们通过这个协议来连接MySQL，各种主要编程语言都是根据这个协议实现了连接模块,<code>mysql -h xx.xx.xx.xx -u root -p</code></p> 
+<ol start="2"><li><strong>Unix Socket协议</strong></li></ol> 
+<p>通常我们登入MySQL服务器中使用这个协议，因为要使用这个协议连接MySQL需要一个物理文件，文件的存放位置在配置文件中有定义，默认地址是/var/lib/mysql/mysql.sock，值得一提的是，这是所有协议中最高效的一个.</p> 
+<ol start="3"><li><strong>Share Memory协议</strong></li></ol> 
+<p>这个协议一般人不知道，肯定也没用过，因为这个只有windows可以使用，使用这个协议需要在配置文件中在启动的时候使用–shared-memory参数，注意的是，使用此协议，一个host上只能有一个server，所以这个东西一般没啥用的，除非你怀疑其他协议不能正常工作，实际上微软的SQL Sever也支持这个协议</p> 
+<ol start="4"><li><strong>Named Pipes协议</strong></li></ol> 
+<p>这个协议也是只有windows才可以用，同shared memory一样，使用此协议，一个host上依然只能有一个server，即使是使用不同的端口也不行，Named Pipes 是为局域网而开发的协议。内存的一部分被某个进程用来向另一个进程传递信息，因此一个进程的输出就是另一个进程的输入。第二个进程可以是本地的(与第一个进程位于同一台计算机上)，也可以是远程的(位于联网的计算机上)。正因为如此，假如你的环境中没有或者禁用TCP/IP环境，而且是windows服务器，那么好歹你的数据库还能工作。使用这个协议需要在启动的时候添加–enable-named-pipe选项</p> 
+<h2>
+<a id="_104"></a>通信方式</h2> 
+<ul>
+<li>**单工：**在两台计算机通行的时候，数据的传输是单向的，类比于遥控器</li>
+<li>**半双工：**在两台计算之间，数据传输是双向的，你可以给我发送，我也可以给你发送，但是在这个通讯连接里面，同一时间只能由一台服务器在发送数据，即数据不能同时发送，我给你发送数据需要等你给我发的数据发完了之后才可以继续发送，类比生活中的对讲机</li>
+<li>**全双工：**数据的传输是双向的，并且可以同时传输，类比手机通话</li>
+</ul> 
+<p><strong>Mysql采用半双工的通信方式</strong>，在一个连接中，要么是客户端向服务器端发送数据，要么是服务器端向客户端发送数据，这两个动作不能同时发生，所以客户端发送sql语句给服务端的时候，（在一次连接里面）数据是不能分成小块传输的，不管sql语句有多大，都是一次性发送。若一次查询中，语句过长则查询过程可能会产生问题，这个时候必须调整Mysql服务器配置<code>max_allowed_packet</code>参数的值，把它调大否则就会报错。</p> 
+<p><img src="https://images2.imgbox.com/7a/ee/lgCKZx5o_o.png" alt="image-20220816152100900"></p> 
+<p>另一方面，对于服务器来说，也是一次性发送所有的数据，不能因为你已经取到了想要的数据就中断操作，这个时候会对网络和内存产生大量消耗。所以在程序里面要避免不带limit的这种操作，比如一次把所有满足条件的数据全部查出来，一定要先count一下，如果数据量大的话可以分批查询。</p> 
+<h2>
+<a id="_116"></a>查询缓存</h2> 
+<p>mysql8.0 中已被移除，不建议使用，缓存建议交给独立的缓存服务器操作。</p> 
+<h2>
+<a id="_122"></a>词法语法解析和预处理（解析器、预处理器）</h2> 
+<p>mysql查询输入一些错误的的查询语句的时候，服务器会报1064错误，那么，mysql是如何知道输入的内容是错误的？这主要是靠Mysql的<strong>Parser 解析器</strong>和<strong>Preprocessor预处理模块</strong>完成</p> 
+<p><img src="https://images2.imgbox.com/da/c1/kANkqMax_o.png" alt="image-20220816153102331"></p> 
+<p>例如一个简单的查询语句 <code>select name from user where id = 1</code> 会被拆分为 8个符号，包括“=”。随后语法分析会对SQL语句做一些语法检查比如引号有没有闭合等，词法与语法解析完成后，Mysql会根据定义的语法规则，将SQL语句解析成一个新的数据结构，这个数据结构我们把它叫做解析树（select_lex）</p> 
+<p><img src="https://images2.imgbox.com/7e/70/FDBFo4ux_o.png" alt="image-20220829162352256"></p> 
+<p>如果一个词法语法都正确的SQL，但是表名或者字段名不存在，解析SQL语句时，预处理器会检查生成的解析树，解决解析器无法解析的语义，比如，它会检查表和列名是否存在，检查名字和别名，保证没有歧义</p> 
+<h2>
+<a id="_134"></a>查询优化器与查询执行计划</h2> 
+<h3>
+<a id="_136"></a>什么是优化器</h3> 
+<p>解析树是一个可以被执行器认识的数据结构，一条SQL语句是不是只有一种执行方式？或者说数据库最终执行的SQL是不是就是发送的SQL？答案是否定的，一条SQL语句是可以有多种执行方式的，最终返回相同的结果，他们是等价的。但是如果有这么多种执行方式，这些执行方式怎么得到的？最终选择哪一种去执行？又是根据什么判断标准去选择？</p> 
+<p>这个就是MYSQL的查询优化器的模块（Optimizer）。</p> 
+<p>查询优化器的目的就是根据解析树生成不同的执行计划（Execution Plan），然后选择一种最优的执行计划，MySQL里面使用的是基于开销（cost）的优化器，哪种执行计划开销最小，就使用哪一种。</p> 
+<pre><code class="prism language-mysql">-- 可以使用这个命令查看查询的开销
+show status like "Last_query_cost"
+</code></pre> 
+<h3>
+<a id="_149"></a>优化器可以做什么</h3> 
+<p>MySQL的优化器能够处理哪些优化类型呢？举两个简单的例子：</p> 
+<ol>
+<li>当我们对多张表进行关联查询的时候，以哪个表的数据作为基准表（先访问哪张表）。</li>
+<li>有多个索引可以使用的时候，选择哪个索引。</li>
+<li>对于查询条件的优化，比如移除1=1之类的恒等式，移除不必要的括号，表达式的计算，子查询和连接查询的优化。</li>
+</ol> 
+<p>那么经过优化器处理后，得到的结果是啥，MySQL又是如何去处理？</p> 
+<h3>
+<a id="_159"></a>优化器执行结果</h3> 
+<p>优化器最终会把解析树变成一个执行计划（execution_plans），执行计划也是一个数据结构，当然，这个执行计划并不一定是最优的执行计划，因为MySQL也有可能覆盖不到所有的执行计划。我们可以通过在SQL语句前面加上EXPLAIN，就可以查看执行计划的信息。其中key为使用的索引，如果要得到详细的信息，还可以使用<code>FORMAT = JSON</code></p> 
+<pre><code class="prism language-mysql"> explain select name from user_innodb where id = 1;
+ explain format = json select name from user_innodb where id = 1;
+</code></pre> 
+<p><img src="https://images2.imgbox.com/c4/8c/0uVhgoXU_o.png" alt="image-20220830163130696"></p> 
+<h2>
+<a id="_170"></a>存储引擎</h2> 
+<h3>
+<a id="_172"></a>基本介绍</h3> 
+<p>表载存储数据的同时，还要组织数据的存储结构，这个存储结构就是由我们的存储引擎所决定的。在MySQL里面，我们创建的每一张表都可以指定它的存储引擎，而不是一个数据库只能使用一个存储引擎，存储引擎的使用是以表为单位的，我们也可以把存储引擎叫做表类型，而且创建之后还可以修改存储引擎。</p> 
+<p><strong>查看数据库中的存在的表的存储引擎</strong></p> 
+<pre><code class="prism language-mysql">show table status from &lt;db&gt;
+</code></pre> 
+<p><img src="https://images2.imgbox.com/94/26/ugeWbeTj_o.png" alt="image-20220830172318269"></p> 
+<p>默认情况下，每个数据库有一个文件夹，任何一个存储引擎都有一个 frm 文件，这个是表结构定义文件，不同的存储引擎存放数据的方式不一样，产生的文件也不一样。innodb存储引擎是一个以ibd结尾的文件，memory存储引擎没有，myisam存储引擎包含两个文件，一个以MYD结尾，一个以MYI结尾。</p> 
+<p>数据库数据文件目录</p> 
+<pre><code class="prism language-mysql"> show variables like 'datadir';
+-- 默认目录为/var/lib/mysql
+</code></pre> 
+<h3>
+<a id="_193"></a>存储引擎比较</h3> 
+<p>我们可以通过这个命令查看数据库对存储引擎的支持情况</p> 
+<pre><code class="prism language-mysql">show engines;
+</code></pre> 
+<p><img src="https://images2.imgbox.com/e2/7f/YspeoxTj_o.png" alt="image-20220830180723914"></p> 
+<p>其中有存储引擎的描述和对事务、XA协议和Savepoints的支持。XA协议用来实现分布式事务（分为本地资源管理器，事务管理器）。Savepoints用来实现子事务（嵌套事务）。创建了一个Savepoints之后，事务就可以回滚到这个点，不会影响到创建Savepoints之前的操作</p> 
+<ul>
+<li> <p>MyISAM</p> <p>MySQL自带的存储引擎，由ISAM升级而来。官网文档https://dev.mysql.com/doc/refman/8.0/en/myisam-storage-engine.html，应用范围比较小，表级锁定限制了读/写的性能，因此在Web和数据仓库配置中，它通常用于只读或以读为主的工作</p> </li>
+<li> <p>InnoDB</p> <p>MySQL 5.7之后默认的存储引擎，适合经常更新的表，存在并发读写或者有事务处理的业务系统，InnoDB是一个事务安全（与ACID兼容）的MySQL存储引擎，它具有提交、回滚和崩溃恢复功能来保护用户数据，InnoDB行级别锁（不升级为更粗粒度的锁）和Oracle 风格的一致性读取提高了多用户并发性和性能；InnoDB表在磁盘上排列数据以优化基于主键的查询，每个InnoDB表都有一个称为聚集索引的主键索引，它组织数据以最小化主键查找的 I/O；为了保证数据的完整性，InnoDB支持 FOREIGN KEY 约束，使用外键检查插入、更新和删除以确保它们不会导致相关表之间的不一致。官网文档https://dev.mysql.com/doc/refman/8.0/en/innodb-storage-engine.html</p> <p><strong>特点</strong></p> 
+  <ol>
+<li>支持事务，支持外键，因此数据的完整性、一致性更高。</li>
+<li>支持行级别的锁和表级别的锁。</li>
+<li>支持读写并发，写不阻塞读（MVCC）。</li>
+<li>特殊的索引存放方式，可以减少IO，提升查询效率。</li>
+</ol> </li>
+<li> <p>Memory</p> <p>将所有数据存储在RAM中，以便在需要快速查找非关键数据的环境中快速访问，把数据放在内存里面，读写的速度很快，但是数据库重启或者崩溃，数据会全部消失，只适合做临时表，将表中的数据存储到内存中，默认使用哈希索引。</p> </li>
+<li> <p>CSV (3个文件)</p> <p>它的表实际上是带有逗号分隔值的文本文件，CSV表允许以CSV格式导入或转储数据，以便与读写相同格式的脚本和应用程序交换数据，因为CSV表没有索引，所以通常在正常操作期间将数据保存在Innodb表中，并且只在导入或导出阶段使用CSV表。</p> <p><strong>特点：</strong> 不允许空行，不支持索引。格式通用，可以直接编辑，适合在不同数据库之间导入导出</p> </li>
+<li> <p>Archive(2个文件)</p> <p>这些紧凑的未索引的表用于存储和检索大量很少引用的历史，存档或安全审计信息。</p> <p>**特点：**不支持索引，不支持update delete。</p> </li>
+</ul> 
+<p>不同的存储引擎提供的特性都不一样，它们有不同的存储机制，索引方式，锁定水平等功能。</p> 
+<p>我们在不同的业务场景中随数据库的要求不同，就可以选择不同的存储引擎来满足我们的需求，这个就是mysql支持这么多存储引擎的原因。</p> 
+<h3>
+<a id="_240"></a>如何选择存储引擎</h3> 
+<p>如果对数据一致性要求比较高，需要支持事务，可以选择InnoDB。</p> 
+<p>如果数据查询多更新少，对查询性能要求比较高，可以选择MyISAM。</p> 
+<p>如果需要一个用于查询的临时表，可以选择Memory。</p> 
+<p>如果所有存储引擎都不能满足要求，可以官网内部手册开发一个存储引擎</p> 
+<h1>
+<a id="SQL_252"></a>一条更新SQL是如何执行的？</h1> 
+<p>更新流程和查询流程有什么不同呢？基本流程是一致的，也就是说，它也要经过解析器，优化器的处理，最后交给执行器。<em>区别就在于拿到符合条件的数据之后的操作</em></p> 
+<h2>
+<a id="_256"></a>缓冲池</h2> 
+<p>首先, 对于Innodb来说,数据都是放在磁盘上的,存储引擎要操作数据,必须先把磁盘里面的数据加载到内存里面才可以操作．</p> 
+<p>这里就有一个问题，我们一次从磁盘中的加载多少数据到内存中呢，是不是需要多少就拿多少？磁盘的I/O操作相对与内存操作来说是相当耗时的,如果我们需要的数据分布在磁盘不同的地方,那就意味着会产生很多此的I/O操作.</p> 
+<p>所以,无论是操作系统还是存储引擎,都有一个预读取的概念,当磁盘的一块数据被读取的时候,很有可能它附近的位置也会马上被读取到,这个就叫做<strong>局部性原理</strong>.那么这样,我们干脆每次读取的时候多读取一些数据,而不是用多少读多少.</p> 
+<p>InnoDB设定了一个从磁盘读取数据到内存的最小的单位,叫做页,同操作系统的页类似.操作系统的页大小一般为4K,而在InnoDB中,页的大小为16Kb,他是一个逻辑单位,如果需要修改这个值的大小,需要修改源码重新编译安装.</p> 
+<p>设想一下,对于数据页的操作,每次都直接操作磁盘,从磁盘中加载到内存,这样会不会很慢,能不能把这些页缓存起来,加快数据的加载速度.</p> 
+<p>InnoDB使用了一种缓冲池的技术,也就是把磁盘读到的页放到一块内存区域里面,下一次读取相同的页,先判断是不是在这个内存区域里面,如果是,就直接读取,然后操作,不用再次从磁盘中加载,这个内存区域就叫做<strong>Buffer Pool</strong></p> 
+<p>修改数据的时候,先修改内存缓冲池里面的页,内存的数据页和磁盘数据不一致的时候,我们把它叫做脏页,那脏页什么时候同步到磁盘呢?</p> 
+<p>InnoDB里面有专门的后台把Buffer Pool的数据写入到磁盘,每隔一段时间就一次性的把多个修改写入磁盘,这个动作就叫做刷脏</p> 
+<h2>
+<a id="InnoDB_276"></a>InnoDB内存结构和磁盘结构</h2> 
+<p><img src="https://images2.imgbox.com/21/b5/FHQu1kFj_o.png" alt="image-20230506170646449"></p> 
+<p>内存结构里面主要是Buffer Pool,Change Buffer,Log Buffer AHI.</p> 
+<ol>
+<li> <p>Buffer Pool</p> <p>Buffer Pool里面缓存的是page页面信息,默认大小是128M,可以修改调整</p> </li>
+<li> <p>(redo)Log Buffer</p> <p>​ 因为刷脏不是实时的,如果BufferPool里面的脏页还没有刷入磁盘时,数据库宕机或者重启,这些数据就会丢失.内存的数据必须要有一个持久化的措施,为了避免这个问题,InnoDB把所有对页面的修改操作专门写入一个日志文件.如果有未同步到磁盘的数据,数据库在启动的时候,会从这个日志文件进行恢复操作(实现 crash-safe).我们说的事务的ACID里面的D(持久性),就是用它来实现的.</p> <p>​ 这个日志文件就是磁盘的redo log (叫做重做日志),对应于/var/lib/mysql/ 目录下的ib_logfile0和ib_logfile1,默认两个文件,每个48M.<code>show variables like 'innodb_log'</code></p> 
+  <ol><li> <p>同样是写磁盘,为什么不直接写到db file中去,而是先写日志在写磁盘?写日志文件和写到数据文件有什么区别?</p> <p>数据都是分散在不同的扇区的,写到db file 中去需要进行刷盘操作,是随机I/O,而记录日志是顺序I/O(连续写的),顺序I/O效率更高,因此把修改写入日志文件,在保证了内存数据的安全性的情况下,可以延迟刷盘时机,进而提升系统吞吐.</p> </li></ol> <p><strong>特点:</strong></p> 
+  <ol>
+<li>redo log 是InnoDB存储引擎实现的,并不是所有存储引擎都有,支持崩溃恢复是InnoDB的一个特性.</li>
+<li>redo log是物理日志,记录的是"在某个数据页做了什么修改"</li>
+<li>redo log的大小是固定的,前面的内容会被覆盖,一旦写满,就会触发buffer pool到磁盘的同步,以便腾出空间记录后面的修改</li>
+</ol> </li>
+<li> <p>undo log tablespace</p> <p>undo log(撤销日志或回滚日志)记录了事务发生之前的数据状态(不包括select).如果修改数据时出现异常,可以使用undo log来实现回滚操作(保持原子性).</p> <p>在执行undo的时候,仅仅是将数据从逻辑上恢复至事务之前的状态,而不是从物理页面上操作实现的,属于逻辑格式的日志,undo log 的数据默认在系统表空间Ibdata1文件中,因为共享表弓箭不会自动收缩,也可以单独创建一个undo表空间.</p> </li>
+</ol> 
+<p><strong>有了这些日志之后,我们来总结一下一个更新操作的流程</strong> 例如 <code>update user set name = 'telangpu' where name = "baideng";</code></p> 
+<ol>
+<li>事务开始,内存(buffer pool)或磁盘(data file)取到这条数据,返回给Server的执行器;</li>
+<li>Server的执行器修改这一行数据的值为telangpu;</li>
+<li>记录name=baideng到undo log;</li>
+<li>记录name=telangpu到redo log</li>
+<li>调用存储引擎接口,在内存Buffer pool中的将数据修改</li>
+<li>事务提交</li>
+</ol> 
+<p>后台线程工作,刷新内存池中的数据把修改的数据刷新到磁盘.</p> 
+<h2>
+<a id="Binlog_321"></a>Binlog</h2> 
+<p>处理Innodb架构的日志文件,Mysql的Server层也有一个日志文件,叫做binlog,它可以被所有的存储引擎使用.</p> 
+<p>Binlog以事件的形式记录了所有的DDL和DML语句,它记录的是操作而不是数据.binlog可以用来做主从复制和数据恢复.跟redo log日志不一样,binlog日志的文件是可以追加的,没有固定的大小限制.</p> 
+<p>在开启binlog功能的情况下,我们可以把binlog导出成sql语句,把所有的操作重新执行一遍,来实现数据的(归档)恢复</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Flutter图片加载和缓存机制探究 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Flutter图片加载和缓存机制探究</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>今天来学习一下 Flutter 自身是如何加载图片和管理图片的。 Flutter 提供了一个图片控件 <code>Image</code>，<code>Image</code> 定义了若干中加载图片的方式，包括 Image.asset、Image.file、Image.network、Image.memory。 <code>Image</code>内部维护了一个 <code>ImageProvider</code>对象，<code>ImageProvider</code>则真正维护整个图片加载的工作。Widget 本身内部是体现在 <code>RawImage</code>中： ​</p> 
+<h3>图片控件</h3> 
+<p>​</p> 
+<pre><code class="language-java">// Image
+Widget result = RawImage(
+      image: _imageInfo?.image,
+      debugImageLabel: _imageInfo?.debugLabel,
+      width: widget.width,
+      height: widget.height,
+      scale: _imageInfo?.scale ?? 1.0,
+      color: widget.color,
+      colorBlendMode: widget.colorBlendMode,
+      fit: widget.fit,
+      alignment: widget.alignment,
+      repeat: widget.repeat,
+      centerSlice: widget.centerSlice,
+      matchTextDirection: widget.matchTextDirection,
+      invertColors: _invertColors,
+      isAntiAlias: widget.isAntiAlias,
+      filterQuality: widget.filterQuality,
+    );
+return result;</code></pre> 
+<p>这里可以看到 _imageInfo 决定 <code>RawImage</code>如何展示图片。 _imageInfo 则会在图片的每一帧进行重新赋值： ​</p> 
+<pre><code class="language-java">// image.dart
+void _handleImageFrame(ImageInfo imageInfo, bool synchronousCall) {
+ 	setState(() {
+    _imageInfo = imageInfo;
+  }
+}</code></pre> 
+<p>那么图片信息是从哪里来的呢，它是由 _resolveImage 这个方法发起的。这个方法会在 _ImageState 的 <code>didChangeDependencies</code>、 <code>didUpdateWidget</code>和 <code>reassemble</code>方法进行调用。 也就是控件发生变化刷新状态的时候，就会重新去解析图片。 ​</p> 
+<h3>图片解析</h3> 
+<p>_resolveImage 逻辑如下：</p> 
+<pre><code class="language-java">void _resolveImage() {
+	final ScrollAwareImageProvider provider = ScrollAwareImageProvider&lt;dynamic&gt;(
+      context: _scrollAwareContext,
+      imageProvider: widget.image,
+    );
+	final ImageStream newStream =
+      provider.resolve(createLocalImageConfiguration(
+        context,
+        size: widget.width != null &amp;&amp; widget.height != null ? Size(widget.width, widget.height) : null,
+      ));
+	_updateSourceStream(newStream);
+}</code></pre> 
+<p>这里会用 <code>ScrollAwareImageProvider</code> 包装一下，<code>ScrollAwareImageProvider</code> 的功能我们后面会介绍，这里先跳过。 ​</p> 
+<pre><code class="language-java">//ImageProvider# resolve
+ImageStream resolve(ImageConfiguration configuration) {
+	_createErrorHandlerAndKey(configuration,(T key, ImageErrorListener errorHandler) {
+        resolveStreamForKey(configuration, stream, key, errorHandler);
+      },
+		(T? key, dynamic exception, StackTrace? stack) async {
+        await null; // wait an event turn in case a listener has been added to the image stream.
+        final _ErrorImageCompleter imageCompleter = _ErrorImageCompleter();
+        stream.setCompleter(imageCompleter);
+        InformationCollector? collector;
+        assert(() {
+          collector = () sync* {
+            yield DiagnosticsProperty&lt;ImageProvider&gt;('Image provider', this);
+            yield DiagnosticsProperty&lt;ImageConfiguration&gt;('Image configuration', configuration);
+            yield DiagnosticsProperty&lt;T&gt;('Image key', key, defaultValue: null);
+          };
+          return true;
+        }());
+        imageCompleter.setError(
+          exception: exception,
+          stack: stack,
+          context: ErrorDescription('while resolving an image'),
+          silent: true, // could be a network error or whatnot
+          informationCollector: collector,
+        );
+      }
+	);
+}</code></pre> 
+<p>resolve 方法调用 _createErrorHandlerAndKey 来处理图片加载的异常情况。当图片正常加载的时候，会执行 resolveStreamForKey。 ​</p> 
+<pre><code class="language-java">//resolveStreamForKey
+void resolveStreamForKey(ImageConfiguration configuration, ImageStream stream, T key, ImageErrorListener handleError) {
+	if (stream.completer != null) {
+		final ImageStreamCompleter? completer = PaintingBinding.instance!.imageCache!.putIfAbsent(
+        key,
+        () =&gt; stream.completer!,
+        onError: handleError,
+      );
+		return;
+	}
+
+	final ImageStreamCompleter? completer = PaintingBinding.instance!.imageCache!.putIfAbsent(
+		key,
+      () =&gt; load(key, PaintingBinding.instance!.instantiateImageCodec),
+      onError: handleError,
+		);
+
+	if (completer != null) {
+      stream.setCompleter(completer);
+    }
+}</code></pre> 
+<p>Flutter 会把图片缓存相关的逻辑维护在 <code>ImageCache</code>这个对象。</p> 
+<h3>缓存管理</h3> 
+<p><code>ImageCache</code>里面有 3 个 map:</p> 
+<p style="text-align:center"><img alt="image.png" src="https://images2.imgbox.com/0d/59/TvCd6jrR_o.png"></p> 
+<p>分别表示</p> 
+<ul>
+<li>正在加载的图片</li>
+<li>缓存在内存的图片</li>
+<li>表示正活跃的图片，Widget 状态变化后可能会清空</li>
+</ul>
+<p>​</p> 
+<p>新增缓存</p> 
+<p>新增缓存的时候会设置 map 的 key， key 由 ImageProvider 对象提供。例如：</p> 
+<ul>
+<li>AssetImage 当包名和bundle一样的时候，key可以认为是一样的。</li>
+<li>NetworkImage 当图片 url 和比例一样的时候，key可以认为是一样的。</li>
+</ul>
+<p>ImageCache 实际上是一个单例对象。也就是 Flutter 的图片缓存管理是全局的。ImageCache 最重要的方法就是 putIfAbsent：</p> 
+<pre><code class="language-java">// 整理过核心逻辑的代码
+ImageStreamCompleter? putIfAbsent(Object key, ImageStreamCompleter loader(), { ImageErrorListener? onError }) {
+  // 根据key从正在加载的map里获取缓存，如果有直接返回
+  	ImageStreamCompleter? result = _pendingImages[key]?.completer;
+  	if (result != null) {
+      return result;
+    }
+  
+  // 检查内存缓存，存在的话更新存活map
+  final _CachedImage? image = _cache.remove(key);
+  if (image != null) {
+    _trackLiveImage(key, _LiveImage(image.completer, image.sizeBytes, () =&gt; _liveImages.remove(key)));
+    _cache[key] = image;
+    return image.completer;
+  }
+  
+  // 没有缓存，从 _live 里面取
+  final _CachedImage? liveImage = _liveImages[key];
+  if (liveImage != null) {
+    // 更新缓存
+    _touch(key, liveImage, timelineTask);
+    return liveImage.completer;
+  }
+  
+  // 3 个 map 都没有获取到缓存的图片
+  result = loader(); // 加载
+  _trackLiveImage(key, _LiveImage(result, null, () =&gt; _liveImages.remove(key)));
+  
+	_PendingImage? untrackedPendingImage;
+
+  //定义一个listener
+	void listener(ImageInfo? info, bool syncCall) {
+		// 加载的监听
+	}
+  
+  // 包装一个listener
+	final ImageStreamListener streamListener = ImageStreamListener(listener);
+	if (maximumSize &gt; 0 &amp;&amp; maximumSizeBytes &gt; 0) {
+		// 放入缓存
+		_pendingImages[key] = _PendingImage(result, streamListener);
+	} else {
+		untrackedPendingImage = _PendingImage(result, streamListener);
+	}
+	// 添加监听
+	result.addListener(streamListener);
+	return result;
+}</code></pre> 
+<p>listener 回调的逻辑： 在 <code>Image</code> 状态改变的时候，会触发对 liveImages 的修改： ​</p> 
+<pre><code class="language-java">// Image
+_imageStream.removeListener(_getListener());
+
+// ImageStream
+void removeListener(ImageStreamListener listener) {
+  for (final VoidCallback callback in _onLastListenerRemovedCallbacks) {
+    callback();
+  }
+  _onLastListenerRemovedCallbacks.clear();
+}</code></pre> 
+<p>而在 _trackLiveImage 的时候，_LiveImage 都注册了上面的这个 callback:</p> 
+<pre><code class="language-java">_trackLiveImage(key, _LiveImage(image.completer, image.sizeBytes, () =&gt; _liveImages.remove(key)));</code></pre> 
+<p>这时候改图片会从 _liveImages 里面移除。</p> 
+<p>由此可见，缓存的优先级为 pending -&gt; cache -&gt; live -&gt; load，图片缓存和获取的流程如下图所示：</p> 
+<p>缓存清理</p> 
+<p>在更新缓存大小的时候，还会进行缓存大小的检查：</p> 
+<pre><code class="language-java">void _checkCacheSize(TimelineTask? timelineTask) {
+  while (_currentSizeBytes &gt; _maximumSizeBytes || _cache.length &gt; _maximumSize) {
+    final Object key = _cache.keys.first;
+    final _CachedImage image = _cache[key]!;
+    _currentSizeBytes -= image.sizeBytes!;
+    _cache.remove(key);
+  }
+}</code></pre> 
+<p>当当前缓存总容量大于最大容量或者缓存数量大于最大数量的时候，就会进行缓存的清理。 所以上面使用缓存的过程中，多次访问的缓存就会把key往后放，避免一上来就被清理掉。 所以 Flutter 自身的缓存清理算法也是遵循了 “最近最少使用” 的。 图片缓存的逻辑如下图所示：</p> 
+<p style="text-align:center"><img alt="排麦 (2).png" src="https://images2.imgbox.com/f9/7c/jNMhfsIj_o.png"></p> 
+<h3>图片加载</h3> 
+<p>图片加载主要依赖上面的 <code>load</code>方法进行。不同的 <code>ImageProvider</code> 子类有自己的实现。例如</p> 
+<ul><li><code>AssetImage</code></li></ul>
+<pre><code class="language-java">return MultiFrameImageStreamCompleter(
+      codec: _loadAsync(key, decode),
+      scale: key.scale,
+      debugLabel: key.name,
+      informationCollector: collector
+    );</code></pre> 
+<ul><li><code>NetworkImage</code></li></ul>
+<pre><code class="language-java">final StreamController&lt;ImageChunkEvent&gt; chunkEvents =
+        StreamController&lt;ImageChunkEvent&gt;();
+
+    return MultiFrameImageStreamCompleter(
+        chunkEvents: chunkEvents.stream,
+        codec: _loadAsync(key as NetworkImage, decode, chunkEvents),
+        scale: key.scale,
+        debugLabel: key.url,
+        informationCollector: _imageStreamInformationCollector(key));</code></pre> 
+<p>逻辑基本一样，具体特异的流程体现在 <code>loadAsync</code>里面： ​</p> 
+<pre><code class="language-java">// AssetImage _loadAsync
+try {
+      data = await key.bundle.load(key.name);
+    } on FlutterError {
+      PaintingBinding.instance!.imageCache!.evict(key);
+      rethrow;
+    }
+
+if (data == null) {
+// 加载数据是null，清掉这个key的缓存
+	PaintingBinding.instance!.imageCache!.evict(key);
+	throw StateError('Unable to read data');
+}
+
+return await decode(data.buffer.asUint8List());
+
+
+/// NetworkImage _loadAsync
+Future&lt;ui.Codec&gt; _loadAsync(
+      NetworkImage key,
+      image_provider.DecoderCallback decode,
+      StreamController&lt;ImageChunkEvent&gt; chunkEvents) {
+
+	final Uri resolved = Uri.base.resolve(key.url);
+	return ui.webOnlyInstantiateImageCodecFromUrl(resolved, // ignore: undefined_function
+        chunkCallback: (int bytes, int total) {
+      chunkEvents.add(ImageChunkEvent(
+          cumulativeBytesLoaded: bytes, expectedTotalBytes: total));
+    }) as Future&lt;ui.Codec&gt;;
+}</code></pre> 
+<p>这里分别会从 bundle 里加载图片和从网络拉取图片。 ​</p> 
+<h3>滑动中处理</h3> 
+<p>还记得上面提到的 <code>ScrollAwareImageProvider</code>吗，这里会有一个关于滑动中的判断： ​</p> 
+<pre><code class="language-java">if (Scrollable.recommendDeferredLoadingForContext(context.context)) {
+  SchedulerBinding.instance.scheduleFrameCallback((_) {
+		scheduleMicrotask(() =&gt; resolveStreamForKey(configuration, stream, key, handleError));
+	 });
+	return;
+}</code></pre> 
+<p>当 if 里的逻辑成立，就把解析图片的工作放到下一帧。recommendDeferredLoadingForContext 的具体逻辑： ​</p> 
+<pre><code class="language-java">static bool recommendDeferredLoadingForContext(BuildContext context) {
+	
+	final _ScrollableScope widget =
+		context.getElementForInheritedWidgetOfExactType&lt;_ScrollableScope&gt;()?.widget as _ScrollableScope;
+	if (widget == null) {
+      return false;
+    }
+	// 存在滑动的widget
+	return widget.position.recommendDeferredLoading(context);
+}</code></pre> 
+<p>这个会找到 Widget 树里面最近的 _ScrollableScope。如果 ScrollableScope 处于快速滑动的时候，就返回true。所以 flutter 在快速滑动的列表中是不会加载图片的。 ​</p> 
+<h3>总结</h3> 
+<p>到这里 Flutter 图片的加载和缓存管理就介绍完了。我们可以认识到几个问题</p> 
+<ul>
+<li>Flutter 本身是有图片的内存缓存。也是按照 LRU 的算法去管理缓存的。并且缓存池有阈值，我们可以自己去设置我们想要的内存阈值。</li>
+<li>Flutter 本身没有提供图片的磁盘缓存，APP 重启之后图片加载流程是会重新走的</li>
+</ul>
+<p>Flutter学习资料以及Android进阶学习大全可以找我免费领取哦<br> 链接直达：<a class="link-info" href="https://jq.qq.com/?_wv=1027&amp;k=7vXTe5CZ">https://jq.qq.com/?_wv=1027&amp;k=7vXTe5CZ</a></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

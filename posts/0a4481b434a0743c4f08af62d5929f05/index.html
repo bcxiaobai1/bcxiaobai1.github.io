@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Nacos架构与原理 - CAP一致性协议 （ Raft &amp;amp; Distro） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Nacos架构与原理 - CAP一致性协议 （ Raft &amp;amp; Distro）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-dracula">
+                    
+                        
+                    
+                    <p></p> 
+<div class="toc"> 
+ <h3>文章目录</h3> 
+ <ul>
+<li><a href="#_Nacos__7">为什么 Nacos 需要⼀致性协议</a></li>
+<li><a href="#_Nacos__Raft__Distro_23">为什么 Nacos 选择了 Raft 以及 Distro</a></li>
+<li>
+<ul>
+<li><a href="#_30">从服务注册发现来看</a></li>
+<li><a href="#_52">从配置管理来看</a></li>
+<li><a href="#_Raft__Distro__60">为什么是 Raft 和 Distro ？</a></li>
+<li>
+<ul>
+<li><a href="#Raft_CP_62">Raft (CP模式)</a></li>
+<li><a href="#Distro__AP_79">Distro （AP模式）</a></li>
+</ul> 
+  </li>
+</ul> 
+  </li>
+<li><a href="#Nacos__91">Nacos ⼀致性协议的演进</a></li>
+<li>
+<ul>
+<li><a href="#_Nacos__92">早期的 Nacos ⼀致性协议</a></li>
+<li><a href="#_Nacos__118">当前 Nacos 的⼀致性协议层</a></li>
+<li><a href="#Nacos__133">Nacos 如何做到⼀致性协议下沉的</a></li>
+<li>
+<ul>
+<li><a href="#_142">⼀致性协议抽象</a></li>
+<li><a href="#_171">数据存储抽象</a></li>
+</ul> 
+  </li>
+</ul> 
+ </li>
+</ul> 
+</div> 
+<p></p> 
+<p><img src="https://images2.imgbox.com/62/20/ARB2QzqV_o.png" alt="在这里插入图片描述"></p> 
+<hr> 
+<h1>
+<a id="_Nacos__7"></a>为什么 Nacos 需要⼀致性协议</h1> 
+<p>Nacos尽可能的减少用户部署以及运维成本，做到用户只需要⼀个程序包，就可以快速以<strong>单机模式启动 Nacos</strong> 或者以<strong>集群模式启动 Nacos</strong>。</p> 
+<p>而 Nacos 是⼀个需要存储数据的⼀个组件，因此，为了实现这个目标，就需要在 Nacos 内部实现数据存储。</p> 
+<ul>
+<li>单机下其实问题不大，简单的内嵌关系型数据库即可；</li>
+<li>但是集群模式下，就需要考虑如何保障各个节点之间的数据⼀致性以及数据同步，而要解决这个问题，就不得不引入共识算法，通过算法来保障各个节点之间的数据的⼀致性。</li>
+</ul> 
+<p><img src="https://images2.imgbox.com/07/01/4gjckRmn_o.gif" alt="在这里插入图片描述"></p> 
+<hr> 
+<h1>
+<a id="_Nacos__Raft__Distro_23"></a>为什么 Nacos 选择了 Raft 以及 Distro</h1> 
+<p>为什么 Nacos 会在单个集群中同时运行 CP 协议以及 AP 协议呢？这其实要从 Nacos 的场景出发的：<strong>Nacos 是⼀个集服务注册发现以及配置管理于⼀体的组件，因此对于集群下，各个节点之间的数据⼀致性保障问题</strong>，需要拆分成两个方面</p> 
+<h2>
+<a id="_30"></a>从服务注册发现来看</h2> 
+<p>服务之间感知对方服务的当前可正常提供服务的实例信息，必须从服务发现注册中心进行获取，因此对于服务注册发现中心组件的可用性，提出了很高的要求，需要在任何场景下，<strong>尽最大可能保证服务注册发现能力可以对外提供服务</strong>；</p> 
+<p>同时 Nacos 的服务注册发现设计，采取了<strong>心跳可自动完成服务数据补偿的机制</strong>。如果数据丢失的话，是可以通过该机制快速弥补数据丢失。</p> 
+<p>因此，<strong>为了满足服务发现注册中心的可用性，强⼀致性的共识算法这里就不太合适了</strong>，因为强⼀致性共识算法能否对外提供服务是有要求的，如果当前集群可用的节点数没有过半的话，整个算法直接“罢工”，而最终⼀致共识算法的话，更多保障服务的可用性，并且能够保证在⼀定的时间内各个节点之间的数据能够达成⼀致。</p> 
+<p>上述的都是<strong>针对于 Nacos 服务发现注册中的非持久化服务而言（即需要客户端上报心跳进行服务实例续约）</strong>。</p> 
+<p><font color="red">而对于 Nacos 服务发现注册中的<strong>持久化服务，因为所有的数据都是直接使用调用 Nacos服务端直接创建，因此需要由 Nacos 保障数据在各个节点之间的强⼀致性，故而针对此类型的服务数据，选择了强⼀致性共识算法来保障数据的⼀致性</strong></font></p> 
+<p><img src="https://images2.imgbox.com/5a/4c/SLuBEdT4_o.gif" alt="在这里插入图片描述"></p> 
+<hr> 
+<h2>
+<a id="_52"></a>从配置管理来看</h2> 
+<p><strong>配置数据，是直接在 Nacos 服务端进行创建并进行管理的，必须保证大部分的节点都保存了此配置数据才能认为配置被成功保存了</strong>，否则就会丢失配置的变更，如果出现这种情况，问题是很严重的，如果是发布重要配置变更出现了丢失变更动作的情况，那多半就要引起严重的现网故障了，因此对于配置数据的管理，是必须要求集群中大部分的节点是强⼀致的，而这里的话只<strong>能使用强⼀致性共识算法</strong></p> 
+<hr> 
+<h2>
+<a id="_Raft__Distro__60"></a>为什么是 Raft 和 Distro ？</h2> 
+<h3>
+<a id="Raft_CP_62"></a>Raft (CP模式)</h3> 
+<p>对于强⼀致性共识算法，当前工业生产中，最多使用的就是 Raft 协议，Raft 协议更容易让人理解，并且有很多成熟的工业算法实现，比如</p> 
+<ul>
+<li>蚂蚁金服的 JRaft</li>
+<li>Zookeeper 的 ZAB</li>
+<li>Consul 的 Raft</li>
+<li>百度的 braft</li>
+<li>Apache Ratis</li>
+</ul> 
+<p>因为 Nacos 是 Java 技术栈，因此只能在 JRaft、ZAB、ApacheRatis 中选择，但是 ZAB 因为和 Zookeeper 强绑定，再加上希望可以和 Raft 算法库的支持团队沟通交流，因此选择了 JRaft，<strong>选择 JRaft 也是因为 JRaft 支持多 RaftGroup，为 Nacos 后面的多数据分片带来了可能。</strong></p> 
+<hr> 
+<h3>
+<a id="Distro__AP_79"></a>Distro （AP模式）</h3> 
+<p>而 <strong>Distro 协议是阿里巴巴自研的⼀个最终⼀致性协议</strong>，而最终⼀致性协议有很多，比如 Gossip、Eureka 内的数据同步算法。而 Distro 算法是集 Gossip 以及 Eureka 协议的优点并加以优化而出来的，对于原生的 Gossip，由于随机选取发送消息的节点，也就不可避免的存在消息重复发送给同⼀节点的情况，增加了网络的传输的压力，也给消息节点带来额外的处理负载，而 <strong>Distro 算法引入<br> 了权威 Server 的概念，每个节点负责⼀部分数据以及将自己的数据同步给其他节点，有效的降低了消息冗余的问题</strong>。<br> <img src="https://images2.imgbox.com/6a/4c/jyfae1sH_o.gif" alt="在这里插入图片描述"></p> 
+<hr> 
+<h1>
+<a id="Nacos__91"></a>Nacos ⼀致性协议的演进</h1> 
+<h2>
+<a id="_Nacos__92"></a>早期的 Nacos ⼀致性协议</h2> 
+<p>看早起的 Naocs 版本的架构<br> <img src="https://images2.imgbox.com/77/0a/sdWNyLNE_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li> <p>在早期的 Nacos 架构中，服务注册和配置管理⼀致性协议是分开的，没有下沉到 Nacos 的内核模块作为通用能力演进</p> </li>
+<li> <p>服务发现模块⼀致性协议的实现和服务注册发现模块的逻辑强耦合在⼀起，并且充斥着服务注册发现的⼀些概念。</p> </li>
+<li> <p>这使得 Nacos 的服务注册发现模块的逻辑变得复杂且难以维护，耦合了⼀致性协议层的数据状态，难以做到<strong>计算存储彻底分离</strong>，以及对计算层的无限水平扩容能力也有⼀定的影响。</p> </li>
+</ul> 
+<p>因此为了解决这个问题，必然需要对 Nacos 的⼀致性协议做抽象以及下沉，使其成为 Core 模块的能力，彻底让服务注册发现模块只充当计算能力，同时为配置模块去外部数据库存储打下了架构基础。</p> 
+<p><img src="https://images2.imgbox.com/f8/28/A2MFYCBP_o.jpg" alt="在这里插入图片描述"></p> 
+<hr> 
+<h2>
+<a id="_Nacos__118"></a>当前 Nacos 的⼀致性协议层</h2> 
+<p>正如前面所说，在当前的 Nacos 内核中，我们已经做到了将⼀致性协议的能力，完全下沉到了内核模块作为 Nacos 的核心能力，很好的服务于服务注册发现模块以及配置管理模块，我们来看看当前 Nacos 的架构。</p> 
+<p><img src="https://images2.imgbox.com/11/99/qxNkSdAr_o.png" alt="在这里插入图片描述"></p> 
+<p>可以发现，在新的 Nacos 架构中，已经完成了将⼀致性协议从原先的服务注册发现模块下沉到了内核模块当中，并且尽可能的提供了统⼀的抽象接口，使得上层的服务注册发现模块以及配置管理模块，不再需要耦合任何⼀致性语义，解耦抽象分层后，每个模块能快速演进，并且性能和可用性都大幅提升。</p> 
+<h2>
+<a id="Nacos__133"></a>Nacos 如何做到⼀致性协议下沉的</h2> 
+<p>既然 Nacos 已经做到了将 AP、CP 协议下沉到了内核模块，而且尽可能的保持了⼀样的使用体验。那么这个⼀致性协议下沉，Nacos 是如何做到的呢？</p> 
+<p><img src="https://images2.imgbox.com/d9/83/irZ32anI_o.gif" alt="在这里插入图片描述"></p> 
+<h3>
+<a id="_142"></a>⼀致性协议抽象</h3> 
+<ul>
+<li> <p>其实，⼀致性协议，就是用来保证数据⼀致的，而数据的产生，必然有⼀个写入的动作；</p> </li>
+<li> <p>同时还要能够读数据，并且保证读数据的动作以及得到的数据结果，并且能够得到⼀致性协议的保障。</p> </li>
+</ul> 
+<p><font color="blue"><strong>因此，⼀致性协议最最基础的两个方法，就是写动作和读动作</strong></font></p> 
+<p><img src="https://images2.imgbox.com/54/70/wQ2NHkDT_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/3f/24/jrJFVPaU_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li>任何使用⼀致性协议的，都只需要使用 getData 以及 write 方法即可。</li>
+<li>同时，⼀致性协议已经被抽象在了 consistency 的包中，Nacos 对于 AP、CP 的⼀致性协议接口使用抽象都在里面，并且在实现具体的⼀致性协议时，采用了插件可插拔的形式，进⼀步将⼀致性协议具体实现逻辑和服务注册发现、配置管理两个模块达到解耦的目的。</li>
+</ul> 
+<p><img src="https://images2.imgbox.com/64/ee/iyfN8rt5_o.png" alt="在这里插入图片描述"></p> 
+<p><font color="blue">其实，仅做完⼀致性协议抽象是不够的，如果只做到这里，那么服务注册发现以及配置管理，还是需要依赖⼀致性协议的接口，在两个计算模块中耦合了带状态的接口；</font></p> 
+<p>并且，虽然做了比较高度的⼀致性协议抽象，<strong>服务模块以及配置模块却依然还是要在自己的代码模块中去显示的处理⼀致性协议的读写请求逻辑，以及需要自己去实现⼀个对接⼀致性协议的存储</strong>，这其实是不好的，<font color="blue"><strong>服务发现以及配置模块，更多应该专注于数据的使用以及计算，而非数据怎么存储、怎么保障数据⼀致性，数据存储以及多节点⼀致的问题应该交由存储层来保证</strong>。</font></p> 
+<p>为了进⼀步降低⼀致性协议出现在服务注册发现以及配置管理两个模块的频次以及尽可能让⼀致性协议只在内核模块中感知，Nacos 这里又做了另⼀份工作——数据存储抽象。</p> 
+<hr> 
+<h3>
+<a id="_171"></a>数据存储抽象</h3> 
+<p>⼀致性协议，就是用来保证数据⼀致的，如果利用⼀致性协议实现⼀个存储，那么服务模块以及配置模块，就由原来的依赖⼀致性协议接口转变为了依赖存储接口.</p> 
+<p>而存储接口后面的具体实现，就比⼀致性协议要丰富得多了，并且服务模块以及配置模块也无需为直接依赖⼀致性协议而承担多余的编码工作（快照、状态机实现、数据同步）。使得这两个模块可以更加的专注自己的核心逻辑。</p> 
+<p>对于数据抽象，这里仅以服务注册发现模块为例</p> 
+<p><img src="https://images2.imgbox.com/59/a9/vfQkPP89_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li> <p>由于 Nacos 的服务模块存储，更多的都是根据单个或者多个唯⼀ key 去执行点查的操作，因此Key-Value 类型的存储接口最适合不过。</p> </li>
+<li> <p>而 Key-Value 的存储接口定义好之后，其实就是这个KVStore 的具体实现了。可以直接将 KVStore 的实现对接 Redis，也可以直接对接 DB ，或者直接根据 Nacos 内核模块的⼀致性协议，在此基础之上，实现⼀个内存或者持久化的分布式强（弱）⼀致性 KV。</p> </li>
+<li> <p><strong>通过功能边界将 Nacos 进程进⼀步分离为计算逻辑层和存储逻辑层，计算层和存储层之间的交互仅通过⼀层薄薄的数据操作胶水代码</strong>，这样就在单个 Nacos 进程里面实现了<strong>计算和存储二者逻辑的彻底分离</strong></p> </li>
+</ul> 
+<p><img src="https://images2.imgbox.com/ec/77/J66xVtky_o.png" alt="在这里插入图片描述"></p> 
+<p>同时，针对存储层，进⼀步实现插件化的设计，对于中小公司且有运维成本要求的话，可以直接使用 Nacos 自带的内嵌分布式存储组件来部署⼀套 Nacos 集群，而如果服务实例数据以及配置数据的量级很大的话，并且本身有⼀套比较好的 Paas 层服务，那么完全可以复用已有的存储组件，实现 Nacos 的计算层与存储层彻底分离。</p> 
+<p><img src="https://images2.imgbox.com/80/31/TJW8XSpZ_o.jpg" alt="在这里插入图片描述"></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

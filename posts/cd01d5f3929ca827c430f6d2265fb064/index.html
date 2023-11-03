@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Node.js 是如何处理请求的 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Node.js 是如何处理请求的</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p>前言：在服务器软件中，如何处理请求是非常核心的问题。不管是底层架构的设计、IO 模型的选择，还是上层的处理都会影响一个服务器的性能，本文介绍 Node.js 在这方面的内容。</p> 
+<h3>
+<a id="TCP__2"></a>TCP 协议的核心概念</h3> 
+<p>要了解服务器的工作原理首先需要了解 TCP 协议的工作原理。TCP 是一种面向连接的、可靠的、基于字节流的传输层全双工通信协议，它有 4 个特点：面向连接、可靠、流式、全双工。下面详细讲解这些特性。</p> 
+<h4>
+<a id="_4"></a>面向连接</h4> 
+<p>TCP 中的连接是一个虚拟的连接，本质上是主机在内存里记录了对端的信息，我们可以将连接理解为一个通信的凭证。如下图所示。<br> <img src="https://images2.imgbox.com/aa/66/ihOpjo9b_o.png" alt=""><br> 那么如何建立连接呢？TCP 的连接是通过三次握手建立的。</p> 
+<ol>
+<li>服务器首先需要监听一个端口。</li>
+<li>客户端主动往服务器监听的端口发起一个 syn 包（第一次握手）。</li>
+<li>当服务器所在操作系统收到一个 syn 包时，会先根据 syn 包里的目的 IP 和端口找到对应的监听 socket，如果找不到则回复 rst 包，如果找到则发送 ack 给客户端（第二次握手），接着新建一个通信 socket 并插入到监听 socket 的连接中队列（具体的细节会随着不同版本的操作系统而变化。比如连接中队列和连接完成队列是一条队列还是两条队列，再比如是否使用了 syn cookie 技术来防止 syn flood 攻击，如果使用了，收到 syn 包的时候就不会创建 socket，而是收到第三次握手的包时再创建）。</li>
+<li>客户端收到服务器的 ack 后，再次发送 ack 给服务器，客户端就完成三次握手进入连接建立状态了。</li>
+<li>当服务器所在操作系统收到客户端的 ack 时（第三次握手），处于连接中队列的 socket 就会被移到连接完成队列中。</li>
+<li>当操作系统完成了一个 TCP 连接，操作系统就会通知相应的进程，进程从连接完成队列中摘下一个已完成连接的 socket 结点，然后生成一个新的 fd，后续就可以在该 fd 上和对端通信。具体的流程如下图所示。<br> <img src="https://images2.imgbox.com/77/15/wA3KXcKL_o.png" alt="">
+</li>
+</ol> 
+<p>完成三次握手后，客户端和服务器就可以进行数据通信了。操作系统收到数据包和收到 syn 包的流程不一样，操作系统会根据报文中的 IP 和端口找到处理该报文的通信 socket（而不是监听 socket），然后把数据包（操作系统实现中是一个 skb 结构体）挂到该通信 socket 的数据队列中。<br> <img src="https://images2.imgbox.com/f5/c7/1UDNOGGE_o.png" alt=""><br> 当应用层调用 read 读取该 socket 的数据时，操作系统会根据应用层所需大小，从一个或多个 skb 中返回对应的字节数。同样，写也是类似的流程，当应用层往 socket 写入数据时，操作系统不一定会立刻发送出去，而是会保存到写缓冲区中，然后根据复杂的 TCP 算法发送。</p> 
+<p>当两端完成通信后需要关闭连接，否则会浪费内存。TCP 通过四次挥手实现连接的断开，第一次挥手可以由任意一端发起。前面讲过 TCP 是全双工的，所以除了通过四次挥手完成整个 TCP 连接的断开外，也可以实现半断开，比如客户端关闭写端表示不会再发送数据，但是仍然可以读取来自对端发送端数据。四次挥手的流程如下。<br> <img src="https://images2.imgbox.com/80/df/6Hqu4rJc_o.png" alt=""></p> 
+<h4>
+<a id="_23"></a>可靠</h4> 
+<p>TCP 发送数据时会先缓存一份到已发送待确认队列中，并启动一个超时重传计时器，如果一定时间内没有收到对端到确认 ack，则触发重传机制，直到收到 ack 或者重传次数达到阈值才会结束流程。</p> 
+<h4>
+<a id="_26"></a>流式</h4> 
+<p>建立连接后，应用层就可以调用发送接口源源不断地发送数据。通常情况下，并不是每次调用发送接口，操作系统就直接把数据发送出去，这些数据的发送是由操作系统按照一定的算法去发送的。对操作系统来说，它看到的是字节流，它会按照 TCP 算法打包出一个个包发送到对端，所以当对端收到数据后，需要处理好数据边界的问题。<br> <img src="https://images2.imgbox.com/a8/93/Poo06Oqs_o.png" alt=""><br> 从上图中可以看到，假设应用层发送了两个 HTTP 请求，操作系统在打包数据发送时可能的场景是第一个包里包括了 HTTP 请求 1 的全部数据和部分请求 2 的数据，所以当对端收到数据并进行解析时，就需要根据 HTTP 协议准确地解析出第一个 HTTP 请求对应的数据。</p> 
+<p>因为 TCP 的流式协议，所以基于 TCP 的应用层通常需要定义一个应用层协议，然后按照应用层协议实现对应的解析器，这样才能完成有效的数据通信，比如常用的 HTTP 协议。对比来说 UDP 是面向数据包的协议，当应用层把数据传递给 UDP 时，操作系统会直接打包发送出去（如果数据字节大小超过阈值则会报错）。</p> 
+<h4>
+<a id="_33"></a>全双工</h4> 
+<p>刚才提到 TCP 是全双工的，全双工就是通信的两端都有一个发送队列和接收队列，可以同时发送和接收，互不影响。另外也可以选择关闭读端或者写端。<br> <img src="https://images2.imgbox.com/72/ba/qeMFUFnP_o.png" alt=""></p> 
+<h3>
+<a id="_37"></a>服务器的工作原理</h3> 
+<p>介绍了 TCP 协议的概念后，接着看看如何创建一个 TCP 服务器（伪代码）。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// 创建一个 socket，拿到一个文件描述符</span>
+<span class="token keyword">int</span> server_fd <span class="token operator">=</span> <span class="token function">socket</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">// 绑定地址（IP + 端口）到该 socket 中</span>
+<span class="token function">bind</span><span class="token punctuation">(</span>server_fd<span class="token punctuation">,</span> addressInfo<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">// 修改 socket 为监听状态，这样就可以接收 TCP 连接了</span>
+<span class="token function">listen</span><span class="token punctuation">(</span>server_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>执行完以上步骤，一个服务器就启动了。服务器启动的时候会监听一个端口，如果有连接到来，我们可以通过 accept 系统调用拿到这个新连接对应的 socket，那这个 socket 和监听的 socket 是不是同一个呢？</p> 
+<p>其实 socket 分为监听型和通信型。表面上服务器用一个端口实现了多个连接，但是这个端口是用于监听的，底层用于和客户端通信的其实是另一个 socket。每当一个连接到来的时候，操作系统会根据请求包的目的地址信息找到对应的监听 socket，如果找不到就会回复 RST 包，如果找到就会生成一个新的 socket 与之通信（accept 的时候返回的那个）。监听 socket 里保存了监听的 IP 和端口，通信 socket 首先从监听 socket 中复制 IP 和端口，然后把客户端的 IP 和端口也记录下来。这样一来，下次再收到一个数据包，操作系统就会根据四元组从 socket 池子里找到该 socket，完成数据的处理。因此理论上，一个服务器能接受多少连接取决于服务器的硬件配置，比如内存大小。</p> 
+<p>接下来分析各种处理连接的方式。</p> 
+<h4>
+<a id="_52"></a>串行模式</h4> 
+<p>串行模式就是服务器逐个处理连接，处理完前面的连接后才能继续处理后面的连接，逻辑如下。</p> 
+<pre><code class="prism language-c"><span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> client_fd  <span class="token operator">=</span> <span class="token function">accept</span><span class="token punctuation">(</span>server_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">read</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">write</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>上面的处理方式是最朴素的模型，如果没有连接，则服务器处于阻塞状态，如果有连接服务器就会不断地调用 accept 摘下完成三次握手的连接并处理。假设此时有 n 个请求到来，进程会从 accept 中被唤醒，然后拿到一个新的 socket 用于通信，结构图如下。<img src="https://images2.imgbox.com/81/df/HGBg4tpw_o.png" alt=""><br> 这种处理模式下，如果处理的过程中调用了阻塞 API，比如文件 IO，就会影响后面请求的处理，可想而知，效率是非常低的，而且，并发量比较大的时候，监听 socket 对应的队列很快就会被占满（已完成连接队列有一个最大长度），导致后面的连接无法完成。这是最简单的模式，虽然服务器的设计中肯定不会使用这种模式，但是它让我们了解了一个服务器处理请求的整体过程。</p> 
+<h4>
+<a id="_65"></a>多进程模式</h4> 
+<p>串行模式中，所有请求都在一个进程中排队被处理，效率非常低下。为了提高效率，我们可以把请求分给多个进程处理。因为在串行处理的模式中，如果有文件 IO 操作就会阻塞进程，继而阻塞后续请求的处理。在多进程的模式中，即使一个请求阻塞了进程，操作系统还可以调度其它进程继续执行新的任务。多进程模式分为几种。</p> 
+<h5>
+<a id="_fork_68"></a>按需 fork</h5> 
+<p>按需 fork 模式是主进程监听端口，有连接到来时，主进程执行 accept 摘取连接，然后通过 fork 创建子进程处理连接，逻辑如下。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">int</span> client_fd <span class="token operator">=</span> <span class="token function">accept</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+    <span class="token comment">// 忽略出错处理 </span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">fork</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token keyword">continue</span><span class="token punctuation">;</span>
+        <span class="token comment">// 父进程负责 accept  </span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token comment">// 子进程负责处理连接</span>
+        <span class="token function">handle</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+        <span class="token function">exit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+    <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span> 
+</code></pre> 
+<p>这种模式下，每次来一个请求，就会新建一个进程去处理，比串行模式稍微好了一点，每个请求都被独立处理。假设 a 请求阻塞在文件 IO，不会影响 b 请求的处理，尽可能地做到了并发。它的缺点是</p> 
+<ol>
+<li>进程数有限，如果有大量的请求，需要排队处理。</li>
+<li>进程的开销会很大，对于系统来说是一个负担。</li>
+<li>创建进程需要时间，实时创建会增加处理请求的时间。</li>
+</ol> 
+<h5>
+<a id="prefork____accept_91"></a>pre-fork 模式 + 主进程 accept</h5> 
+<p>pre-fork 模式就是服务器启动的时候，预先创建一定数量的进程，但是这些进程是 worker 进程，不负责接收连接，只负责处理请求。处理过程为主进程负责接收连接，然后把接收到的连接交给 worker 进程处理，流程如下。<br> <img src="https://images2.imgbox.com/e5/0e/tgBfrFrl_o.png" alt=""><br> 逻辑如下：</p> 
+<pre><code class="prism language-cpp">let fds <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> …进程个数<span class="token punctuation">]</span><span class="token punctuation">;</span>  
+let process <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">;</span>  
+<span class="token keyword">for</span> <span class="token punctuation">(</span>let i <span class="token operator">=</span> <span class="token number">0</span> <span class="token punctuation">;</span> i <span class="token operator">&lt;</span> 进程个数<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// 创建管道用于传递文件描述符  </span>
+    <span class="token function">socketpair</span><span class="token punctuation">(</span>fds<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    let pid<span class="token punctuation">;</span>  
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>pid <span class="token operator">=</span> <span class="token function">fork</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token comment">// 父进程  </span>
+        process<span class="token punctuation">.</span><span class="token function">push</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span>pid<span class="token punctuation">,</span> 其它字段<span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token keyword">const</span> index <span class="token operator">=</span> i<span class="token punctuation">;</span>  
+        <span class="token comment">// 子进程处理请求  </span>
+        <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+            <span class="token comment">// 从管道中读取文件描述符  </span>
+            var client_fd <span class="token operator">=</span> <span class="token function">read</span><span class="token punctuation">(</span>fd<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+            <span class="token comment">// 处理请求  </span>
+            <span class="token function">handle</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+        <span class="token punctuation">}</span>  
+    <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span>  
+<span class="token comment">// 主进程 accept</span>
+<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span><span class="token punctuation">;</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">const</span> clientFd <span class="token operator">=</span> <span class="token function">accept</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 找出处理该请求的子进程  </span>
+    <span class="token keyword">const</span> i <span class="token operator">=</span> <span class="token function">findProcess</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 传递文件描述符  </span>
+    <span class="token function">write</span><span class="token punctuation">(</span>fds<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> clientFd<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>和 fork 模式相比，pre-fork 模式相对比较复杂，因为在前一种模式中，主进程收到一个请求就会实时 fork 一个子进程，这个子进程会继承主进程中新请求对应的 fd，可以直接处理该 fd 对应的请求。但是在进程池的模式中，子进程是预先创建的，当主进程收到一个请求的时候，子进程中无法拿得到该请求对应的 fd 。这时候就需要主进程使用传递文件描述符的技术把这个请求对应的 fd 传给子进程。</p> 
+<h5>
+<a id="prefork____accept_129"></a>pre-fork 模式 + 子进程 accept</h5> 
+<p>刚才介绍的模式中，是主进程接收连接，然后传递给子进程处理，这样主进程就会成为系统的瓶颈，它可能来不及接收和分发请求给子进程，而子进程却很空闲。子进程 accept 这种模式也是会预先创建多个进程，区别是多个子进程会调用 accept 共同处理请求，而不需要父进程参与，逻辑如下。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> server_fd <span class="token operator">=</span> <span class="token function">socket</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token function">bind</span><span class="token punctuation">(</span>server_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">for</span> <span class="token punctuation">(</span>let i <span class="token operator">=</span> <span class="token number">0</span> <span class="token punctuation">;</span> i <span class="token operator">&lt;</span> 进程个数<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">fork</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token comment">// 父进程负责监控子进程  </span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token comment">// 子进程处理请求  </span>
+        <span class="token function">listen</span><span class="token punctuation">(</span>server_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+            <span class="token keyword">int</span> client_fd <span class="token operator">=</span> <span class="token function">accept</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+            <span class="token function">handle</span><span class="token punctuation">(</span>client_fd<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+        <span class="token punctuation">}</span>  
+    <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>这种模式下多个子进程都阻塞在 accept，如果这时候有一个请求到来，那么所有的子进程都会被唤醒，但是先被调度的子进程会摘下这个请求节点，后续的进程被唤醒后可能会遇到已经没有请求可以处理，而又进入睡眠，这种进程被无效唤醒的现象就是著名的惊群现象。这种模式的处理流程如下。<img src="https://images2.imgbox.com/d6/87/HiYIwsXQ_o.png" alt=""><br> Nginx 中解决了惊群这个问题，它的处理方式是在 accpet 之前先加锁，拿到锁的进程才进行 accept，这样就保证了只有一个进程会阻塞在 accept，不会引起惊群问题，但是新版操作系统已经在内核层面解决了这个问题，每次只会唤醒一个进程。</p> 
+<h4>
+<a id="_152"></a>多线程模式</h4> 
+<p>除了使用多进程外，也可以使用多线程技术处理连接，多线程模式和多进程模式类似，区别是在进程模式中，每个子进程都有自己的 task_struct，这就意味着在 fork 之后，每个进程负责维护自己的数据、资源。线程则不一样，线程共享进程的数据和资源，所以连接可以在多个线程中共享，不需要通过文件描述符传递的方式进行处理，比如如下架构。<br> <img src="https://images2.imgbox.com/c2/a3/gwTFaexF_o.png" alt=""><br> 上图中，主线程负责 accept 请求，然后通过互斥的方式插入一个任务到共享队列中，线程池中的子线程同样是通过互斥的方式，从共享队列中摘取节点进行处理。</p> 
+<h4>
+<a id="_156"></a>事件驱动</h4> 
+<p>从之前的处理模式中我们知道，为了应对大量的请求，服务器通常需要大量的进程 / 线程，这是个非常大的开销。现在很多服务器（Nginx、Nodejs、Redis）都开始使用单进程 + 事件驱动模式去设计，这种模式可以在单个进程中轻松处理成千上万的请求。</p> 
+<p>但也正因为单进程模式下，再多的请求也只在一个进程里处理，这样一个任务会一直在占据 CPU，后续的任务就无法执行了。因此，事件驱动模式不适合 CPU 密集型的场景，更适合 IO 密集的场景（一般都会提供线程 / 线程池，负责处理 CPU 或者阻塞型的任务）。大部分操作系统都提供了事件驱动的 API，但是事件驱动在不同系统中实现不一样，所以一般都会有一层抽象层抹平这个差异。这里以 Linux 的 epoll 为例子。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// 创建一个 epoll 实例</span>
+<span class="token keyword">int</span> epoll_fd <span class="token operator">=</span> <span class="token function">epoll_create</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token comment">/* 
+    在 epoll 给某个文件描述符注册感兴趣的事件，这里是监听的 socket，注册可读事件，即连接到来 
+    event = { 
+        event: 可读 
+        fd： 监听 socket 
+        // 一些上下文 
+    } 
+*/</span>  
+<span class="token function">epoll_ctl</span><span class="token punctuation">(</span>epoll_fd <span class="token punctuation">,</span> EPOLL_CTL_ADD <span class="token punctuation">,</span> socket<span class="token punctuation">,</span> event<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// 阻塞等待事件就绪，events 保存就绪事件的信息，total 是个数  </span>
+    <span class="token keyword">int</span> total<span class="token operator">=</span> <span class="token function">epoll_wait</span><span class="token punctuation">(</span>epoll_fd <span class="token punctuation">,</span> 保存就绪事件的结构events<span class="token punctuation">,</span> 事件个数<span class="token punctuation">,</span> timeout<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>let i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> total<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>events<span class="token punctuation">[</span>fd<span class="token punctuation">]</span> <span class="token operator">==</span><span class="token operator">=</span> 监听 socket<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+            <span class="token keyword">int</span> client_fd <span class="token operator">=</span> <span class="token function">accpet</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+            <span class="token comment">// 把新的 socket 也注册到 epoll，等待可读，即可读取客户端数据  </span>
+            <span class="token function">epoll_ctl</span><span class="token punctuation">(</span>epoll_fd <span class="token punctuation">,</span> EPOLL_CTL_ADD <span class="token punctuation">,</span> client_fd<span class="token punctuation">,</span> event<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+            <span class="token comment">//  从events[i] 中拿到一些上下文，执行相应的回调  </span>
+        <span class="token punctuation">}</span>  
+    <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>事件驱动模式的处理流程为服务器注册文件描述符和事件到 epoll 中，然后 epoll 开始阻塞，当有事件触发时 epoll 就会返回哪些 fd 的哪些事件触发了，接着服务器遍历就绪事件并执行对应的回调，在回调里可以再次注册 / 删除事件，就这样不断驱动着进程的运行。<br> epoll 的原理其实也类似事件驱动，它底层维护用户注册的事件和文件描述符，本身也会在文件描述符对应的文件 / socket / 管道处注册一个回调，等被通知有事件发生的时候，就会把 fd 和事件返回给用户，大致原理如下。</p> 
+<pre><code class="prism language-cpp">function <span class="token function">epoll_wait</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">for</span> 事件个数  
+        <span class="token comment">// 调用文件系统的函数判断  </span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>事件 <span class="token punctuation">[</span>i<span class="token punctuation">]</span> 中对应的文件描述符中有某个用户感兴趣的事件发生 ？<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+            插入就绪事件队列  
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+            <span class="token comment">/*
+                在事件 [i] 中的文件描述符所对应的文件 / socke / 管道等资源中注册回调。
+                感兴趣的事件触发后回调 epoll，回调 epoll 后，epoll 把该 event[i] 插入
+                就绪事件队列返回给用户  
+            */</span>
+        <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<h4>
+<a id="SO_REUSEPORT__207"></a>SO_REUSEPORT 端口复用</h4> 
+<p>新版 Linux 支持 SO_REUSEPORT 特性后，使得服务器性能有了很大的提升。 SO_REUSEPORT 之前，一个 socket 是无法绑定到同一个地址的，通常的做法是主进程接收连接然后传递给子进程处理，或者主进程 bind 后 fork 子进程，然后子进程执行 listen，但底层是共享同一个 socket，所以连接到来时所有子进程都会被唤醒，但是只有一个连接可以处理这个请求，其他的进程被无效唤醒。SO_REUSEPORT 特性支持多个子进程对应多个监听 socket，多个 socket 绑定到同一个地址，当连接到来时，操作系统会根据地址信息找到一组 socket，然后根据策略选择一个 socket 并唤醒阻塞在该 socket 的进程，被 socket 唤醒的进程处理自己的监听 socket 下的连接就行，架构如下。<br> <img src="https://images2.imgbox.com/e9/4a/w3BbDgZT_o.png" alt=""><br> 除了前面介绍的模式外，还有基于协程的模式，服务器技术繁多，就不一一介绍了。</p> 
+<h3>
+<a id="IO__212"></a>IO 模型</h3> 
+<p>IO 模型是服务器中非常重要的部分，操作系统通常会提供了多种 IO 模型，常见的如下。</p> 
+<h4>
+<a id="_IO_214"></a>阻塞 IO</h4> 
+<p>当线程执行一个 IO 操作时，如果不满足条件，当前线程会被阻塞，然后操作系统会调度其他线程执行。</p> 
+<h4>
+<a id="_IO_216"></a>非阻塞 IO</h4> 
+<p>非阻塞 IO 在不满足条件的情况下直接返回一个错误码给线程，而不是阻塞线程。</p> 
+<p>那么这个阻塞是什么意思呢？直接看一段操作系统的代码。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// 没有空间可写了</span>
+<span class="token keyword">while</span><span class="token punctuation">(</span><span class="token operator">!</span><span class="token punctuation">(</span>space <span class="token operator">=</span> <span class="token function">UN_BUF_SPACE</span><span class="token punctuation">(</span>pupd<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> 
+<span class="token punctuation">{<!-- --></span>
+	<span class="token comment">// 非阻塞模式，直接返回错误码</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>nonblock<span class="token punctuation">)</span> 
+		<span class="token keyword">return</span><span class="token punctuation">(</span><span class="token operator">-</span>EAGAIN<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">// 阻塞模式，进入阻塞状态</span>
+	<span class="token function">interruptible_sleep_on</span><span class="token punctuation">(</span>sock<span class="token operator">-&gt;</span>wait<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">interruptible_sleep_on</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">wait_queue</span> <span class="token operator">*</span><span class="token operator">*</span>p<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 修改线程状态为阻塞状态</span>
+	<span class="token function">__sleep_on</span><span class="token punctuation">(</span>p<span class="token punctuation">,</span>TASK_INTERRUPTIBLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">static</span> <span class="token keyword">inline</span> <span class="token keyword">void</span> <span class="token function">__sleep_on</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">wait_queue</span> <span class="token operator">*</span><span class="token operator">*</span>p<span class="token punctuation">,</span> <span class="token keyword">int</span> state<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span> flags<span class="token punctuation">;</span>
+    <span class="token comment">// current 代表当前执行的线程</span>
+	<span class="token keyword">struct</span> <span class="token class-name">wait_queue</span> wait <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> current<span class="token punctuation">,</span> <span class="token constant">NULL</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+    <span class="token comment">// 修改线程状态为阻塞状态</span>
+	current<span class="token operator">-&gt;</span>state <span class="token operator">=</span> state<span class="token punctuation">;</span>
+    <span class="token comment">// 当前线程加入到资源的阻塞队列，资源就绪后唤醒线程</span>
+	<span class="token function">add_wait_queue</span><span class="token punctuation">(</span>p<span class="token punctuation">,</span> <span class="token operator">&amp;</span>wait<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 重新调度其他线程执行，即从就绪的线程中选择一个来执行</span>
+	<span class="token function">schedule</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>通过这段代码，我们就可以非常明确地了解到阻塞和非阻塞到底是指什么。</p> 
+<h4>
+<a id="_IO_253"></a>多路复用 IO</h4> 
+<p>在阻塞式 IO 中，我们需要通过阻塞进程来感知 IO 是否就绪，在非阻塞式 IO 中，我们需要通过轮询来感知 IO 是否就绪，这些都不是合适的方式。为了更好感知 IO 是否就绪，操作系统实现了订阅发布机制，我们只需要注册感兴趣的 fd 和事件，当事件发生时我们就可以感知到。多路复用 IO 可以同时订阅多个 fd 的多个事件，是现在高性能服务器的基石。看一个例子。</p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/event.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;fcntl.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token operator">*</span>argv<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>   
+    <span class="token comment">// 用于注册事件到 kqueue</span>
+    <span class="token keyword">struct</span>  <span class="token class-name">kevent</span> event<span class="token punctuation">;</span>
+    <span class="token comment">// 用于接收从 kqueue 返回到事件，表示哪个 fd 触发了哪些事件</span>
+    <span class="token keyword">struct</span>  <span class="token class-name">kevent</span> emit_event<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> kqueue_fd<span class="token punctuation">,</span> file_fd<span class="token punctuation">,</span> result<span class="token punctuation">;</span>
+    <span class="token comment">// 打开需要监控的文件，拿到一个 fd</span>
+    file_fd <span class="token operator">=</span> <span class="token function">open</span><span class="token punctuation">(</span>argv<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> O_RDONLY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>file_fd <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Fail to open %s"</span><span class="token punctuation">,</span> argv<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 创建 kqueue 实例</span>
+    kqueue_fd <span class="token operator">=</span> <span class="token function">kqueue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 设置需要监听的事件，文件被写入时触发</span>
+    <span class="token function">EV_SET</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>event<span class="token punctuation">,</span>file_fd<span class="token punctuation">,</span> EVFILT_VNODE<span class="token punctuation">,</span> EV_ADD <span class="token operator">|</span> EV_CLEAR<span class="token punctuation">,</span> NOTE_RENAME<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 注册到操作系统</span>
+    result <span class="token operator">=</span> <span class="token function">kevent</span><span class="token punctuation">(</span>kqueue_fd<span class="token punctuation">,</span> <span class="token operator">&amp;</span>event<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 不断阻塞等待，直到文件被写入</span>
+    <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// result 返回触发事件的 fd 个数，这里是一个</span>
+        result <span class="token operator">=</span> <span class="token function">kevent</span><span class="token punctuation">(</span>kqueue_fd<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>emit_event<span class="token punctuation">,</span>  <span class="token number">1</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>result <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"%s have been renamedn"</span><span class="token punctuation">,</span> argv<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="_IO_289"></a>异步 IO</h4> 
+<p>前面介绍的几种 IO 模型中，当 IO 就绪时需要自己执行读写操作，而异步 IO 是 IO 就绪时，操作系统帮助线程完成 IO 操作，然后再通知线程操作完成了。下面以 io_uring（Linux 中的异步 IO 框架） 为例了解下具体的情况。</p> 
+<pre><code class="prism language-cpp">uv_loop_t<span class="token operator">*</span> loop<span class="token punctuation">;</span>
+<span class="token function">napi_get_uv_event_loop</span><span class="token punctuation">(</span>env<span class="token punctuation">,</span> <span class="token operator">&amp;</span>loop<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">struct</span> <span class="token class-name">io_uring_info</span> <span class="token operator">*</span>io_uring_data <span class="token operator">=</span> <span class="token punctuation">(</span>io_uring_info <span class="token operator">*</span><span class="token punctuation">)</span>loop<span class="token operator">-&gt;</span>data<span class="token punctuation">;</span>
+<span class="token comment">// 申请内存</span>
+<span class="token keyword">struct</span> <span class="token class-name">request</span> <span class="token operator">*</span>req <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">request</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">malloc</span><span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>req<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span><span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">iovec</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+req<span class="token operator">-&gt;</span>fd <span class="token operator">=</span> fd<span class="token punctuation">;</span>
+req<span class="token operator">-&gt;</span>offset <span class="token operator">=</span> offset<span class="token punctuation">;</span>
+<span class="token comment">// 保存回调</span>
+<span class="token function">napi_create_reference</span><span class="token punctuation">(</span>env<span class="token punctuation">,</span> args<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>req<span class="token operator">-&gt;</span>func<span class="token punctuation">)</span><span class="token punctuation">;</span>
+req<span class="token operator">-&gt;</span>env <span class="token operator">=</span> env<span class="token punctuation">;</span>
+req<span class="token operator">-&gt;</span>nvecs <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+<span class="token comment">// 记录buffer大小</span>
+req<span class="token operator">-&gt;</span>iovecs<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span>iov_len <span class="token operator">=</span> bufferLength<span class="token punctuation">;</span>
+<span class="token comment">// 记录内存地址</span>
+req<span class="token operator">-&gt;</span>iovecs<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span>iov_base <span class="token operator">=</span> bufferData<span class="token punctuation">;</span>
+<span class="token comment">// 提交给操作系统，操作系统读完后通知线程，op 为 IORING_OP_READV 表示读操作</span>
+<span class="token function">submit_request</span><span class="token punctuation">(</span>op<span class="token punctuation">,</span> req<span class="token punctuation">,</span> <span class="token operator">&amp;</span>io_uring_data<span class="token operator">-&gt;</span>ring<span class="token punctuation">)</span><span class="token punctuation">;</span>   
+</code></pre> 
+<p>上面的代码就是我们提交了一个读请求给操作系统，然后操作系统在文件可读并且读完成后通知我们。</p> 
+<p>Libuv 虽然写着是异步 IO 库，但是它并不是真正的异步 IO。它的意思是，你提交一个 IO 请求时，可以注册一个回调，然后就可以去做其他事情了，等操作完成后它会通知你，它的底层实现是线程池 + 多路复用 IO。</p> 
+<h3>
+<a id="Nodejs_TCP__315"></a>Node.js TCP 服务器的实现</h3> 
+<p>Node.js 服务器的底层是 IO 多路复用 + 非阻塞 IO，所以可以轻松处理成千上万的请求，但是因为 Node.js 是单线程的，所以更适合处理 IO 密集型的任务。下面看看 Node.js 中服务器是如何实现的。</p> 
+<h4>
+<a id="_317"></a>启动服务器</h4> 
+<p>在 Node.js 中，我们通常使用以下方式创建一个服务器。</p> 
+<pre><code class="prism language-js"><span class="token comment">// 创建一个 TCP Server</span>
+<span class="token keyword">const</span> server <span class="token operator">=</span> net<span class="token punctuation">.</span><span class="token function">createServer</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token parameter">socket</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 处理连接</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 监听端口，启动服务器</span>
+server<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span><span class="token number">8888</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>使用 net.createServer 可以创建一个服务器，然后拿到一个 Server 对象，接着调用 Server 对象的 listen 函数就可以启动一个 TCP 服务器了。下面来看一下具体的实现。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">createServer</span><span class="token punctuation">(</span><span class="token parameter">options<span class="token punctuation">,</span> connectionListener</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">Server</span><span class="token punctuation">(</span>options<span class="token punctuation">,</span> connectionListener<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+  
+<span class="token keyword">function</span> <span class="token function">Server</span><span class="token punctuation">(</span><span class="token parameter">options<span class="token punctuation">,</span> connectionListener</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token function">EventEmitter</span><span class="token punctuation">.</span><span class="token function">call</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 服务器收到的连接数，可以通过 maxConnections 限制并发连接数  </span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>_connections <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>  
+  <span class="token comment">// C++ 层的对象，真正实现 TCP 功能的地方</span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>_handle <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 服务器下的连接是否允许半关闭</span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>allowHalfOpen <span class="token operator">=</span> options<span class="token punctuation">.</span>allowHalfOpen <span class="token operator">||</span> <span class="token boolean">false</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 有连接时是否注册可读事件，如果该 socket 是交给其他进程处理的话可以设置为 true </span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>pauseOnConnect <span class="token operator">=</span> <span class="token operator">!</span><span class="token operator">!</span>options<span class="token punctuation">.</span>pauseOnConnect<span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>createServer 返回的是一个一般的 JS 对象，继续看一下 listen 函数的逻辑，listen 函数逻辑很繁琐，但是原理大致是一样的，所以只讲解常用的情况。</p> 
+<pre><code class="prism language-js"><span class="token class-name">Server</span><span class="token punctuation">.</span>prototype<span class="token punctuation">.</span><span class="token function-variable function">listen</span> <span class="token operator">=</span> <span class="token keyword">function</span><span class="token punctuation">(</span><span class="token parameter"><span class="token operator">...</span>args</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token comment">/*
+    处理入参，listen 可以接收很多种格式的参数，
+    假设我们这里只传了 8888 端口号
+  */</span>
+    <span class="token keyword">const</span> normalized <span class="token operator">=</span> <span class="token function">normalizeArgs</span><span class="token punctuation">(</span>args<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">//  normalized = [{port: 8888}, null];  </span>
+    <span class="token keyword">const</span> options <span class="token operator">=</span> normalized<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">;</span> 
+    <span class="token comment">// 监听成功后的回调 </span>
+    <span class="token keyword">const</span> cb <span class="token operator">=</span> normalized<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>  
+    
+    <span class="token comment">// listen 成功后执行的回调  </span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>cb <span class="token operator">!==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">once</span><span class="token punctuation">(</span><span class="token string">'listening'</span><span class="token punctuation">,</span> cb<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">listenIncluster</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">,</span> 
+                    <span class="token keyword">null</span><span class="token punctuation">,</span> 
+                    options<span class="token punctuation">.</span>port <span class="token operator">|</span> <span class="token number">0</span><span class="token punctuation">,</span> 
+                    <span class="token number">4</span><span class="token punctuation">,</span>      
+                    <span class="token operator">...</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+    <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>listen 处理了入参后，接着调用了 listenIncluster。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">listenIncluster</span><span class="token punctuation">(</span><span class="token parameter">server<span class="token punctuation">,</span> 
+                         address<span class="token punctuation">,</span> 
+                         port<span class="token punctuation">,</span> 
+                         addressType<span class="token punctuation">,</span>      
+                         backlog<span class="token punctuation">,</span> 
+                         fd<span class="token punctuation">,</span> 
+                         exclusive</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  exclusive <span class="token operator">=</span> <span class="token operator">!</span><span class="token operator">!</span>exclusive<span class="token punctuation">;</span>  
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>cluster <span class="token operator">===</span> <span class="token keyword">null</span><span class="token punctuation">)</span> cluster <span class="token operator">=</span> <span class="token function">require</span><span class="token punctuation">(</span><span class="token string">'cluster'</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>cluster<span class="token punctuation">.</span>isMaster <span class="token operator">||</span> exclusive<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    server<span class="token punctuation">.</span><span class="token function">_listen2</span><span class="token punctuation">(</span>address<span class="token punctuation">,</span> port<span class="token punctuation">,</span> addressType<span class="token punctuation">,</span> backlog<span class="token punctuation">,</span> fd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>这里只分析在主进程创建服务器的情况，listenIncluster 中执行了 _listen2，_listen2 对应的函数是 setupListenHandle。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">setupListenHandle</span><span class="token punctuation">(</span><span class="token parameter">address<span class="token punctuation">,</span> port<span class="token punctuation">,</span> addressType<span class="token punctuation">,</span> backlog<span class="token punctuation">,</span> fd</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// 通过 C++ 层导出的 API 创建一个对象，该对象关联了 C++ 层的 TCPWrap 对象</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>_handle <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">TCP</span><span class="token punctuation">(</span>TCPConstants<span class="token punctuation">.</span><span class="token constant">SERVER</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 创建 socket 并绑定地址到 socket 中</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">_handle</span><span class="token punctuation">.</span><span class="token function">bind</span><span class="token punctuation">(</span>address<span class="token punctuation">,</span> port<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+    <span class="token comment">// 有完成三次握手的连接时执行的回调  </span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>_handle<span class="token punctuation">.</span>onconnection <span class="token operator">=</span> onconnection<span class="token punctuation">;</span>  
+    <span class="token comment">// 互相关联</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>_handle<span class="token punctuation">.</span>owner <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 执行 C++ 层 listen  </span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>_handle<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span>backlog <span class="token operator">||</span> <span class="token number">511</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 触发 listen 回调  </span>
+    <span class="token function">nextTick</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">[</span>async_id_symbol<span class="token punctuation">]</span><span class="token punctuation">,</span> emitListeningNT<span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>setupListenHandle 的逻辑如下。</p> 
+<ol>
+<li>调用 new TCP 创建一个 handle（new TCP 对象关联了 C++ 层的 TCPWrap 对象）。</li>
+<li>保存处理连接的函数 onconnection，当有连接时被执行。</li>
+<li>调用了 bind 绑定地址到 socket。</li>
+<li>调用 listen 函数修改 socket 状态为监听状态。<br> 首先看看 new TCP 做了什么。</li>
+</ol> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token class-name">TCPWrap</span><span class="token double-colon punctuation">::</span><span class="token function">New</span><span class="token punctuation">(</span><span class="token keyword">const</span> FunctionCallbackInfo<span class="token operator">&lt;</span>Value<span class="token operator">&gt;</span><span class="token operator">&amp;</span> args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">new</span> <span class="token function">TCPWrap</span><span class="token punctuation">(</span>env<span class="token punctuation">,</span> args<span class="token punctuation">.</span><span class="token function">This</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token class-name">TCPWrap</span><span class="token double-colon punctuation">::</span><span class="token function">TCPWrap</span><span class="token punctuation">(</span>Environment<span class="token operator">*</span> env<span class="token punctuation">,</span> Local<span class="token operator">&lt;</span>Object<span class="token operator">&gt;</span> object<span class="token punctuation">,</span> ProviderType provider<span class="token punctuation">)</span>
+    <span class="token operator">:</span> <span class="token function">ConnectionWrap</span><span class="token punctuation">(</span>env<span class="token punctuation">,</span> object<span class="token punctuation">,</span> provider<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 初始化一个 tcp handle</span>
+  <span class="token keyword">int</span> r <span class="token operator">=</span> <span class="token function">uv_tcp_init</span><span class="token punctuation">(</span>env<span class="token operator">-&gt;</span><span class="token function">event_loop</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>handle_<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>new TCP 本质上是创建一个 TCP 层的 TCPWrap 对象，并初始化了 Libuv 的数据结构 uv_tcp_t（TCPWrap 是对 Libuv uv_tcp_t 的封装）。接着看 bind。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">template</span> <span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">T</span><span class="token operator">&gt;</span>
+<span class="token keyword">void</span> <span class="token class-name">TCPWrap</span><span class="token double-colon punctuation">::</span><span class="token function">Bind</span><span class="token punctuation">(</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 通过 JS 对象拿到关联的 C++ TCPWrap 对象</span>
+  TCPWrap<span class="token operator">*</span> wrap<span class="token punctuation">;</span>
+  <span class="token function">ASSIGN_OR_RETURN_UNWRAP</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>wrap<span class="token punctuation">,</span>
+                          args<span class="token punctuation">.</span><span class="token function">Holder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                          args<span class="token punctuation">.</span><span class="token function">GetReturnValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Set</span><span class="token punctuation">(</span>UV_EBADF<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 通过 JS 传入的地址信息直接调用 Libuv</span>
+  <span class="token function">uv_tcp_bind</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>wrap<span class="token operator">-&gt;</span>handle_<span class="token punctuation">,</span>
+              <span class="token generic-function"><span class="token function">reinterpret_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span><span class="token keyword">const</span> sockaddr<span class="token operator">*</span><span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span><span class="token operator">&amp;</span>addr<span class="token punctuation">)</span><span class="token punctuation">,</span>
+              flags<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>Bind 函数的逻辑很简单，直接调用了 Libuv 函数。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token function">uv_tcp_bind</span><span class="token punctuation">(</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">return</span> <span class="token function">uv__tcp_bind</span><span class="token punctuation">(</span>handle<span class="token punctuation">,</span> addr<span class="token punctuation">,</span> addrlen<span class="token punctuation">,</span> flags<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">uv__tcp_bind</span><span class="token punctuation">(</span>uv_tcp_t<span class="token operator">*</span> tcp<span class="token punctuation">,</span>
+                 <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">sockaddr</span><span class="token operator">*</span> addr<span class="token punctuation">,</span>
+                 <span class="token keyword">unsigned</span> <span class="token keyword">int</span> addrlen<span class="token punctuation">,</span>
+                 <span class="token keyword">unsigned</span> <span class="token keyword">int</span> flags<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 创建一个 socket，并把返回的 fd 保存到 tcp 结构体中</span>
+  <span class="token function">maybe_new_socket</span><span class="token punctuation">(</span>tcp<span class="token punctuation">,</span> addr<span class="token operator">-&gt;</span>sa_family<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  on <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+  <span class="token comment">// 默认设置了 SO_REUSEADDR 属性，后面具体分析</span>
+  <span class="token function">setsockopt</span><span class="token punctuation">(</span>tcp<span class="token operator">-&gt;</span>io_watcher<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> SOL_SOCKET<span class="token punctuation">,</span> SO_REUSEADDR<span class="token punctuation">,</span> <span class="token operator">&amp;</span>on<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>on<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 绑定地址信息到 socket</span>
+  <span class="token function">bind</span><span class="token punctuation">(</span>tcp<span class="token operator">-&gt;</span>io_watcher<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> addr<span class="token punctuation">,</span> addrlen<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>uv__tcp_bind 创建了一个 TCP socket 然后把地址信息保存到该 socket 中，执行 bind 绑定了地址信息后就继续调用 listen 把 socket 变成监听状态，C++ 层代码和 Bind 的差不多，就不再分析，直接看 Libuv 的代码。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token function">uv_listen</span><span class="token punctuation">(</span>uv_stream_t<span class="token operator">*</span> stream<span class="token punctuation">,</span> <span class="token keyword">int</span> backlog<span class="token punctuation">,</span> uv_connection_cb cb<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token function">uv_tcp_listen</span><span class="token punctuation">(</span><span class="token punctuation">(</span>uv_tcp_t<span class="token operator">*</span><span class="token punctuation">)</span>stream<span class="token punctuation">,</span> backlog<span class="token punctuation">,</span> cb<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">uv_tcp_listen</span><span class="token punctuation">(</span>uv_tcp_t<span class="token operator">*</span> tcp<span class="token punctuation">,</span> <span class="token keyword">int</span> backlog<span class="token punctuation">,</span> uv_connection_cb cb<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">static</span> <span class="token keyword">int</span> single_accept <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+  <span class="token keyword">unsigned</span> <span class="token keyword">long</span> flags<span class="token punctuation">;</span>
+  <span class="token keyword">int</span> err<span class="token punctuation">;</span>
+  <span class="token comment">// 已废弃</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>single_accept <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">const</span> <span class="token keyword">char</span><span class="token operator">*</span> val <span class="token operator">=</span> <span class="token function">getenv</span><span class="token punctuation">(</span><span class="token string">"UV_TCP_SINGLE_ACCEPT"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    single_accept <span class="token operator">=</span> <span class="token punctuation">(</span>val <span class="token operator">!=</span> <span class="token constant">NULL</span> <span class="token operator">&amp;&amp;</span> <span class="token function">atoi</span><span class="token punctuation">(</span>val<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> 
+  <span class="token punctuation">}</span>
+  <span class="token comment">// 有连接时是否连续接收，或者间歇性处理，见后面分析</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>single_accept<span class="token punctuation">)</span>
+    tcp<span class="token operator">-&gt;</span>flags <span class="token operator">|=</span> UV_HANDLE_TCP_SINGLE_ACCEPT<span class="token punctuation">;</span>
+
+  flags <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+  <span class="token comment">// 设置 flags 到 handle 上，因为已经创建了 socket</span>
+  <span class="token function">maybe_new_socket</span><span class="token punctuation">(</span>tcp<span class="token punctuation">,</span> AF_INET<span class="token punctuation">,</span> flags<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token function">listen</span><span class="token punctuation">(</span>tcp<span class="token operator">-&gt;</span>io_watcher<span class="token punctuation">.</span>fd<span class="token punctuation">,</span> backlog<span class="token punctuation">)</span>
+  <span class="token comment">// 保存回调，有连接到来时被 Libuv 执行</span>
+  tcp<span class="token operator">-&gt;</span>connection_cb <span class="token operator">=</span> cb<span class="token punctuation">;</span>
+  tcp<span class="token operator">-&gt;</span>flags <span class="token operator">|=</span> UV_HANDLE_BOUND<span class="token punctuation">;</span>
+  <span class="token comment">// 有连接来时的处理函数，该函数再执行上面的 connection_cb</span>
+  tcp<span class="token operator">-&gt;</span>io_watcher<span class="token punctuation">.</span>cb <span class="token operator">=</span> uv__server_io<span class="token punctuation">;</span>
+  <span class="token comment">// 注册可读事件，等待连接到来</span>
+  <span class="token function">uv__io_start</span><span class="token punctuation">(</span>tcp<span class="token operator">-&gt;</span>loop<span class="token punctuation">,</span> <span class="token operator">&amp;</span>tcp<span class="token operator">-&gt;</span>io_watcher<span class="token punctuation">,</span> POLLIN<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>uv_tcp_listen 首先调用了 listen 函数修改 socket 状态为监听状态，这样才能接收 TCP 连接，接着保存了 C++ 层的回调，并设置 Libuv 层的回调，最后注册可读事件等待 TCP 连接的到来。这里需要注意两个回调函数的执行顺序，当有 TCP 连接到来时 Libuv 会执行 uv__server_io，在 uv__server_io 里再执行 C++ 层的回调 cb。至此，服务器就启动了。其中 uv__io_start 最终会把服务器对应的文件描述符注册到 IO多路 复用模块中。</p> 
+<h4>
+<a id="_495"></a>处理连接</h4> 
+<p>当有三次握手的连接完成时，操作系统会新建一个通信的 socket，并通知 Libuv，Libuv 会执行 uv__server_io。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token function">uv__server_io</span><span class="token punctuation">(</span>uv_loop_t<span class="token operator">*</span> loop<span class="token punctuation">,</span> uv__io_t<span class="token operator">*</span> w<span class="token punctuation">,</span> <span class="token keyword">unsigned</span> <span class="token keyword">int</span> events<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  uv_stream_t<span class="token operator">*</span> stream<span class="token punctuation">;</span>
+  <span class="token keyword">int</span> err<span class="token punctuation">;</span>
+
+  stream <span class="token operator">=</span> <span class="token function">container_of</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> uv_stream_t<span class="token punctuation">,</span> io_watcher<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+  <span class="token function">uv__io_start</span><span class="token punctuation">(</span>stream<span class="token operator">-&gt;</span>loop<span class="token punctuation">,</span> <span class="token operator">&amp;</span>stream<span class="token operator">-&gt;</span>io_watcher<span class="token punctuation">,</span> POLLIN<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 回调了可能关闭了 server，所以需要实时判断</span>
+  <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token function">uv__stream_fd</span><span class="token punctuation">(</span>stream<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 摘取一个 TCP 连接，成功的话，err 保存了对应的 fd</span>
+    err <span class="token operator">=</span> <span class="token function">uv__accept</span><span class="token punctuation">(</span><span class="token function">uv__stream_fd</span><span class="token punctuation">(</span>stream<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 保存 fd 在 accepted_fd，等待处理</span>
+    stream<span class="token operator">-&gt;</span>accepted_fd <span class="token operator">=</span> err<span class="token punctuation">;</span>
+    <span class="token comment">// 执行回调</span>
+    stream<span class="token operator">-&gt;</span><span class="token function">connection_cb</span><span class="token punctuation">(</span>stream<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 如果回调里没有处理该 accepted_fd，则注销可读事件、先不处理新的连接</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>stream<span class="token operator">-&gt;</span>accepted_fd <span class="token operator">!=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token function">uv__io_stop</span><span class="token punctuation">(</span>loop<span class="token punctuation">,</span> <span class="token operator">&amp;</span>stream<span class="token operator">-&gt;</span>io_watcher<span class="token punctuation">,</span> POLLIN<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 设置了 UV_HANDLE_TCP_SINGLE_ACCEPT 则进入睡眠，让其他进程有机会参与处理</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>stream<span class="token operator">-&gt;</span>type <span class="token operator">==</span> UV_TCP <span class="token operator">&amp;&amp;</span>
+        <span class="token punctuation">(</span>stream<span class="token operator">-&gt;</span>flags <span class="token operator">&amp;</span> UV_HANDLE_TCP_SINGLE_ACCEPT<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">struct</span> <span class="token class-name">timespec</span> timeout <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span> <span class="token punctuation">}</span><span class="token punctuation">;</span>
+      <span class="token function">nanosleep</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>timeout<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>uv__server_io 中通过 uv__accept 从操作系统中摘取一个完成连接的 TCP socket 并拿到一个 fd ，接着保存到 accepted_fd 中并执行 connection_cb 回调。</p> 
+<p>此外，我们需要注意 UV_HANDLE_TCP_SINGLE_ACCEPT 标记。因为可能有多个进程监听同一个端口，当多个连接到来时，多个进程可能会竞争处理这些连接（惊群问题）。这样一来，首先被调度的进程可能会直接处理所有的连接，导致负载不均衡。通过 UV_HANDLE_TCP_SINGLE_ACCEPT 标记，可以在通知进程接收连接时，每接收到一个后先睡眠一段时间，让其他进程也有机会接收连接，一定程度解决负载不均衡的问题，不过这个逻辑最近被去掉了，Libuv 维护者 bnoordhuis 的理由是，第二次调用 uv__accept 时有 99.9% 的概念会返回 EAGAIN，那就是没有更多的连接可以处理，这样额外调用 uv__accept 带来的系统调用开销是比较可观的。</p> 
+<p>接着看 connection_cb，connection_cb 对应的是 C++ 层的 OnConnection。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// WrapType 为 TCPWrap，UVType 为 uv_tcp_t</span>
+<span class="token keyword">template</span> <span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">WrapType</span><span class="token punctuation">,</span> <span class="token keyword">typename</span> <span class="token class-name">UVType</span><span class="token operator">&gt;</span>  
+<span class="token keyword">void</span> <span class="token class-name">ConnectionWrap</span><span class="token operator">&lt;</span>WrapType<span class="token punctuation">,</span> UVType<span class="token operator">&gt;</span><span class="token double-colon punctuation">::</span><span class="token function">OnConnection</span><span class="token punctuation">(</span>uv_stream_t<span class="token operator">*</span> handle<span class="token punctuation">,</span> <span class="token keyword">int</span> status<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// HandleWrap 中保存了 handle 和 TCPWrap 的关系，这里取出来使用               </span>
+    WrapType<span class="token operator">*</span> wrap_data <span class="token operator">=</span> <span class="token generic-function"><span class="token function">static_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span>WrapType<span class="token operator">*</span><span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span>handle<span class="token operator">-&gt;</span>data<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    Environment<span class="token operator">*</span> env <span class="token operator">=</span> wrap_data<span class="token operator">-&gt;</span><span class="token function">env</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    Local<span class="token operator">&lt;</span>Value<span class="token operator">&gt;</span> argv<span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token class-name">Integer</span><span class="token double-colon punctuation">::</span><span class="token function">New</span><span class="token punctuation">(</span>env<span class="token operator">-&gt;</span><span class="token function">isolate</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> status<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+        <span class="token function">Undefined</span><span class="token punctuation">(</span>env<span class="token operator">-&gt;</span><span class="token function">isolate</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>  
+    <span class="token punctuation">}</span><span class="token punctuation">;</span>  
+    
+    <span class="token comment">// 新建一个表示和客户端通信的对象，和 JS 层执行 new TCP 一样 </span>
+    Local<span class="token operator">&lt;</span>Object<span class="token operator">&gt;</span> client_obj <span class="token operator">=</span> <span class="token class-name">WrapType</span><span class="token double-colon punctuation">::</span><span class="token function">Instantiate</span><span class="token punctuation">(</span>env<span class="token punctuation">,</span>wrap_data<span class="token punctuation">,</span>WrapType<span class="token double-colon punctuation">::</span>SOCKET<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    WrapType<span class="token operator">*</span> wrap<span class="token punctuation">;</span>  
+    <span class="token comment">// 从 client_obj 中取出关联的 TCPWrap 对象存到 wrap 中 </span>
+    <span class="token function">ASSIGN_OR_RETURN_UNWRAP</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>wrap<span class="token punctuation">,</span> client_obj<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 拿到 TCPWrap 中的 uv_tcp_t 结构体，再转成 uv_stream_t，因为它们类似父类和子类的关系</span>
+    uv_stream_t<span class="token operator">*</span> client_handle <span class="token operator">=</span> <span class="token generic-function"><span class="token function">reinterpret_cast</span><span class="token generic class-name"><span class="token operator">&lt;</span>uv_stream_t<span class="token operator">*</span><span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span><span class="token operator">&amp;</span>wrap<span class="token operator">-&gt;</span>handle_<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 把通信 fd 存储到 client_handle 中  </span>
+    <span class="token function">uv_accept</span><span class="token punctuation">(</span>handle<span class="token punctuation">,</span> client_handle<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    argv<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> client_obj<span class="token punctuation">;</span>  
+    <span class="token comment">// 回调上层的 onconnection 函数  </span>
+    wrap_data<span class="token operator">-&gt;</span><span class="token function">MakeCallback</span><span class="token punctuation">(</span>env<span class="token operator">-&gt;</span><span class="token function">onconnection_string</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">arraysize</span><span class="token punctuation">(</span>argv<span class="token punctuation">)</span><span class="token punctuation">,</span> argv<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>当建立了新连接时，操作系统会新建一个 socket。同样，在 Node.js 层，也会通过 Instantiate 函数新建一个对应的对象表示和客户端的通信。结构如下所示。<img src="https://images2.imgbox.com/f9/2e/fkKX2FQh_o.png" alt=""><br> Instantiate 代码如下所示。</p> 
+<pre><code class="prism language-cpp">MaybeLocal<span class="token operator">&lt;</span>Object<span class="token operator">&gt;</span> <span class="token class-name">TCPWrap</span><span class="token double-colon punctuation">::</span><span class="token function">Instantiate</span><span class="token punctuation">(</span>Environment<span class="token operator">*</span> env<span class="token punctuation">,</span>
+                                        AsyncWrap<span class="token operator">*</span> parent<span class="token punctuation">,</span>
+                                        TCPWrap<span class="token double-colon punctuation">::</span>SocketType type<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 拿到导出到 JS 层的 TCP 构造函数（缓存在env中）</span>
+  Local<span class="token operator">&lt;</span>Function<span class="token operator">&gt;</span> constructor <span class="token operator">=</span> env<span class="token operator">-&gt;</span><span class="token function">tcp_constructor_template</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                                    <span class="token operator">-&gt;</span><span class="token function">GetFunction</span><span class="token punctuation">(</span>env<span class="token operator">-&gt;</span><span class="token function">context</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                                    <span class="token punctuation">.</span><span class="token function">ToLocalChecked</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  Local<span class="token operator">&lt;</span>Value<span class="token operator">&gt;</span> type_value <span class="token operator">=</span> <span class="token class-name">Int32</span><span class="token double-colon punctuation">::</span><span class="token function">New</span><span class="token punctuation">(</span>env<span class="token operator">-&gt;</span><span class="token function">isolate</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> type<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 相当于我们在 JS 层调用 new TCP() 时拿到的对象</span>
+  <span class="token keyword">return</span> handle_scope<span class="token punctuation">.</span><span class="token function">EscapeMaybe</span><span class="token punctuation">(</span>
+      constructor<span class="token operator">-&gt;</span><span class="token function">NewInstance</span><span class="token punctuation">(</span>env<span class="token operator">-&gt;</span><span class="token function">context</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>type_value<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>新建完和对端通信的对象后，接着调用 uv_accept 消费刚才保存在 accepted_fd 中的 fd，并把对应的 fd 保存到 C++ TCPWrap 对象的 uv_tcp_t 结构体中。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">int</span> <span class="token function">uv_accept</span><span class="token punctuation">(</span>uv_stream_t<span class="token operator">*</span> server<span class="token punctuation">,</span> uv_stream_t<span class="token operator">*</span> client<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">int</span> err<span class="token punctuation">;</span>
+  <span class="token comment">// 把 accepted_fd 保存到 client 中</span>
+  <span class="token function">uv__stream_open</span><span class="token punctuation">(</span>client<span class="token punctuation">,</span>
+                  server<span class="token operator">-&gt;</span>accepted_fd<span class="token punctuation">,</span>
+                  UV_HANDLE_READABLE <span class="token operator">|</span> UV_HANDLE_WRITABLE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 处理了，重置该字段</span>
+  server<span class="token operator">-&gt;</span>accepted_fd <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+  <span class="token comment">// 保证注册了可读事件，继续处理新的连接</span>
+  <span class="token function">uv__io_start</span><span class="token punctuation">(</span>server<span class="token operator">-&gt;</span>loop<span class="token punctuation">,</span> <span class="token operator">&amp;</span>server<span class="token operator">-&gt;</span>io_watcher<span class="token punctuation">,</span> POLLIN<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span> err<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>C++ 层拿到一个新的对象并且保存了 fd 到对象后，接着回调 JS 层的 onconnection。</p> 
+<pre><code class="prism language-cpp"><span class="token comment">// clientHandle 代表一个和客户端建立 TCP 连接的实体  </span>
+function <span class="token function">onconnection</span><span class="token punctuation">(</span>err<span class="token punctuation">,</span> clientHandle<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">const</span> handle <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">;</span>  
+  <span class="token keyword">const</span> self <span class="token operator">=</span> handle<span class="token punctuation">.</span>owner<span class="token punctuation">;</span>  
+  <span class="token comment">// 新建一个 socket 用于通信  </span>
+  <span class="token keyword">const</span> socket <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">Socket</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span>  
+    handle<span class="token operator">:</span> clientHandle<span class="token punctuation">,</span>  
+    allowHalfOpen<span class="token operator">:</span> self<span class="token punctuation">.</span>allowHalfOpen<span class="token punctuation">,</span>  
+    pauseOnCreate<span class="token operator">:</span> self<span class="token punctuation">.</span>pauseOnConnect  
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 服务器的连接数加一  </span>
+  self<span class="token punctuation">.</span>_connections<span class="token operator">++</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 触发用户层连接事件  </span>
+  self<span class="token punctuation">.</span><span class="token function">emit</span><span class="token punctuation">(</span><span class="token char">'connection'</span><span class="token punctuation">,</span> socket<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+<span class="token punctuation">}</span> 
+</code></pre> 
+<p>在 JS 层也会封装一个 Socket 对象用于管理和客户端的通信，整体的关系如下。<img src="https://images2.imgbox.com/16/e7/yQHNPNtU_o.png" alt=""><br> 接着触发 connection 事件，剩下的事情就是应用层处理了，整体流程如下。<img src="https://images2.imgbox.com/a2/76/YWtFWTkw_o.png" alt=""></p> 
+<h3>
+<a id="Nodejs_HTTP__609"></a>Node.js HTTP 服务器的创建</h3> 
+<p>接着看看 HTTP 服务器的实现。下面是 Node.js 中创建服务器的例子。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">const</span> http <span class="token operator">=</span> <span class="token function">require</span><span class="token punctuation">(</span><span class="token char">'http'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+http<span class="token punctuation">.</span><span class="token function">createServer</span><span class="token punctuation">(</span><span class="token punctuation">(</span>req<span class="token punctuation">,</span> res<span class="token punctuation">)</span> <span class="token operator">=</span><span class="token operator">&gt;</span> <span class="token punctuation">{<!-- --></span>  
+  res<span class="token punctuation">.</span><span class="token function">write</span><span class="token punctuation">(</span><span class="token char">'hello'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  res<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">)</span>  
+<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span><span class="token number">3000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>我们沿着 createServer 开始分析。</p> 
+<pre><code class="prism language-c">function <span class="token function">createServer</span><span class="token punctuation">(</span>opts<span class="token punctuation">,</span> requestListener<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">return</span> new <span class="token function">Server</span><span class="token punctuation">(</span>opts<span class="token punctuation">,</span> requestListener<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>createServer 中创建了一个 Server 对象，来看看 Server 初始化的逻辑。</p> 
+<pre><code class="prism language-c">function <span class="token function">Server</span><span class="token punctuation">(</span>options<span class="token punctuation">,</span> requestListener<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token comment">// 可以自定义表示请求的对象和响应的对象  </span>
+  this<span class="token punctuation">[</span>kIncomingMessage<span class="token punctuation">]</span> <span class="token operator">=</span> options<span class="token punctuation">.</span>IncomingMessage <span class="token operator">||</span> IncomingMessage<span class="token punctuation">;</span>  
+  this<span class="token punctuation">[</span>kServerResponse<span class="token punctuation">]</span> <span class="token operator">=</span> options<span class="token punctuation">.</span>ServerResponse <span class="token operator">||</span> ServerResponse<span class="token punctuation">;</span>  
+  <span class="token comment">// HTTP 头最大字节数  </span>
+  this<span class="token punctuation">.</span>maxHeaderSize <span class="token operator">=</span> options<span class="token punctuation">.</span>maxHeaderSize<span class="token punctuation">;</span>  
+  <span class="token comment">// 允许半关闭  </span>
+  net<span class="token punctuation">.</span>Server<span class="token punctuation">.</span><span class="token function">call</span><span class="token punctuation">(</span>this<span class="token punctuation">,</span> <span class="token punctuation">{<!-- --></span> allowHalfOpen<span class="token operator">:</span> true <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 有请求时的回调  </span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>requestListener<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    this<span class="token punctuation">.</span><span class="token function">on</span><span class="token punctuation">(</span><span class="token char">'request'</span><span class="token punctuation">,</span> requestListener<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span>  
+  <span class="token comment">// 服务器 socket 读端关闭时是否允许继续处理队列里的响应（TCP 上有多个请求，管道化）  </span>
+  this<span class="token punctuation">.</span>httpAllowHalfOpen <span class="token operator">=</span> false<span class="token punctuation">;</span>  
+  <span class="token comment">// 有连接时的回调，由 net 模块触发  </span>
+  this<span class="token punctuation">.</span><span class="token function">on</span><span class="token punctuation">(</span><span class="token char">'connection'</span><span class="token punctuation">,</span> connectionListener<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 服务器下所有请求和响应的超时时间  </span>
+  this<span class="token punctuation">.</span>timeout <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 同一个 TCP 连接上，两个请求之前最多间隔的时间   </span>
+  this<span class="token punctuation">.</span>keepAliveTimeout <span class="token operator">=</span> <span class="token number">5000</span><span class="token punctuation">;</span>  
+  <span class="token comment">// HTTP 头的最大个数</span>
+  this<span class="token punctuation">.</span>maxHeadersCount <span class="token operator">=</span> null<span class="token punctuation">;</span>  
+  <span class="token comment">// 解析头部的最长时间，防止 ddos  </span>
+  this<span class="token punctuation">.</span>headersTimeout <span class="token operator">=</span> <span class="token number">60</span> <span class="token operator">*</span> <span class="token number">1000</span><span class="token punctuation">;</span> 
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>Server 中主要做了一些字段的初始化，并且监听了 connection 和 request 两个事件，当有连接到来时会触发 connection 事件，connection 事件的处理函数会调用 HTTP 解析器进行数据的解析，当解析出一个 HTTP 请求时就会触发 request 事件通知用户。</p> 
+<p>创建了 Server 对象后，接着我们调用它的 listen 函数。因为 HTTP Server 继承于 net.Server，所以执行 HTTP Server 的 listen 函数时，其实是执行了 net.Serve 的 listen 函数，net.Server 的 listen 函数前面已经分析过，就不再分析。当有请求到来时，会触发 connection 事件，从而执行 connectionListener。</p> 
+<pre><code class="prism language-cpp">function <span class="token function">connectionListener</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token function">defaultTriggerAsyncIdScope</span><span class="token punctuation">(</span>  
+    <span class="token function">getOrSetAsyncId</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span><span class="token punctuation">,</span> connectionListenerInternal<span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">,</span> socket  
+  <span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+
+<span class="token comment">// socket 表示新连接  </span>
+function <span class="token function">connectionListenerInternal</span><span class="token punctuation">(</span>server<span class="token punctuation">,</span> socket<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token comment">// socket 所属 server  </span>
+  socket<span class="token punctuation">.</span>server <span class="token operator">=</span> server<span class="token punctuation">;</span>  
+  <span class="token comment">// 分配一个 HTTP 解析器  </span>
+  <span class="token keyword">const</span> parser <span class="token operator">=</span> parsers<span class="token punctuation">.</span><span class="token function">alloc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 初始化解析器</span>
+  parser<span class="token punctuation">.</span><span class="token function">initialize</span><span class="token punctuation">(</span>HTTPParser<span class="token punctuation">.</span>REQUEST<span class="token punctuation">,</span> <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 关联起来</span>
+  parser<span class="token punctuation">.</span>socket <span class="token operator">=</span> socket<span class="token punctuation">;</span>  
+  socket<span class="token punctuation">.</span>parser <span class="token operator">=</span> parser<span class="token punctuation">;</span>  
+  
+  <span class="token keyword">const</span> state <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+    onData<span class="token operator">:</span> null<span class="token punctuation">,</span>  
+    <span class="token comment">// 同一 TCP 连接上，请求和响应的的队列，线头阻塞的原理  </span>
+    outgoing<span class="token operator">:</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span>  
+    incoming<span class="token operator">:</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span>   
+  <span class="token punctuation">}</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 监听 TCP 上的数据，开始解析 HTTP 报文  </span>
+  state<span class="token punctuation">.</span>onData <span class="token operator">=</span> socketOnData<span class="token punctuation">.</span><span class="token function">bind</span><span class="token punctuation">(</span>undefined<span class="token punctuation">,</span> 
+                                   server<span class="token punctuation">,</span> 
+                                   socket<span class="token punctuation">,</span> 
+                                   parser<span class="token punctuation">,</span> 
+                                   state<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  socket<span class="token punctuation">.</span><span class="token function">on</span><span class="token punctuation">(</span><span class="token char">'data'</span><span class="token punctuation">,</span> state<span class="token punctuation">.</span>onData<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 解析 HTTP 头部完成后执行的回调  </span>
+  parser<span class="token punctuation">.</span>onIncoming <span class="token operator">=</span> parserOnIncoming<span class="token punctuation">.</span><span class="token function">bind</span><span class="token punctuation">(</span>undefined<span class="token punctuation">,</span> 
+                                            server<span class="token punctuation">,</span> 
+                                            socket<span class="token punctuation">,</span> 
+                                            state<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">/*
+    如果 handle 是继承 StreamBase 的流，则在 C++ 层解析 HTTP 请求报文，
+    否则使用上面的 socketOnData 函数处理 HTTP 请求报文，
+    TCP 模块的 isStreamBase 为 true 
+  */</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>socket<span class="token punctuation">.</span>_handle <span class="token operator">&amp;&amp;</span> socket<span class="token punctuation">.</span>_handle<span class="token punctuation">.</span>isStreamBase <span class="token operator">&amp;&amp;</span>  
+      <span class="token operator">!</span>socket<span class="token punctuation">.</span>_handle<span class="token punctuation">.</span>_consumed<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    parser<span class="token punctuation">.</span>_consumed <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>  
+    socket<span class="token punctuation">.</span>_handle<span class="token punctuation">.</span>_consumed <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>  
+    parser<span class="token punctuation">.</span><span class="token function">consume</span><span class="token punctuation">(</span>socket<span class="token punctuation">.</span>_handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span>  
+  <span class="token comment">// 执行 llhttp_execute 时的回调</span>
+  parser<span class="token punctuation">[</span>kOnExecute<span class="token punctuation">]</span> <span class="token operator">=</span> onParserExecute<span class="token punctuation">.</span><span class="token function">bind</span><span class="token punctuation">(</span>undefined<span class="token punctuation">,</span> 
+                                            server<span class="token punctuation">,</span> 
+                                            socket<span class="token punctuation">,</span> 
+                                            parser<span class="token punctuation">,</span> 
+                                            state<span class="token punctuation">)</span><span class="token punctuation">;</span>   
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>上面的 connectionListenerInternal 函数中首先分配了一个 HTTP 解析器，HTTP 解析器由以下代码管理。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">const</span> parsers <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">FreeList</span><span class="token punctuation">(</span><span class="token char">'parsers'</span><span class="token punctuation">,</span> <span class="token number">1000</span><span class="token punctuation">,</span> function <span class="token function">parsersCb</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">const</span> parser <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token function">HTTPParser</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  <span class="token function">cleanParser</span><span class="token punctuation">(</span>parser<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  parser<span class="token punctuation">.</span>onIncoming <span class="token operator">=</span> null<span class="token punctuation">;</span>
+  <span class="token comment">// 各种钩子毁掉</span>
+  parser<span class="token punctuation">[</span>kOnHeaders<span class="token punctuation">]</span> <span class="token operator">=</span> parserOnHeaders<span class="token punctuation">;</span>
+  parser<span class="token punctuation">[</span>kOnHeadersComplete<span class="token punctuation">]</span> <span class="token operator">=</span> parserOnHeadersComplete<span class="token punctuation">;</span>
+  parser<span class="token punctuation">[</span>kOnBody<span class="token punctuation">]</span> <span class="token operator">=</span> parserOnBody<span class="token punctuation">;</span>
+  parser<span class="token punctuation">[</span>kOnMessageComplete<span class="token punctuation">]</span> <span class="token operator">=</span> parserOnMessageComplete<span class="token punctuation">;</span>
+
+  <span class="token keyword">return</span> parser<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>parsers 用于管理 HTTP 解析器，它负责分配 HTTP 解析器，并且在 HTTP 解析器不再使用时缓存起来给下次使用，而不是每次都创建一个新的解析器。分配完 HTTP 解析器后就开始等待 TCP 上数据的到来，即 HTTP 请求报文。但是这里有一个逻辑需要注意，上面代码中 Node.js 监听了 socket 的 data 事件，处理函数为 socketOnData，下面是 socketOnData 的逻辑。</p> 
+<pre><code class="prism language-cpp">function <span class="token function">socketOnData</span><span class="token punctuation">(</span>server<span class="token punctuation">,</span> socket<span class="token punctuation">,</span> parser<span class="token punctuation">,</span> state<span class="token punctuation">,</span> d<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token comment">// 交给 HTTP 解析器处理，返回已经解析的字节数  </span>
+  <span class="token keyword">const</span> ret <span class="token operator">=</span> parser<span class="token punctuation">.</span><span class="token function">execute</span><span class="token punctuation">(</span>d<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>socketOnData 调用 HTTP 解析器处理数据，这看起来没什么问题，但是有一个逻辑我们可能会忽略掉，看一下下面的代码。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">if</span> <span class="token punctuation">(</span>socket<span class="token punctuation">.</span>_handle <span class="token operator">&amp;&amp;</span> socket<span class="token punctuation">.</span>_handle<span class="token punctuation">.</span>isStreamBase<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    parser<span class="token punctuation">.</span><span class="token function">consume</span><span class="token punctuation">(</span>socket<span class="token punctuation">.</span>_handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>上面代码中，如果 socket._handle.isStreamBase 为 true（TCP handle 的 isStreamBase 为 true），则会执行 parser.consume(socket._handle)，这个是做什么的呢？</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">Consume</span><span class="token punctuation">(</span><span class="token keyword">const</span> FunctionCallbackInfo<span class="token operator">&lt;</span>Value<span class="token operator">&gt;</span><span class="token operator">&amp;</span> args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    Parser<span class="token operator">*</span> parser<span class="token punctuation">;</span>
+    <span class="token function">ASSIGN_OR_RETURN_UNWRAP</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>parser<span class="token punctuation">,</span> args<span class="token punctuation">.</span><span class="token function">Holder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 解析出 C++ TCPWrap 对象</span>
+    StreamBase<span class="token operator">*</span> stream <span class="token operator">=</span> <span class="token class-name">StreamBase</span><span class="token double-colon punctuation">::</span><span class="token function">FromObject</span><span class="token punctuation">(</span>args<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token generic-function"><span class="token function">As</span><span class="token generic class-name"><span class="token operator">&lt;</span>Object<span class="token operator">&gt;</span></span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 注册 parser 成为流的消费者，即 TCP 数据的消费者</span>
+    stream<span class="token operator">-&gt;</span><span class="token function">PushStreamListener</span><span class="token punctuation">(</span>parser<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>Consume 会注册 parser 会成为流的消费者，这个逻辑会覆盖掉刚才的 onData 函数，使得所有的数据直接由 parser 处理，看一下当数据到来时，parser 是如何处理的。</p> 
+<pre><code class="prism language-js"><span class="token keyword">void</span> <span class="token function">OnStreamRead</span><span class="token punctuation">(</span>ssize_t nread<span class="token punctuation">,</span> <span class="token keyword">const</span> uv_buf_t<span class="token operator">&amp;</span> buf<span class="token punctuation">)</span> override <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// 解析 HTTP 协议</span>
+    Local<span class="token operator">&lt;</span>Value<span class="token operator">&gt;</span> ret <span class="token operator">=</span> <span class="token function">Execute</span><span class="token punctuation">(</span>buf<span class="token punctuation">.</span>base<span class="token punctuation">,</span> nread<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 执行 kOnExecute 回调</span>
+    Local<span class="token operator">&lt;</span>Value<span class="token operator">&gt;</span> cb <span class="token operator">=</span> <span class="token function">object</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">Get</span><span class="token punctuation">(</span><span class="token function">env</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">-</span><span class="token operator">&gt;</span><span class="token function">context</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> kOnExecute<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">ToLocalChecked</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token function">MakeCallback</span><span class="token punctuation">(</span>cb<span class="token punctuation">.</span>As<span class="token operator">&lt;</span>Function<span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>ret<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>在 OnStreamRead 中会源源不断地把数据交给 HTTP 解析器处理并执行 kOnExecute 回调，并且在解析的过程中，会不断触发对应的钩子函数。比如解析到 HTTP 头部时执行 parserOnHeaders。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">parserOnHeaders</span><span class="token punctuation">(</span><span class="token parameter">headers<span class="token punctuation">,</span> url</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 记录解析到的 HTTP 头</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>maxHeaderPairs <span class="token operator">&lt;=</span> <span class="token number">0</span> <span class="token operator">||</span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>_headers<span class="token punctuation">.</span>length <span class="token operator">&lt;</span> <span class="token keyword">this</span><span class="token punctuation">.</span>maxHeaderPairs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>_headers <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>_headers<span class="token punctuation">.</span><span class="token function">concat</span><span class="token punctuation">(</span>headers<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>_url <span class="token operator">+=</span> url<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>parserOnHeaders 会记录解析到的 HTTP 头，当解析完 HTTP 头 时会调用 parserOnHeadersComplete。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">parserOnHeadersComplete</span><span class="token punctuation">(</span><span class="token parameter">versionMajor<span class="token punctuation">,</span> versionMinor<span class="token punctuation">,</span> headers<span class="token punctuation">,</span> method<span class="token punctuation">,</span>
+                                 url<span class="token punctuation">,</span> statusCode<span class="token punctuation">,</span> statusMessage<span class="token punctuation">,</span> upgrade<span class="token punctuation">,</span>
+                                 shouldKeepAlive</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">const</span> parser <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">;</span>
+  <span class="token keyword">const</span> <span class="token punctuation">{<!-- --></span> socket <span class="token punctuation">}</span> <span class="token operator">=</span> parser<span class="token punctuation">;</span>
+  <span class="token comment">// 创建一个对象表示收到的 HTTP 请求</span>
+  <span class="token keyword">const</span> ParserIncomingMessage <span class="token operator">=</span> <span class="token punctuation">(</span>socket <span class="token operator">&amp;&amp;</span> socket<span class="token punctuation">.</span>server <span class="token operator">&amp;&amp;</span>
+                                 socket<span class="token punctuation">.</span>server<span class="token punctuation">[</span>kIncomingMessage<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token operator">||</span>
+                                 IncomingMessage<span class="token punctuation">;</span>
+  <span class="token comment">// 新建一个IncomingMessage对象</span>
+  <span class="token keyword">const</span> incoming <span class="token operator">=</span> parser<span class="token punctuation">.</span>incoming <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ParserIncomingMessage</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token comment">// 执行回调</span>
+  <span class="token keyword">return</span> parser<span class="token punctuation">.</span><span class="token function">onIncoming</span><span class="token punctuation">(</span>incoming<span class="token punctuation">,</span> shouldKeepAlive<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>parserOnHeadersComplete 中创建了一个对象来表示收到的 HTTP 请求，接着执行 onIncoming 函数，对应的是 parserOnIncoming。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">parserOnIncoming</span><span class="token punctuation">(</span><span class="token parameter">server<span class="token punctuation">,</span> socket<span class="token punctuation">,</span> state<span class="token punctuation">,</span> req<span class="token punctuation">,</span> keepAlive</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+
+  <span class="token comment">// 请求入队（待处理的请求队列）  </span>
+  state<span class="token punctuation">.</span>incoming<span class="token punctuation">.</span><span class="token function">push</span><span class="token punctuation">(</span>req<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 新建一个表示响应的对象  </span>
+  <span class="token keyword">const</span> res <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">server</span><span class="token punctuation">[</span>kServerResponse<span class="token punctuation">]</span><span class="token punctuation">(</span>req<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">/*
+     socket 当前已经在处理其它请求的响应，则先排队，
+     否则挂载响应对象到 socket，作为当前处理的响应  
+  */</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>socket<span class="token punctuation">.</span>_httpMessage<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    state<span class="token punctuation">.</span>outgoing<span class="token punctuation">.</span><span class="token function">push</span><span class="token punctuation">(</span>res<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+    res<span class="token punctuation">.</span><span class="token function">assignSocket</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span>  
+  
+  <span class="token comment">// 响应处理完毕后，需要做一些处理  </span>
+  res<span class="token punctuation">.</span><span class="token function">on</span><span class="token punctuation">(</span><span class="token string">'finish'</span><span class="token punctuation">,</span> <span class="token function">resOnFinish</span><span class="token punctuation">.</span><span class="token function">bind</span><span class="token punctuation">(</span><span class="token keyword">undefined</span><span class="token punctuation">,</span> 
+                                    req<span class="token punctuation">,</span> 
+                                    res<span class="token punctuation">,</span> 
+                                    socket<span class="token punctuation">,</span> 
+                                    state<span class="token punctuation">,</span> 
+                                    server<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 触发 request 事件说明有请求到来  </span>
+  server<span class="token punctuation">.</span><span class="token function">emit</span><span class="token punctuation">(</span><span class="token string">'request'</span><span class="token punctuation">,</span> req<span class="token punctuation">,</span> res<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>我们看到这里会触发 request 事件通知用户有新请求到来，并传入request和response作为参数，这样用户就可以处理请求了。另外 Node.js 本身是不会处理 HTTP 请求体的数据，当 Node.js 解析到请求体时会执行 kOnBody 钩子函数，对应的是 parserOnBody 函数。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">parserOnBody</span><span class="token punctuation">(</span><span class="token parameter">b<span class="token punctuation">,</span> start<span class="token punctuation">,</span> len</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// IncomingMessage 对象，即 request 对象</span>
+  <span class="token keyword">const</span> stream <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>incoming<span class="token punctuation">;</span>
+  <span class="token comment">// Pretend this was the result of a stream._read call.</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>len <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>stream<span class="token punctuation">.</span>_dumped<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">const</span> slice <span class="token operator">=</span> b<span class="token punctuation">.</span><span class="token function">slice</span><span class="token punctuation">(</span>start<span class="token punctuation">,</span> start <span class="token operator">+</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">const</span> ret <span class="token operator">=</span> stream<span class="token punctuation">.</span><span class="token function">push</span><span class="token punctuation">(</span>slice<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>ret<span class="token punctuation">)</span>
+      <span class="token function">readStop</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>socket<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>parserOnBody 会把数据 push 到请求对象 request 中，接着 Node.js 会触发 data 事件，所以我们可以通过以下方式获取 body 的数据。</p> 
+<pre><code class="prism language-js"><span class="token keyword">const</span> server<span class="token operator">=</span> http<span class="token punctuation">.</span><span class="token function">createServer</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token parameter">request<span class="token punctuation">,</span> response</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>  
+  request<span class="token punctuation">.</span><span class="token function">on</span><span class="token punctuation">(</span><span class="token string">'data'</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token parameter">chunk</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>  
+   <span class="token comment">// 处理body  </span>
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  request<span class="token punctuation">.</span><span class="token function">on</span><span class="token punctuation">(</span><span class="token string">'end'</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>  
+   <span class="token comment">// body结束  </span>
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">)</span>  
+</code></pre> 
+<h3>
+<a id="Nodejs__849"></a>Node.js 的多进程服务器架构</h3> 
+<p>虽然 Node.js 是单进程单线程的应用，但是我们可以创建多个进程来共同请求。在创建 HTTP 服务器时会调用 net 模块的 listen，然后调用 listenIncluster。我们从该函数开始分析。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">listenIncluster</span><span class="token punctuation">(</span><span class="token parameter">server<span class="token punctuation">,</span> address<span class="token punctuation">,</span> port<span class="token punctuation">,</span> addressType<span class="token punctuation">,</span>  
+                         backlog<span class="token punctuation">,</span> fd<span class="token punctuation">,</span> exclusive<span class="token punctuation">,</span> flags</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    
+  <span class="token keyword">const</span> serverQuery <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token literal-property property">address</span><span class="token operator">:</span> address<span class="token punctuation">,</span>  
+    <span class="token literal-property property">port</span><span class="token operator">:</span> port<span class="token punctuation">,</span>  
+    <span class="token literal-property property">addressType</span><span class="token operator">:</span> addressType<span class="token punctuation">,</span>  
+    <span class="token literal-property property">fd</span><span class="token operator">:</span> fd<span class="token punctuation">,</span>  
+    flags<span class="token punctuation">,</span>  
+  <span class="token punctuation">}</span><span class="token punctuation">;</span>  
+  
+  cluster<span class="token punctuation">.</span><span class="token function">_getServer</span><span class="token punctuation">(</span>server<span class="token punctuation">,</span> serverQuery<span class="token punctuation">,</span> listenOnMasterHandle<span class="token punctuation">)</span><span class="token punctuation">;</span>    
+  <span class="token keyword">function</span> <span class="token function">listenOnMasterHandle</span><span class="token punctuation">(</span><span class="token parameter">err<span class="token punctuation">,</span> handle</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    server<span class="token punctuation">.</span>_handle <span class="token operator">=</span> handle<span class="token punctuation">;</span>  
+    server<span class="token punctuation">.</span><span class="token function">_listen2</span><span class="token punctuation">(</span>address<span class="token punctuation">,</span>
+                    port<span class="token punctuation">,</span> 
+                    addressType<span class="token punctuation">,</span> 
+                    backlog<span class="token punctuation">,</span> 
+                    fd<span class="token punctuation">,</span> 
+                    flags<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>listenIncluster 函数会调用子进程 cluster 模块的 _getServer 函数。</p> 
+<pre><code class="prism language-js">cluster<span class="token punctuation">.</span><span class="token function-variable function">_getServer</span> <span class="token operator">=</span> <span class="token keyword">function</span><span class="token punctuation">(</span><span class="token parameter">obj<span class="token punctuation">,</span> options<span class="token punctuation">,</span> cb</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">let</span> address <span class="token operator">=</span> options<span class="token punctuation">.</span>address<span class="token punctuation">;</span>  
+  <span class="token keyword">const</span> message <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token literal-property property">act</span><span class="token operator">:</span> <span class="token string">'queryServer'</span><span class="token punctuation">,</span>  
+    index<span class="token punctuation">,</span>  
+    <span class="token literal-property property">data</span><span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>  
+    <span class="token operator">...</span>options  
+  <span class="token punctuation">}</span><span class="token punctuation">;</span>  
+  
+  message<span class="token punctuation">.</span>address <span class="token operator">=</span> address<span class="token punctuation">;</span>  
+  <span class="token comment">// 给主进程发送消息  </span>
+  <span class="token function">send</span><span class="token punctuation">(</span>message<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token parameter">reply<span class="token punctuation">,</span> handle</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// 根据不同模式做处理</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>handle<span class="token punctuation">)</span>  
+      <span class="token function">shared</span><span class="token punctuation">(</span>reply<span class="token punctuation">,</span> handle<span class="token punctuation">,</span> indexesKey<span class="token punctuation">,</span> cb<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token keyword">else</span>  
+      <span class="token function">rr</span><span class="token punctuation">(</span>reply<span class="token punctuation">,</span> indexesKey<span class="token punctuation">,</span> cb<span class="token punctuation">)</span><span class="token punctuation">;</span>             
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>从上面代码中可以看到，_getServer 函数会给主进程发送一个 queryServer 的请求并设置了一个回调函数。看一下主进程是如何处理 queryServer 请求的。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">queryServer</span><span class="token punctuation">(</span><span class="token parameter">worker<span class="token punctuation">,</span> message</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">const</span> key <span class="token operator">=</span> <span class="token template-string"><span class="token template-punctuation string">`</span><span class="token interpolation"><span class="token interpolation-punctuation punctuation">${<!-- --></span>message<span class="token punctuation">.</span>address<span class="token interpolation-punctuation punctuation">}</span></span><span class="token string">:</span><span class="token interpolation"><span class="token interpolation-punctuation punctuation">${<!-- --></span>message<span class="token punctuation">.</span>port<span class="token interpolation-punctuation punctuation">}</span></span><span class="token string">:</span><span class="token interpolation"><span class="token interpolation-punctuation punctuation">${<!-- --></span>message<span class="token punctuation">.</span>addressType<span class="token interpolation-punctuation punctuation">}</span></span><span class="token string">:</span><span class="token interpolation"><span class="token interpolation-punctuation punctuation">${<!-- --></span>message<span class="token punctuation">.</span>fd<span class="token interpolation-punctuation punctuation">}</span></span><span class="token string">:</span><span class="token interpolation"><span class="token interpolation-punctuation punctuation">${<!-- --></span>message<span class="token punctuation">.</span>index<span class="token interpolation-punctuation punctuation">}</span></span><span class="token template-punctuation string">`</span></span><span class="token punctuation">;</span>  
+  <span class="token keyword">let</span> handle <span class="token operator">=</span> handles<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>handle <span class="token operator">===</span> <span class="token keyword">undefined</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">let</span> address <span class="token operator">=</span> message<span class="token punctuation">.</span>address<span class="token punctuation">;</span>  
+    <span class="token keyword">let</span> constructor <span class="token operator">=</span> RoundRobinHandle<span class="token punctuation">;</span>  
+    <span class="token comment">// 根据策略选取不同的构造函数，UDP 只能使用共享模式，因为 UDP 不是基于连接的，没有连接可以分发  </span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>schedulingPolicy <span class="token operator">!==</span> <span class="token constant">SCHED_RR</span> <span class="token operator">||</span>  
+        message<span class="token punctuation">.</span>addressType <span class="token operator">===</span> <span class="token string">'udp4'</span> <span class="token operator">||</span>  
+        message<span class="token punctuation">.</span>addressType <span class="token operator">===</span> <span class="token string">'udp6'</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+      constructor <span class="token operator">=</span> SharedHandle<span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+  
+    handle <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">constructor</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span>  
+                             address<span class="token punctuation">,</span>  
+                             message<span class="token punctuation">.</span>port<span class="token punctuation">,</span>  
+                             message<span class="token punctuation">.</span>addressType<span class="token punctuation">,</span>  
+                             message<span class="token punctuation">.</span>fd<span class="token punctuation">,</span>  
+                             message<span class="token punctuation">.</span>flags<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    handles<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span>  
+  handle<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>worker<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token parameter">errno<span class="token punctuation">,</span> reply<span class="token punctuation">,</span> handle</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">const</span> <span class="token punctuation">{<!-- --></span> data <span class="token punctuation">}</span> <span class="token operator">=</span> handles<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 返回结果给子进程</span>
+    <span class="token function">send</span><span class="token punctuation">(</span>worker<span class="token punctuation">,</span> <span class="token punctuation">{<!-- --></span>  
+      errno<span class="token punctuation">,</span>  
+      key<span class="token punctuation">,</span>  
+      <span class="token literal-property property">ack</span><span class="token operator">:</span> message<span class="token punctuation">.</span>seq<span class="token punctuation">,</span>  
+      data<span class="token punctuation">,</span>  
+      <span class="token operator">...</span>reply  
+    <span class="token punctuation">}</span><span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>queryServer 首先根据调度策略选择构造函数并创建一个对象，然后执行该对象的 add 方法并且传入一个回调。下面看看不同策略下的处理。</p> 
+<h4>
+<a id="_938"></a>共享模式</h4> 
+<p>首先看看共享模式的实现，共享模式对应前面分析的主进程管理子进程，多个子进程共同 accept 处理连接这种方式。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">SharedHandle</span><span class="token punctuation">(</span><span class="token parameter">key<span class="token punctuation">,</span> address<span class="token punctuation">,</span> port<span class="token punctuation">,</span> addressType<span class="token punctuation">,</span> fd<span class="token punctuation">,</span> flags</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>key <span class="token operator">=</span> key<span class="token punctuation">;</span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>workers <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">;</span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>handle <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>errno <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>  
+  
+  <span class="token keyword">let</span> rval<span class="token punctuation">;</span>  
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>addressType <span class="token operator">===</span> <span class="token string">'udp4'</span> <span class="token operator">||</span> addressType <span class="token operator">===</span> <span class="token string">'udp6'</span><span class="token punctuation">)</span>  
+    rval <span class="token operator">=</span> dgram<span class="token punctuation">.</span><span class="token function">_createSocketHandle</span><span class="token punctuation">(</span>address<span class="token punctuation">,</span> 
+                                     port<span class="token punctuation">,</span> 
+                                     addressType<span class="token punctuation">,</span> 
+                                     fd<span class="token punctuation">,</span> 
+                                     flags<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token keyword">else</span>  
+    rval <span class="token operator">=</span> net<span class="token punctuation">.</span><span class="token function">_createServerHandle</span><span class="token punctuation">(</span>address<span class="token punctuation">,</span>  
+                                   port<span class="token punctuation">,</span> 
+                                   addressType<span class="token punctuation">,</span> 
+                                   fd<span class="token punctuation">,</span> 
+                                   flags<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+  <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">typeof</span> rval <span class="token operator">===</span> <span class="token string">'number'</span><span class="token punctuation">)</span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span>errno <span class="token operator">=</span> rval<span class="token punctuation">;</span>  
+  <span class="token keyword">else</span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span>handle <span class="token operator">=</span> rval<span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>SharedHandle 是共享模式，即主进程创建好 handle，交给子进程处理，接着看它的 add 函数。</p> 
+<pre><code class="prism language-js"><span class="token class-name">SharedHandle</span><span class="token punctuation">.</span>prototype<span class="token punctuation">.</span><span class="token function-variable function">add</span> <span class="token operator">=</span> <span class="token keyword">function</span><span class="token punctuation">(</span><span class="token parameter">worker<span class="token punctuation">,</span> send</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>workers<span class="token punctuation">.</span><span class="token function">push</span><span class="token punctuation">(</span>worker<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token function">send</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>errno<span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">.</span>handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>SharedHandle 的 add 把 SharedHandle 中创建的 handle 返回给子进程。接着看子进程拿到 handle 后的处理。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">shared</span><span class="token punctuation">(</span><span class="token parameter">message<span class="token punctuation">,</span> handle<span class="token punctuation">,</span> indexesKey<span class="token punctuation">,</span> cb</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">const</span> key <span class="token operator">=</span> message<span class="token punctuation">.</span>key<span class="token punctuation">;</span>  
+    
+  <span class="token keyword">const</span> close <span class="token operator">=</span> handle<span class="token punctuation">.</span>close<span class="token punctuation">;</span>  
+  
+  handle<span class="token punctuation">.</span><span class="token function-variable function">close</span> <span class="token operator">=</span> <span class="token keyword">function</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token function">send</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span> <span class="token literal-property property">act</span><span class="token operator">:</span> <span class="token string">'close'</span><span class="token punctuation">,</span> key <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    handles<span class="token punctuation">.</span><span class="token function">delete</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    indexes<span class="token punctuation">.</span><span class="token function">delete</span><span class="token punctuation">(</span>indexesKey<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// 因为是共享的，可以直接 close 掉而不会影响其它子进程等</span>
+    <span class="token keyword">return</span> <span class="token function">close</span><span class="token punctuation">.</span><span class="token function">apply</span><span class="token punctuation">(</span>handle<span class="token punctuation">,</span> arguments<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span><span class="token punctuation">;</span>  
+  handles<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+  <span class="token comment">// 执行 net 模块的回调 </span>
+  <span class="token function">cb</span><span class="token punctuation">(</span>message<span class="token punctuation">.</span>errno<span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>shared 函数把接收到的 handle 再回传到调用方，即 net 模块的 listenOnMasterHandle 函数，listenOnMasterHandle 会执行 listen 开始监听地址。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">setupListenHandle</span><span class="token punctuation">(</span><span class="token parameter">address<span class="token punctuation">,</span> port<span class="token punctuation">,</span> addressType<span class="token punctuation">,</span> backlog<span class="token punctuation">,</span> fd<span class="token punctuation">,</span> flags</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// this._handle 即主进程返回的 handle</span>
+  <span class="token comment">// 连接到来时的回调</span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>_handle<span class="token punctuation">.</span>onconnection <span class="token operator">=</span> onconnection<span class="token punctuation">;</span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>_handle<span class="token punctuation">[</span>owner_symbol<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">;</span>
+  <span class="token keyword">const</span> err <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>_handle<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span>backlog <span class="token operator">||</span> <span class="token number">511</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这样多个子进程就成功启动了服务器。共享模式的核心逻辑是主进程在 _createServerHandle 创建 handle 时执行 bind 绑定了地址（但没有 listen），然后通过文件描述符传递的方式传给子进程，子进程执行 listen 的时候就不会报端口已经被监听的错误了，因为端口被监听的错误是执行 bind 的时候返回的。逻辑如下图所示。<img src="https://images2.imgbox.com/ef/6b/FKlxa0rp_o.png" alt=""><br> 看一个共享模式的使用例子。</p> 
+<pre><code class="prism language-js"><span class="token keyword">const</span> cluster <span class="token operator">=</span> <span class="token function">require</span><span class="token punctuation">(</span><span class="token string">'cluster'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">const</span> os <span class="token operator">=</span> <span class="token function">require</span><span class="token punctuation">(</span><span class="token string">'os'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">// 设置为共享模式</span>
+cluster<span class="token punctuation">.</span>schedulingPolicy <span class="token operator">=</span> cluster<span class="token punctuation">.</span><span class="token constant">SCHED_NONE</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 主进程 fork 多个子进程</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>cluster<span class="token punctuation">.</span>isMaster<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 通常根据 CPU 核数创建多个进程 os.cpus().length</span>
+  <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">let</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">3</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    cluster<span class="token punctuation">.</span><span class="token function">fork</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// 子进程创建服务器</span>
+  <span class="token keyword">const</span> net <span class="token operator">=</span> <span class="token function">require</span><span class="token punctuation">(</span><span class="token string">'net'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">const</span> server <span class="token operator">=</span> net<span class="token punctuation">.</span><span class="token function">createServer</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token parameter">socket</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+    socket<span class="token punctuation">.</span><span class="token function">destroy</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    console<span class="token punctuation">.</span><span class="token function">log</span><span class="token punctuation">(</span><span class="token template-string"><span class="token template-punctuation string">`</span><span class="token string">handled by process: </span><span class="token interpolation"><span class="token interpolation-punctuation punctuation">${<!-- --></span>process<span class="token punctuation">.</span>pid<span class="token interpolation-punctuation punctuation">}</span></span><span class="token template-punctuation string">`</span></span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  server<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span><span class="token number">8080</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="_1035"></a>轮询模式</h4> 
+<p>接着看轮询模式，轮询模式对应前面的主进程 accept，分发给多个子进程处理这种方式。</p> 
+<pre><code class="prism language-js"><span class="token keyword">function</span> <span class="token function">RoundRobinHandle</span><span class="token punctuation">(</span><span class="token parameter">key<span class="token punctuation">,</span> address<span class="token punctuation">,</span> port<span class="token punctuation">,</span> addressType<span class="token punctuation">,</span> fd<span class="token punctuation">,</span> flags</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>key <span class="token operator">=</span> key<span class="token punctuation">;</span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>all <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Map</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>free <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">;</span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>handles <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">;</span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>handle <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>  
+  <span class="token keyword">this</span><span class="token punctuation">.</span>server <span class="token operator">=</span> net<span class="token punctuation">.</span><span class="token function">createServer</span><span class="token punctuation">(</span>assert<span class="token punctuation">.</span>fail<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>fd <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">)</span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span>server<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span> fd <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>port <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// 启动一个服务器</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>server<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span>  
+      port<span class="token punctuation">,</span>  
+      <span class="token literal-property property">host</span><span class="token operator">:</span> address<span class="token punctuation">,</span>  
+      <span class="token literal-property property">ipv6Only</span><span class="token operator">:</span> <span class="token function">Boolean</span><span class="token punctuation">(</span>flags <span class="token operator">&amp;</span> constants<span class="token punctuation">.</span><span class="token constant">UV_TCP_IPV6ONLY</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span> <span class="token keyword">else</span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span>server<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span>address<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// UNIX socket path.  </span>
+  <span class="token comment">// 监听成功后，注册 onconnection 回调，有连接到来时执行  </span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>server<span class="token punctuation">.</span><span class="token function">once</span><span class="token punctuation">(</span><span class="token string">'listening'</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span>handle <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>server<span class="token punctuation">.</span>_handle<span class="token punctuation">;</span>  
+    <span class="token comment">// 分发请求给子进程</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span>handle<span class="token punctuation">.</span><span class="token function-variable function">onconnection</span> <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token parameter">err<span class="token punctuation">,</span> handle</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">distribute</span><span class="token punctuation">(</span>err<span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span>server<span class="token punctuation">.</span>_handle <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span>server <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>因为 RoundRobinHandle的 工作模式是主进程负责监听，收到连接后分发给子进程，所以 RoundRobinHandle 中直接启动了一个服务器，当收到连接时执行 this.distribute 进行分发。接着看一下RoundRobinHandle 的 add 函数。</p> 
+<pre><code class="prism language-js"><span class="token class-name">RoundRobinHandle</span><span class="token punctuation">.</span>prototype<span class="token punctuation">.</span><span class="token function-variable function">add</span> <span class="token operator">=</span> <span class="token keyword">function</span><span class="token punctuation">(</span><span class="token parameter">worker<span class="token punctuation">,</span> send</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+   <span class="token keyword">this</span><span class="token punctuation">.</span>all<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>worker<span class="token punctuation">.</span>id<span class="token punctuation">,</span> worker<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+   <span class="token keyword">const</span> <span class="token function-variable function">done</span> <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// send 的第三个参数是 null，说明没有 handle</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>handle<span class="token punctuation">.</span>getsockname<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+      <span class="token keyword">const</span> out <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">;</span>  
+      <span class="token keyword">this</span><span class="token punctuation">.</span>handle<span class="token punctuation">.</span><span class="token function">getsockname</span><span class="token punctuation">(</span>out<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+      <span class="token function">send</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token punctuation">{<!-- --></span> <span class="token literal-property property">sockname</span><span class="token operator">:</span> out <span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+      <span class="token function">send</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// UNIX socket.  </span>
+    <span class="token punctuation">}</span>  
+  
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handoff</span><span class="token punctuation">(</span>worker<span class="token punctuation">)</span><span class="token punctuation">;</span>   
+  <span class="token punctuation">}</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 否则等待 listen 成功后执行回调  </span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>server<span class="token punctuation">.</span><span class="token function">once</span><span class="token punctuation">(</span><span class="token string">'listening'</span><span class="token punctuation">,</span> done<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>RoundRobinHandle 会在 listen 成功后执行回调。我们回顾一下执行 add 函数时的回调。</p> 
+<pre><code class="prism language-cpp">handle<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>worker<span class="token punctuation">,</span> <span class="token punctuation">(</span>errno<span class="token punctuation">,</span> reply<span class="token punctuation">,</span> handle<span class="token punctuation">)</span> <span class="token operator">=</span><span class="token operator">&gt;</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">const</span> <span class="token punctuation">{<!-- --></span> data <span class="token punctuation">}</span> <span class="token operator">=</span> handles<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token function">send</span><span class="token punctuation">(</span>worker<span class="token punctuation">,</span> <span class="token punctuation">{<!-- --></span>  
+    errno<span class="token punctuation">,</span>  
+    key<span class="token punctuation">,</span>  
+    ack<span class="token operator">:</span> message<span class="token punctuation">.</span>seq<span class="token punctuation">,</span>  
+    data<span class="token punctuation">,</span>  
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>reply  
+  <span class="token punctuation">}</span><span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>回调函数会把 handle 等信息返回给子进程。但是在 RoundRobinHandle 和 SharedHandle 中返回的 handle 是不一样的，分别是 null 和 net.createServer 实例，因为前者不需要启动一个服务器，它只需要接收来自父进程传递的连接就行。</p> 
+<p>接着我们回到子进程的上下文，看子进程是如何处理的，刚才我们讲过，不同的调度策略，返回的 handle 是不一样的，我们看轮询模式下的处理。</p> 
+<pre><code class="prism language-cpp">function <span class="token function">rr</span><span class="token punctuation">(</span>message<span class="token punctuation">,</span> indexesKey<span class="token punctuation">,</span> cb<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> 
+   let key <span class="token operator">=</span> message<span class="token punctuation">.</span>key<span class="token punctuation">;</span>  
+   <span class="token comment">// 不需要 listen，空操作</span>
+   function <span class="token function">listen</span><span class="token punctuation">(</span>backlog<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+       <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>  
+   <span class="token punctuation">}</span>  
+  
+   function <span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token comment">// 因为 handle 是共享的，所以无法直接关闭，需要告诉父进程，引用数减一</span>
+       <span class="token keyword">if</span> <span class="token punctuation">(</span>key <span class="token operator">==</span><span class="token operator">=</span> undefined<span class="token punctuation">)</span>
+         <span class="token keyword">return</span><span class="token punctuation">;</span>
+    
+       <span class="token function">send</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span> act<span class="token operator">:</span> <span class="token char">'close'</span><span class="token punctuation">,</span> key <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+       handles<span class="token punctuation">.</span><span class="token keyword">delete</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+       indexes<span class="token punctuation">.</span><span class="token keyword">delete</span><span class="token punctuation">(</span>indexesKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+       key <span class="token operator">=</span> undefined<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span> 
+  <span class="token comment">// 构造假的 handle 给调用方</span>
+  <span class="token keyword">const</span> handle <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> close<span class="token punctuation">,</span> listen<span class="token punctuation">,</span> ref<span class="token operator">:</span> noop<span class="token punctuation">,</span> unref<span class="token operator">:</span> noop <span class="token punctuation">}</span><span class="token punctuation">;</span>  
+  
+  handles<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+  <span class="token comment">// 执行 net 模块的回调 </span>
+  <span class="token function">cb</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>round-robin 模式下，Node.js 会构造一个假的 handle 返回给 net 模块，因为调用方会调用 handle 的这些函数。当有请求到来时，round-bobin 模块会执行 distribute 分发连接给子进程。</p> 
+<pre><code class="prism language-cpp">RoundRobinHandle<span class="token punctuation">.</span>prototype<span class="token punctuation">.</span>distribute <span class="token operator">=</span> <span class="token function">function</span><span class="token punctuation">(</span>err<span class="token punctuation">,</span> handle<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token comment">// 首先保存 handle 到队列  </span>
+  <span class="token keyword">this</span><span class="token punctuation">.</span>handles<span class="token punctuation">.</span><span class="token function">push</span><span class="token punctuation">(</span>handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 从空闲队列获取一个子进程  </span>
+  <span class="token keyword">const</span> worker <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>free<span class="token punctuation">.</span><span class="token function">shift</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 分发  </span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>worker<span class="token punctuation">)</span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handoff</span><span class="token punctuation">(</span>worker<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">;</span>  
+  
+RoundRobinHandle<span class="token punctuation">.</span>prototype<span class="token punctuation">.</span>handoff <span class="token operator">=</span> <span class="token function">function</span><span class="token punctuation">(</span>worker<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token comment">// 拿到一个 handle  </span>
+  <span class="token keyword">const</span> handle <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>handles<span class="token punctuation">.</span><span class="token function">shift</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">// 没有 handle，则子进程重新入队  </span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>handle <span class="token operator">==</span><span class="token operator">=</span> undefined<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">this</span><span class="token punctuation">.</span>free<span class="token punctuation">.</span><span class="token function">push</span><span class="token punctuation">(</span>worker<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span>  
+  <span class="token comment">// 通知子进程有新连接  </span>
+  <span class="token keyword">const</span> message <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span> act<span class="token operator">:</span> <span class="token char">'newconn'</span><span class="token punctuation">,</span> key<span class="token operator">:</span> <span class="token keyword">this</span><span class="token punctuation">.</span>key <span class="token punctuation">}</span><span class="token punctuation">;</span>  
+  
+  <span class="token function">sendHelper</span><span class="token punctuation">(</span>worker<span class="token punctuation">.</span>process<span class="token punctuation">,</span> message<span class="token punctuation">,</span> handle<span class="token punctuation">,</span> <span class="token punctuation">(</span>reply<span class="token punctuation">)</span> <span class="token operator">=</span><span class="token operator">&gt;</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// 接收成功  </span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>reply<span class="token punctuation">.</span>accepted<span class="token punctuation">)</span>  
+      handle<span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token keyword">else</span>  
+      <span class="token comment">// 结束失败，则重新分发  </span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">distribute</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 继续分发</span>
+    <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handoff</span><span class="token punctuation">(</span>worker<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>可以看到 Node.js 没用按照严格的轮询，而是哪个进程接收连接快，就继续给它分发。接着看一下子进程是怎么处理该请求的。</p> 
+<pre><code class="prism language-cpp">function <span class="token function">onmessage</span><span class="token punctuation">(</span>message<span class="token punctuation">,</span> handle<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>message<span class="token punctuation">.</span>act <span class="token operator">==</span><span class="token operator">=</span> <span class="token char">'newconn'</span><span class="token punctuation">)</span>  
+      <span class="token function">onconnection</span><span class="token punctuation">(</span>message<span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+  
+function <span class="token function">onconnection</span><span class="token punctuation">(</span>message<span class="token punctuation">,</span> handle<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">const</span> key <span class="token operator">=</span> message<span class="token punctuation">.</span>key<span class="token punctuation">;</span>  
+  <span class="token keyword">const</span> server <span class="token operator">=</span> handles<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token keyword">const</span> accepted <span class="token operator">=</span> server <span class="token operator">!=</span><span class="token operator">=</span> undefined<span class="token punctuation">;</span>  
+  <span class="token comment">// 回复接收成功  </span>
+  <span class="token function">send</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span> ack<span class="token operator">:</span> message<span class="token punctuation">.</span>seq<span class="token punctuation">,</span> accepted <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>accepted<span class="token punctuation">)</span>  
+     <span class="token comment">// 在 net 模块设置</span>
+    server<span class="token punctuation">.</span><span class="token function">onconnection</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> handle<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>  
+</code></pre> 
+<p>最终执行 server.onconnection 进行连接的处理。逻辑如下图所示。<img src="https://images2.imgbox.com/09/3d/Eev55NmF_o.png" alt=""><br> 看一下轮询模式的使用例子。</p> 
+<pre><code class="prism language-cpp"><span class="token keyword">const</span> cluster <span class="token operator">=</span> <span class="token function">require</span><span class="token punctuation">(</span><span class="token char">'cluster'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">const</span> os <span class="token operator">=</span> <span class="token function">require</span><span class="token punctuation">(</span><span class="token char">'os'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">// 设置为轮询模式</span>
+cluster<span class="token punctuation">.</span>schedulingPolicy <span class="token operator">=</span> cluster<span class="token punctuation">.</span>SCHED_RR<span class="token punctuation">;</span>
+
+<span class="token comment">// 主进程 fork 多个子进程</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>cluster<span class="token punctuation">.</span>isMaster<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 通常根据 CPU 核数创建多个进程 os.cpus().length</span>
+  <span class="token keyword">for</span> <span class="token punctuation">(</span>let i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">3</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    cluster<span class="token punctuation">.</span><span class="token function">fork</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// 子进程创建服务器</span>
+  <span class="token keyword">const</span> net <span class="token operator">=</span> <span class="token function">require</span><span class="token punctuation">(</span><span class="token char">'net'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">const</span> server <span class="token operator">=</span> net<span class="token punctuation">.</span><span class="token function">createServer</span><span class="token punctuation">(</span><span class="token punctuation">(</span>socket<span class="token punctuation">)</span> <span class="token operator">=</span><span class="token operator">&gt;</span> <span class="token punctuation">{<!-- --></span>
+    socket<span class="token punctuation">.</span><span class="token function">destroy</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    console<span class="token punctuation">.</span><span class="token function">log</span><span class="token punctuation">(</span>`handled by process<span class="token operator">:</span> $<span class="token punctuation">{<!-- --></span>process<span class="token punctuation">.</span>pid<span class="token punctuation">}</span>`<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  server<span class="token punctuation">.</span><span class="token function">listen</span><span class="token punctuation">(</span><span class="token number">8080</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>实现一个高性能的服务器是非常复杂的，涉及到很多复杂的知识，但是即使不是服务器开发者，了解服务器相关的一些知识也是非常有用的。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

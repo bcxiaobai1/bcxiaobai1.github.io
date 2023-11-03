@@ -1,0 +1,1349 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>C语言 socket学习整理 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">C语言 socket学习整理</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>分三个topic来熟悉C语言的socket使用方法。</p> 
+<ol>
+<li>一台client与一台server之间的双向TCP通讯。</li>
+<li>使用select接口实现的多台client与一台server之间的通讯。</li>
+<li>使用epoll接口实现的多台client与一台server之间的通讯。</li>
+</ol> 
+<h4>TCP通信模型与UDP通信模型的区别</h4> 
+<ul>
+<li> UDP通信模型中，在通信开始之前，不需要建立相关的链接，只需要发送数据即可，类似于生活中，“写信"”</li>
+<li> TCP通信模型中，在通信开始之前，一定要先建立相关的链接，才能发送数据，类似于生活中，“打电话”"</li>
+</ul> 
+<p>这里仅以TCP通信为例。先放上TCP协议socket的编程流程图：</p> 
+<p><img alt="" height="865" src="https://images2.imgbox.com/88/8d/kIotn24v_o.png" width="865"></p> 
+<p></p> 
+<p>在代码调试过程中遇到的知识点整理如下：</p> 
+<ol>
+<li>客户端可以用bind来绑定IP与端口，但不是必须的。</li>
+<li> <p style="margin-left:.0001pt;text-align:justify"><span style="background-color:#FFFFFF"><span style="color:#4d4d4d">accept函数</span></span><span style="background-color:#FFFFFF"><span style="color:#4d4d4d">的第三个参数，在调用之前需要设置为第二个参数的长度，否则会出现得到的客户端IP地址/端口为0.0.0.0：0。</span></span></p> <pre><code class="hljs">struct sockaddr_in client_address = {0};  
+socklen_t address_len = sizeof(client_address); 
+int client_sock_fd = accept(listen_fd, (struct sockaddr *)&amp;client_address, &amp;address_len);
+</code></pre> <p></p> </li>
+<li> <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#FFFFFF"><span style="background-color:#FFFFFF"><span style="color:#121212">socket</span></span><span style="background-color:#FFFFFF"><span style="color:#121212">函数的第三个参数protocol</span>。</span></span><span style="background-color:#FFFFFF"><span style="background-color:#FFFFFF"><span style="color:#121212">protocol</span></span><span style="background-color:#FFFFFF"><span style="color:#121212">：指定要与socket一起使用的特定协议，一般可以置为0，表示使用默认的</span></span></span><span style="background-color:#FFFFFF"><span style="color:#121212">常用的也就是sock_stream，流式传输，默认是TCP协议；sock_dgram，数据报形式，默认是UDP协议。</span></span></p> </li>
+<li> <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#FFFFFF"><span style="color:#000000">select</span></span><span style="background-color:#FFFFFF"><span style="color:#000000">的实现是通过对设备的轮询来实现的，每次调用</span></span><span style="background-color:#FFFFFF"><span style="color:#000000">FD_ISSET()</span></span><span style="background-color:#FFFFFF"><span style="color:#000000">函数后</span></span> <span style="background-color:#FFFFFF"><span style="color:#000000">，会把原来待检测的但是仍没就绪的描述字清</span></span><span style="background-color:#FFFFFF"><span style="color:#000000">0</span></span><span style="background-color:#FFFFFF"><span style="color:#000000">了。所以，</span><strong><span style="color:#fe2c24">每次调用</span></strong></span><strong><span style="color:#fe2c24"><span style="background-color:#FFFFFF">select()</span><span style="background-color:#FFFFFF">前要重新调用</span><span style="background-color:#FFFFFF">FD_SET()</span><span style="background-color:#FFFFFF">来设置一下待检测的描述设备。</span></span></strong></p> </li>
+</ol> 
+<p><strong>一台client与一台server之间的双向TCP通讯</strong></p> 
+<p>client端代码如下：</p> 
+<pre><code class="hljs">#include &lt;sys/types.h&gt;
+#include &lt;netinet/in.h&gt;
+#include &lt;sys/socket.h&gt;
+#include &lt;unistd.h&gt; // for close
+#include &lt;arpa/inet.h&gt;
+#include &lt;pthread.h&gt;
+
+#define SERVPORT 3333
+#define MAXDATASIZE 100
+
+static void dump_data(char* name,char* buf,int len)
+{
+	int i;
+	printf("buf:");
+	for(i=0; i&lt;len; i++){
+		if(i%8 == 0)
+			printf("n");
+		printf("%4d ",buf[i]);	
+	}
+	printf("n");	
+}
+
+static void *thread(void *param1)  
+{   
+    char buf[MAXDATASIZE];
+    int buf_size = 0;
+    int new_fd = *((int*)param1);
+    while(1){
+    	buf_size = recv(new_fd,buf,MAXDATASIZE+1,0);
+    	printf("buf_size:%dn",buf_size);
+    	if(buf_size &lt;= 0 )
+    		break;
+    	printf("client received:%sn",buf);	
+    	
+    	//dump_data("buf",buf,buf_size);
+    	usleep (10000);
+    }
+    return NULL;  
+}
+	
+int main(int argc,char *argv[])
+{
+	int sockfd,sendbytes;
+	char buf[MAXDATASIZE+1];
+	char **pptr;
+	//char buf_num[6] = {0,};
+	//char str[6] = {0,};
+	//int num = 0;
+	struct hostent *host;
+	struct sockaddr_in serv_addr;
+	struct sockaddr_in clientAddr;//客户端地址
+  char ipAddress[INET_ADDRSTRLEN];//保存点分十进制的ip地址
+	socklen_t clientAddrLen = sizeof(clientAddr);
+		
+	if(argc &lt; 2){
+		fprintf(stderr,"Please enter the server's hostname!n");
+		exit(1);
+	}
+	
+	/*地址解析函数*/
+	if((host=gethostbyname(argv[1]))==NULL){
+		perror("gethostbyname");
+		exit(1);
+	}
+	
+	//strcpy(str,argv[2]);
+	/*创建socket*/
+	if((sockfd=socket(AF_INET,SOCK_STREAM,0))== -1){
+		perror("socket");
+		exit(1);
+	}
+	
+	printf("client sockfd:%dn",sockfd);
+	/*设置sockaddr_in 结构体中相关参数*/
+	serv_addr.sin_family=AF_INET;
+	serv_addr.sin_port=htons(SERVPORT);
+	serv_addr.sin_addr=*((struct in_addr *)host-&gt;h_addr);
+	bzero(&amp;(serv_addr.sin_zero),8);
+	
+	/*调用connect函数主动发起对服务器端的连接*/
+	if(connect(sockfd,(struct sockaddr *)&amp;serv_addr,sizeof(struct sockaddr))== -1){
+		perror("connect");
+		exit(1);
+	}
+	
+	getsockname(sockfd, (struct sockaddr*)&amp;clientAddr, &amp;clientAddrLen);//获取sockfd表示的连接上的本地地址
+  printf("client address = %s:%dn", inet_ntop(AF_INET, &amp;clientAddr.sin_addr, ipAddress, sizeof(ipAddress)), 
+  	ntohs(clientAddr.sin_port));
+
+	printf("official hostname:%sn", host-&gt;h_name);   //主机规范名
+	for(pptr = host-&gt;h_aliases; *pptr != NULL; pptr++)   //将主机别名打印出来
+		printf("alias: %sn", *pptr);	
+
+  //新建一个线程来进行发送操作.
+  pthread_t ntid;
+  pthread_create(&amp;ntid,NULL,thread,&amp;sockfd);
+    
+	/*发送消息给服务器端*/
+	while(1){
+		//scanf("%s",buf);
+		ssize_t size = read(STDIN_FILENO, buf, sizeof(buf));
+    if(!strcmp(buf,"quit"))
+    	break;
+
+		printf("client send:%s size:%dn",buf,size);
+		if(size &gt; 0){
+			if((sendbytes=send(sockfd,buf,size,0))== -1){
+				perror("send");
+				break;
+			}
+		}
+		usleep (10000);
+		//sleep(2);
+	}
+	close(sockfd);
+	
+	return 0;
+}
+</code></pre> 
+<p>server端代码如下：</p> 
+<pre><code class="hljs">#include &lt;sys/socket.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;arpa/inet.h&gt;
+#include &lt;netinet/in.h&gt;
+#include &lt;pthread.h&gt;
+
+#define SERVPORT 3333
+#define BACKLOG 10
+#define MAX_CONNECTED_NO 10
+#define MAXDATASIZE 100
+
+char recv_buf[MAXDATASIZE+1];
+
+static void dump_data(char* name,char* buf,int len)
+{
+	int i;
+	printf("buf:");
+	for(i=0; i&lt;len; i++){
+		if(i%8 == 0)
+			printf("n");
+		printf("%4d ",buf[i]);	
+	}
+	printf("n");	
+}
+
+void* server_send(void* param)
+{
+   int new_fd = *(int*)param;
+   while(1){
+     bzero(recv_buf, MAXDATASIZE + 1);
+     ssize_t size = read(STDIN_FILENO, recv_buf, sizeof(recv_buf));
+     printf("recv_buf size:%d size:%dn",sizeof(recv_buf),size);
+     printf("server send %sn",recv_buf);
+     if(size &gt; 0){
+	     int len = send(new_fd, recv_buf,size, 0);
+	     if(len &lt;= 0)
+	       break;
+	     else{
+	     		;	//dump_data("recv_buf",recv_buf,sizeof(recv_buf));
+	     }
+     }	 
+   }
+   exit(0);
+}
+	
+int main()
+{
+	struct sockaddr_in server_sockaddr,client_sockaddr,peerAddr;
+	struct sockaddr listendAddr,connectedAddr;
+	//int recvbytes;
+	socklen_t sin_size;
+	//socklen_t peerLen;
+	int sockfd,client_fd;
+	//char ipAddr[INET_ADDRSTRLEN];//保存点分十进制的地址
+	//fd_set readfd;
+	//fd_set writefd;
+
+	/*建立socket连接*/
+	if((sockfd = socket(AF_INET,SOCK_STREAM,0))== -1){
+		perror("socket");
+		exit(1);
+	}
+	printf("server sockfd=%dn",sockfd);
+	
+	/*设置sockaddr_in 结构体中相关参数*/
+	server_sockaddr.sin_family=AF_INET;
+	server_sockaddr.sin_port=htons(SERVPORT);
+	server_sockaddr.sin_addr.s_addr=INADDR_ANY;
+	bzero(&amp;(server_sockaddr.sin_zero),8);
+	/*绑定函数bind*/
+	if(bind(sockfd,(struct sockaddr *)&amp;server_sockaddr,sizeof(struct sockaddr))== -1){
+		perror("bind");
+		exit(1);
+	}
+	printf("bind success!n");	
+	
+		/*调用listen函数*/
+	if(listen(sockfd,BACKLOG)== -1){
+		perror("listen");
+		exit(1);
+	}
+	printf("listening....n");
+	
+	socklen_t listendAddrLen = sizeof(listendAddr);
+	getsockname(sockfd, (struct sockaddr *)&amp;listendAddr, &amp;listendAddrLen);//获取监听的地址和端口
+	
+	struct sockaddr_in *tmp_sockaddr;
+	tmp_sockaddr = (struct sockaddr_in *)&amp;listendAddr;
+  printf("listen address = %s:%dn", inet_ntoa(tmp_sockaddr-&gt;sin_addr), ntohs(tmp_sockaddr-&gt;sin_port));
+  
+	if((client_fd=accept(sockfd,(struct sockaddr *)&amp;client_sockaddr,&amp;sin_size))== -1){
+		perror("accept");
+		exit(1);
+	} 
+	printf("accept client_fd:%dn",client_fd);
+  //创建线程为了给客户端发送数据
+  pthread_t ntid;
+  int ret = pthread_create(&amp;ntid,NULL,server_send,(void *)&amp;client_fd);
+  if(ret == 0)
+  	printf("okn"); 
+  	
+	/*接收客户端的数据并将其发送给客户端--recv返回接收到的字节数，send返回发送的字节数*/
+	while((recv(client_fd,recv_buf,MAXDATASIZE+1,0))&gt;0){
+	   printf("server recvived:%sn",recv_buf);
+	}
+	
+	close(client_fd);
+	close(sockfd);
+	
+	return 0;
+}</code></pre> 
+<p>PS：多台client的测试方式，可以在PC上使用Python实现client来验证比较方便，我这边是用两台PC+一块linux开发板来测试的。</p> 
+<p> </p> 
+<p><strong>使用select接口实现的多台client与一台server之间的通讯</strong></p> 
+<p>select接口的实现不会造成堵塞，但是select的fd_set容量有限，当fd_set过大时系统开销较大。</p> 
+<p>client端代码如下：</p> 
+<pre><code class="hljs">#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;string.h&gt;
+#include &lt;netdb.h&gt;
+#include &lt;sys/types.h&gt;
+#include &lt;netinet/in.h&gt;
+#include &lt;sys/socket.h&gt;
+#include &lt;unistd.h&gt; // for close
+#include &lt;arpa/inet.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;sys/select.h&gt;
+#include &lt;sys/stat.h&gt;
+#include &lt;fcntl.h&gt;
+
+#define SERVPORT 3333
+#define BUFFER_SIZE 1024
+
+#define DUMP_DATA
+#ifdef DUMP_DATA
+static void dump_data(char* name,char* buf,int len);
+#endif
+static void show_socket_info(int listen_fd);
+static void show_peer_info(int listen_fd);
+static int prepare_connect(struct hostent *host);
+static void fd_set_init(fd_set* client_fd_set,int* max_fd,int client_fd);
+static void send_stdin_to_server(fd_set* client_fd_set,int client_sockfd);
+static void get_server_msg(fd_set* client_fd_set,int client_sockfd);
+static void check_event(fd_set* client_fd_set,int* max_fd,int client_fd);
+	
+char recv_msg[BUFFER_SIZE];  
+char input_msg[BUFFER_SIZE]; 
+    	
+int main(int argc,char *argv[])
+{
+	int client_sockfd = -1;
+	
+	//char buf_num[6] = {0,};
+	char str[6] = {0,};
+	//int num = 0;
+	struct hostent *host;
+	
+	if(argc &lt; 2){
+		fprintf(stderr,"Please enter the server's hostname!n");
+		exit(1);
+	}
+	
+	/*地址解析函数*/
+	if((host=gethostbyname(argv[1]))==NULL){
+		perror("gethostbyname");
+		exit(1);
+	}
+	
+	strcpy(str,argv[2]);	//第二个参数为client名称
+	
+	int fd = 0;
+	fd = open("/dev/mem", O_RDWR | O_NDELAY); 
+
+	client_sockfd = prepare_connect(host);
+	if(client_sockfd &lt; 0){
+		perror("prepare_connect");
+		exit(0);		
+	}
+
+	fd_set client_fd_set;  
+	int max_fd = -1;
+
+	while(1){
+		fd_set_init(&amp;client_fd_set,&amp;max_fd,client_sockfd);
+    check_event(&amp;client_fd_set,&amp;max_fd,client_sockfd);	
+	}
+	return 0;
+}
+
+#ifdef DUMP_DATA
+static void dump_data(char* name,char* buf,int len)
+{
+	int i;
+	printf("buf:");
+	for(i=0; i&lt;len; i++){
+		if(i%8 == 0)
+			printf("n");
+		printf("%4d ",buf[i]);	
+	}
+	printf("n");	
+}
+#endif
+
+static int prepare_connect(struct hostent *host)
+{
+	struct sockaddr_in serv_addr;
+	int client_sockfd = -1;	
+	char **pptr;
+	/*创建socket*/
+	if((client_sockfd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP))== -1){
+		perror("socket");
+		exit(1);
+	}
+	
+	/*设置sockaddr_in 结构体中相关参数*/
+	serv_addr.sin_family=AF_INET;
+	serv_addr.sin_port=htons(SERVPORT);
+	serv_addr.sin_addr=*((struct in_addr *)host-&gt;h_addr);
+	bzero(&amp;(serv_addr.sin_zero),8);
+	
+	/*调用connect函数主动发起对服务器端的连接*/
+	if(connect(client_sockfd,(struct sockaddr *)&amp;serv_addr,sizeof(struct sockaddr))== -1){
+		perror("connect");
+		return -1;
+	}
+	
+	show_socket_info(client_sockfd);
+	//show_peer_info(client_sockfd);
+
+	printf("official hostname:%sn", host-&gt;h_name);   //主机规范名
+	for(pptr = host-&gt;h_aliases; *pptr != NULL; pptr++)   //将主机别名打印出来
+		printf("alias: %sn", *pptr);	
+
+	printf("client_sockfd:%d n",client_sockfd);
+	
+	return client_sockfd;
+}
+
+static void fd_set_init(fd_set* client_fd_set,int* max_fd,int client_fd)
+{ 
+  FD_ZERO(client_fd_set);  
+  FD_SET(STDIN_FILENO, client_fd_set);  
+  if(*max_fd &lt; STDIN_FILENO){  
+  	*max_fd  = STDIN_FILENO;  
+  }  
+	FD_SET(client_fd, client_fd_set);
+  if(*max_fd  &lt; client_fd){  
+  	*max_fd  = client_fd;  
+  } 
+  printf("max_fd:%d client_fd:%dn",*max_fd,client_fd);
+  //dump_data("fd",(char*)client_fd_set,128);	      	
+}
+
+static void send_stdin_to_server(fd_set* client_fd_set,int client_sockfd)
+{
+	//将键盘输入消息发送给socket		
+	if(FD_ISSET(STDIN_FILENO, client_fd_set)){  
+    bzero(input_msg, BUFFER_SIZE);
+    ssize_t size = read(STDIN_FILENO, input_msg, sizeof(input_msg));
+    printf("client send:%s n",input_msg);
+    printf("client_sockfd:%dn",client_sockfd);
+    if(send(client_sockfd, input_msg, size, 0) == -1){  
+    	perror("send error!n");  
+    }  
+  }  	
+}
+
+static void get_server_msg(fd_set* client_fd_set,int client_sockfd)
+{
+	if(FD_ISSET(client_sockfd, client_fd_set)){
+    bzero(recv_msg, BUFFER_SIZE);  
+    int byte_num = recv(client_sockfd, recv_msg, BUFFER_SIZE, 0); 
+    if(byte_num &gt; 0){  
+      if(byte_num &gt; BUFFER_SIZE){  
+          byte_num = BUFFER_SIZE;
+          recv_msg[byte_num] = '';
+      }   
+      printf("client:%d receive msg:%sn",client_sockfd,recv_msg);  
+    }  
+    else if(byte_num &lt; 0){  
+    	printf("receive error!n");  
+    }  
+    else{  
+      printf("server is quitted!n");  
+      exit(0);  
+    }  	
+  }	
+}
+
+static void check_event(fd_set* client_fd_set,int* max_fd,int client_fd)
+{
+	struct timeval tv;
+  tv.tv_sec = 20;  
+  tv.tv_usec = 0;  
+
+	int ret = select(*max_fd + 1, client_fd_set, NULL, NULL, &amp;tv); 
+  if(ret &lt; 0){  
+    perror("select errn");  
+    return;  
+  }  
+  else if(ret == 0){  
+    printf("select tmon");  
+    return;  
+  }  
+  else{
+		//将键盘输入消息发送给socket
+		send_stdin_to_server(client_fd_set,client_fd);
+    get_server_msg(client_fd_set,client_fd);  	    	
+  }			
+}
+
+static void show_socket_info(int listen_fd)
+{
+	struct sockaddr_in *tmp_sockaddr;
+	struct sockaddr connectedAddr;
+
+	int ret = -1;
+	
+	socklen_t connectedAddrLen = sizeof(connectedAddr);
+	//获取listen_fd表示的连接上的本地地址
+	ret = getsockname(listen_fd, (struct sockaddr *)&amp;connectedAddr, &amp;connectedAddrLen);
+  if(ret){
+  	perror("getsockname");
+  	return;
+  }	
+	tmp_sockaddr = (struct sockaddr_in *)&amp;connectedAddr;
+	printf("socket address = %s:%dn", inet_ntoa(tmp_sockaddr-&gt;sin_addr), ntohs(tmp_sockaddr-&gt;sin_port));		
+}
+
+static void show_peer_info(int listen_fd)
+{	
+	struct sockaddr_in peerAddr;	
+	char ipAddr[INET_ADDRSTRLEN];//保存点分十进制的地址
+	socklen_t peerLen;
+	int ret = -1;
+	//获取listen_fd表示的连接上的对端地址
+  ret = getpeername(listen_fd, (struct sockaddr *)&amp;peerAddr, &amp;peerLen); 
+  if(ret){
+  	perror("getpeername");
+  	return;
+  }
+ 	
+  printf("socket peer address = %s:%dn", inet_ntop(AF_INET,&amp;(peerAddr.sin_addr), ipAddr, sizeof(ipAddr)), 
+  		ntohs(peerAddr.sin_port));	
+}</code></pre> 
+<p>server端代码如下：</p> 
+<pre><code class="hljs">#include &lt;sys/socket.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;string.h&gt;
+#include &lt;strings.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;arpa/inet.h&gt;
+#include &lt;netinet/in.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;sys/select.h&gt;
+
+#define SERVPORT 3333
+#define BACKLOG 10
+#define MAX_CONNECTED_NO 10
+#define BUFFER_SIZE 1024
+#define QUIT_CMD ".quit" 
+
+int client_fds[MAX_CONNECTED_NO] = {0,};
+char input_msg[BUFFER_SIZE];  
+char recv_msg[BUFFER_SIZE]; 
+
+#define DUMP_DATA
+#ifdef DUMP_DATA
+static void dump_data(char* name,char* buf,int len);
+#endif
+
+static int socket_bind(int port);
+static void fd_set_init(fd_set* serv_fd_set,int* max_fd,int listen_fd);
+static void show_socket_info(int listen_fd);
+static void show_peer_info(int listen_fd);
+static void update_fd_set(fd_set* serv_fd_set,int* max_fd);
+static void broadcast_stdin(fd_set* serv_fd_set);
+static void handle_new_connect(fd_set* serv_fd_set,int listen_fd);
+static void forward_from_recv(fd_set* serv_fd_set);
+static void check_event(fd_set* serv_fd_set,int* max_fd,int listen_fd);
+	
+int main()
+{    	
+	int listen_fd = 0;
+	
+  listen_fd = socket_bind(SERVPORT);
+  
+	/*调用listen函数*/
+	if(listen(listen_fd,BACKLOG)== -1){
+		perror("listen");
+		exit(1);
+	}
+	printf("listening....n");
+	  
+  //fd_set  
+	fd_set server_fd_set;  
+	int max_fd = -1; 
+         
+  while(1){
+  	fd_set_init(&amp;server_fd_set,&amp;max_fd,listen_fd);
+  	update_fd_set(&amp;server_fd_set,&amp;max_fd);
+  	check_event(&amp;server_fd_set,&amp;max_fd,listen_fd);
+  }	
+	return 0;
+}
+
+static int socket_bind(int port)
+{
+	struct sockaddr_in server_sockaddr;
+	int listen_fd;
+
+	/*建立socket连接*/
+	if((listen_fd = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP))== -1){
+		perror("socket");
+		exit(1);
+	}
+	printf("socket success!,listen_fd=%dn",listen_fd);
+	
+	/*设置sockaddr_in 结构体中相关参数*/
+	server_sockaddr.sin_family=AF_INET;
+	server_sockaddr.sin_port=htons(port);
+	server_sockaddr.sin_addr.s_addr=INADDR_ANY;
+	bzero(&amp;(server_sockaddr.sin_zero),8);
+	/*绑定函数bind*/
+	if(bind(listen_fd,(struct sockaddr *)&amp;server_sockaddr,sizeof(struct sockaddr))== -1){
+		perror("bind");
+		exit(1);
+	}
+	
+	printf("bind success!n");
+	
+	show_socket_info(listen_fd);
+  
+  return listen_fd;
+}
+
+static void fd_set_init(fd_set* serv_fd_set,int* max_fd,int listen_fd)
+{ 
+  FD_ZERO(serv_fd_set);  
+  FD_SET(STDIN_FILENO, serv_fd_set);  
+  if(*max_fd &lt; STDIN_FILENO){  
+      *max_fd  = STDIN_FILENO;  
+  }  
+	FD_SET(listen_fd, serv_fd_set);
+  if(*max_fd  &lt; listen_fd){  
+      *max_fd  = listen_fd;  
+  } 
+  //printf("max_fd=%dn",*max_fd);
+  //dump_data("fd",(char*)serv_fd_set,128);	
+}
+
+static void update_fd_set(fd_set* serv_fd_set,int* max_fd)
+{
+	int i;	
+	for(i = 0; i &lt; MAX_CONNECTED_NO; i++){
+		//printf("client_fds[%d]=%dn", i, client_fds[i]);
+    if(client_fds[i] != 0){  
+      FD_SET(client_fds[i], serv_fd_set);  
+      if(*max_fd &lt; client_fds[i]){  
+      	*max_fd = client_fds[i];
+        printf("update max_fd=%dn",*max_fd);   
+      }  
+    }
+	} 	
+}
+
+static void handle_new_connect(fd_set* serv_fd_set,int listen_fd)
+{
+	int i;	
+  if(FD_ISSET(listen_fd, serv_fd_set)){
+  	//有新的连接请求 
+  	struct sockaddr_in client_address = {0};  
+    socklen_t address_len = sizeof(client_address); 
+    int client_sock_fd = accept(listen_fd, (struct sockaddr *)&amp;client_address, &amp;address_len);
+    printf("new connection client_sock_fd = %dn", client_sock_fd);
+    
+    if(client_sock_fd &gt; 0){  
+      int index = -1;  
+      for(i = 0; i &lt; MAX_CONNECTED_NO; i++){  
+        if(client_fds[i] == 0){  
+          index = i;  
+          client_fds[i] = client_sock_fd;  
+          break;  
+        }
+      }  
+      if(index &gt;= 0){  
+        printf("new client(%d)add success,%s:%dn",index, 
+        		inet_ntoa(client_address.sin_addr),ntohs(client_address.sin_port));	
+        show_socket_info(client_sock_fd);			
+      }  
+      else{  
+        bzero(input_msg, BUFFER_SIZE);  
+        strcpy(input_msg,"client amount is the maxium,can't add!n");  
+        send(client_sock_fd, input_msg, BUFFER_SIZE, 0);  
+        printf("client amount is the maxium,new client joined fail %s:%dn",
+        	inet_ntoa(client_address.sin_addr), ntohs(client_address.sin_port));  
+      }   
+    }
+  }
+}
+
+static void broadcast_stdin(fd_set* serv_fd_set)
+{
+	int i;	
+  if(FD_ISSET(STDIN_FILENO, serv_fd_set)){ 
+    bzero(input_msg, BUFFER_SIZE);
+    ssize_t size = read(STDIN_FILENO, input_msg, sizeof(input_msg));
+    
+    printf("stdinput msg:%sn",input_msg); 
+    //输入“.quit"则退出服务器  
+    if(strcmp(input_msg, QUIT_CMD) == 0){  
+    	exit(0);  
+    }
+    
+    for(i = 0; i &lt; MAX_CONNECTED_NO; i++){  
+    	if(client_fds[i] != 0){  
+      	printf("send to client_fds[%d]=%dn", i, client_fds[i]);   
+		    if(send(client_fds[i], input_msg, size, 0) == -1){  
+		    	perror("send error!n");  
+		    }else
+		    	printf("send ok n");        	
+      }  
+    }
+  } 
+}
+
+static void forward_from_recv(fd_set* serv_fd_set)
+{
+	int i;
+  for(i = 0; i &lt; MAX_CONNECTED_NO; i++){
+		if(client_fds[i] !=0){
+			if(FD_ISSET(client_fds[i], serv_fd_set)){
+				//处理某个客户端过来的消息  
+	      bzero(recv_msg, BUFFER_SIZE);  
+	      int byte_num = recv(client_fds[i], recv_msg, BUFFER_SIZE, 0); 
+	      if (byte_num &gt; 0){  
+	        if(byte_num &gt; BUFFER_SIZE){  
+	        	byte_num = BUFFER_SIZE;
+	        	recv_msg[byte_num] = '';
+	        }  
+	        printf("recv from client(%d),msg:%s n",i,recv_msg);
+	        /*转发数据给其他的客户端*/                         
+	        for(int i = 0; i &lt; MAX_CONNECTED_NO; i++){  
+	          if(client_fds[i] != 0){   
+	          	send(client_fds[i], recv_msg, sizeof(recv_msg), 0);  
+	          }
+	        }    
+	      }  
+	      else if(byte_num &lt; 0){  
+	      	printf("get msg error from client(%d).n", i);  
+	      }  
+	      else{  
+	        FD_CLR(client_fds[i], serv_fd_set);  
+	        client_fds[i] = 0;  
+	        printf("client(%d) is quittedn", i);  
+	      }  
+			}
+		}
+	}
+}
+
+static void check_event(fd_set* serv_fd_set,int* max_fd,int listen_fd)
+{
+	struct timeval tv;  //超时时间设置 
+	int ret = -1; 
+	tv.tv_sec = 20;  
+	tv.tv_usec = 0;
+
+	//dump_data("fd check",(char*)serv_fd_set,128);
+	//printf("max_fd:%dn",*max_fd);		
+  ret = select(*max_fd + 1, serv_fd_set, NULL, NULL, &amp;tv);  
+  if(ret &lt; 0){  
+    perror("select errorn");  
+    return;  
+  }  
+  else if(ret == 0){  
+    printf("select tmon");  
+    return;
+  }  
+  else{
+  	//ret 为未状态发生变化的文件描述符的个数
+  	printf("ret:%d n",ret);
+  	handle_new_connect(serv_fd_set,listen_fd); 
+  	broadcast_stdin(serv_fd_set);
+   	forward_from_recv(serv_fd_set);
+  } 	
+}
+
+#ifdef DUMP_DATA
+static void dump_data(char* name,char* buf,int len)
+{
+	int i;
+	printf("%s:",name);
+	for(i=0; i&lt;len; i++){
+		if(i%8 == 0)
+			printf("n");
+		printf("%4d ",buf[i]);	
+	}
+	printf("n");	
+}
+#endif
+
+static void show_socket_info(int listen_fd)
+{
+	struct sockaddr_in *tmp_sockaddr;
+	struct sockaddr connectedAddr;
+
+	int ret = -1;
+	
+	socklen_t connectedAddrLen = sizeof(connectedAddr);
+	//获取listen_fd表示的连接上的本地地址
+	ret = getsockname(listen_fd, (struct sockaddr *)&amp;connectedAddr, &amp;connectedAddrLen);
+  if(ret){
+  	perror("getsockname");
+  	return;
+  }	
+	tmp_sockaddr = (struct sockaddr_in *)&amp;connectedAddr;
+	printf("socket address = %s:%dn", inet_ntoa(tmp_sockaddr-&gt;sin_addr), ntohs(tmp_sockaddr-&gt;sin_port));		
+}
+
+static void show_peer_info(int listen_fd)
+{	
+	struct sockaddr_in peerAddr;	
+	char ipAddr[INET_ADDRSTRLEN];//保存点分十进制的地址
+	socklen_t peerLen;
+	int ret = -1;
+	//获取listen_fd表示的连接上的对端地址
+  ret = getpeername(listen_fd, (struct sockaddr *)&amp;peerAddr, &amp;peerLen); 
+  if(ret){
+  	perror("getpeername");
+  	return;
+  }
+ 	
+  printf("socket peer address = %s:%dn", inet_ntop(AF_INET,&amp;(peerAddr.sin_addr), ipAddr, sizeof(ipAddr)), 
+  		ntohs(peerAddr.sin_port));	
+}
+</code></pre> 
+<p><strong>使用epoll接口实现的多台client与一台server之间的通讯</strong></p> 
+<p>epoll的性能较select更优，结合线程池方式能够处理海量并发连线事件。但epoll对应的接口都抽象为统一的读、写等等统一接口，各个epoll对象之间的状态改变比较晦涩，需要有透彻的理解才可以。</p> 
+<p>客户端代码：</p> 
+<pre><code class="hljs">#include &lt;netinet/in.h&gt;
+#include &lt;sys/socket.h&gt;
+#include &lt;netdb.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;sys/epoll.h&gt;
+#include &lt;time.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;sys/types.h&gt;
+#include &lt;arpa/inet.h&gt;
+
+#define MAXSIZE     1024
+#define SERVPORT   	4444
+#define FDSIZE        1024
+#define EPOLLEVENTS 20
+
+static void handle_connection(int sockfd);
+static void
+handle_events(int epollfd,struct epoll_event *events,int num,int sockfd,char *buf);
+static void do_read(int epollfd,int fd,int sockfd,char *buf);
+static void do_write(int epollfd,int fd,int sockfd,char *buf);
+static void add_event(int epollfd,int fd,int state);
+static void delete_event(int epollfd,int fd,int state);
+static void modify_event(int epollfd,int fd,int state);
+
+static void setnonblocking(int sock)
+{
+	int opts;
+	opts=fcntl(sock,F_GETFL);
+	if(opts&lt;0){
+		perror("fcntl(sock,GETFL)");
+		return;
+	}
+	opts = opts|O_NONBLOCK;
+	if(fcntl(sock,F_SETFL,opts)&lt;0){
+		perror("fcntl(sock,SETFL,opts)");
+		return;
+	}
+}
+
+int main(int argc,char *argv[])
+{
+    int                 sockfd;
+    struct sockaddr_in  servaddr;
+    struct hostent *host;
+		struct sockaddr_in clientAddr;//客户端地址
+  	char ipAddress[INET_ADDRSTRLEN];//保存点分十进制的ip地址
+		socklen_t clientAddrLen = sizeof(clientAddr);
+	  char **pptr;
+	    
+    char str[6] = {0,};
+		if(argc &lt; 2){
+			fprintf(stderr,"Please enter the server's hostname!n");
+			exit(1);
+		}
+		
+		/*地址解析函数*/
+		if((host=gethostbyname(argv[1]))==NULL){
+			perror("gethostbyname");
+			exit(1);
+		}
+		
+		strcpy(str,argv[2]);	//第二个参数为client名称	    
+    
+    sockfd = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+    
+		/*设置sockaddr_in 结构体中相关参数*/
+		servaddr.sin_family=AF_INET;
+		servaddr.sin_port=htons(SERVPORT);
+		servaddr.sin_addr=*((struct in_addr *)host-&gt;h_addr);
+		bzero(&amp;(servaddr.sin_zero),8);    
+		/*调用connect函数主动发起对服务器端的连接*/
+		if(connect(sockfd,(struct sockaddr *)&amp;servaddr,sizeof(struct sockaddr))== -1){
+			perror("connect");
+			exit(1);
+		}
+		
+		//setnonblocking(sockfd);
+		getsockname(sockfd, (struct sockaddr*)&amp;clientAddr, &amp;clientAddrLen);//获取sockfd表示的连接上的本地地址
+	  printf("client address = %s:%dn", inet_ntop(AF_INET, &amp;clientAddr.sin_addr, ipAddress, sizeof(ipAddress)), 
+	  	ntohs(clientAddr.sin_port));
+
+		printf("official hostname:%sn", host-&gt;h_name);   //主机规范名
+		for(pptr = host-&gt;h_aliases; *pptr != NULL; pptr++)   //将主机别名打印出来
+			printf("alias: %sn", *pptr);	
+
+		printf("client sockfd:%d n",sockfd);
+	    
+    //处理连接
+    //while(1)
+    sleep(1);
+    handle_connection(sockfd);
+    close(sockfd);
+    return 0;
+}
+
+
+static void handle_connection(int sockfd)
+{
+    int epollfd;
+    struct epoll_event events[EPOLLEVENTS];
+    char buf[MAXSIZE];
+    int ret;
+    epollfd = epoll_create(FDSIZE);
+    add_event(epollfd,STDIN_FILENO,EPOLLIN);
+    add_event(epollfd,sockfd,EPOLLIN);
+    for ( ; ; )
+    {
+        ret = epoll_wait(epollfd,events,EPOLLEVENTS,-1);
+        handle_events(epollfd,events,ret,sockfd,buf);
+    }
+    close(epollfd);
+}
+
+static void
+handle_events(int epollfd,struct epoll_event *events,int num,int sockfd,char *buf)
+{
+    int fd;
+    int i;
+    //printf("sockfd=%d n",sockfd);
+    for (i = 0;i &lt; num;i++)
+    {
+        fd = events[i].data.fd;
+        //printf("fd=%d n",fd);
+        if (events[i].events &amp; EPOLLIN)
+            do_read(epollfd,fd,sockfd,buf);
+        else if (events[i].events &amp; EPOLLOUT)
+            do_write(epollfd,fd,sockfd,buf);
+    }
+}
+
+static void do_read(int epollfd,int fd,int sockfd,char *buf)
+{
+    int nread;
+    nread = read(fd,buf,MAXSIZE);
+    if (nread == -1)
+    {
+        perror("read error:");
+        close(fd);
+    }
+    else if (nread == 0)
+    {
+        fprintf(stderr,"server close.n");
+        close(fd);
+    }
+    else
+    {
+        if (fd == STDIN_FILENO){
+        		printf("client send to %d n",sockfd);
+            modify_event(epollfd,sockfd,EPOLLOUT);
+        } 
+        else{
+        		printf("read from server n");
+            //modify_event(epollfd,sockfd,EPOLLIN);
+            add_event(epollfd,STDOUT_FILENO,EPOLLOUT);
+        }
+    }
+}
+
+static void do_write(int epollfd,int fd,int sockfd,char *buf)
+{
+    int nwrite;
+    printf("client writr to %d,str:%s n",fd,buf);
+    nwrite = write(fd,buf,strlen(buf));
+    
+    if (nwrite == -1)
+    {
+        perror("write error:");
+        close(fd);
+    }
+    else
+    {
+        if (fd == STDOUT_FILENO)
+            delete_event(epollfd,fd,EPOLLOUT);
+        else
+            modify_event(epollfd,fd,EPOLLIN);
+    }
+    memset(buf,0,MAXSIZE);
+}
+
+static void add_event(int epollfd,int fd,int state)
+{
+    struct epoll_event ev;
+    ev.events = state|EPOLLET;
+    ev.data.fd = fd;
+    printf("EPOLL_CTL_ADD fd:%d state:%dn",fd,state);
+    epoll_ctl(epollfd,EPOLL_CTL_ADD,fd,&amp;ev);
+}
+
+static void delete_event(int epollfd,int fd,int state)
+{
+    struct epoll_event ev;
+    ev.events = state;
+    ev.data.fd = fd;
+    printf("EPOLL_CTL_DEL fd:%d state:%dn",fd,state);
+    epoll_ctl(epollfd,EPOLL_CTL_DEL,fd,&amp;ev);
+}
+
+static void modify_event(int epollfd,int fd,int state)
+{
+    struct epoll_event ev;
+    ev.events = state|EPOLLET;
+    ev.data.fd = fd;
+    printf("EPOLL_CTL_MOD fd:%d state:%dn",fd,state);
+    epoll_ctl(epollfd,EPOLL_CTL_MOD,fd,&amp;ev);
+}</code></pre> 
+<p>解读一下client端，do_read/do_write函数中的几个epoll接口的引用：</p> 
+<p>do_read </p> 
+<blockquote> 
+ <p>if (fd == STDIN_FILENO){<!-- --><br>         printf("client send to %d n",sockfd);<br>         modify_event(epollfd,sockfd,EPOLLOUT);<br>  } <br> else{<!-- --><br>         printf("read from server n");<br>         add_event(epollfd,STDOUT_FILENO,EPOLLOUT);<br> }</p> 
+</blockquote> 
+<p> do_write</p> 
+<blockquote> 
+ <p>if (fd == STDOUT_FILENO)<br>         delete_event(epollfd,fd,EPOLLOUT);<br> else<br>         modify_event(epollfd,fd,EPOLLIN);</p> 
+</blockquote> 
+<ol>
+<li>do_read,当监控到stdin输入时，将sockfd变为EPOLLOUT（输出）状态，以执行将键盘输入发送给server端。</li>
+<li>此后会触发do_write，在将数据发送给server后，将fd的状态改回EPOLLIN（监控输入）状态。</li>
+<li>do_read,当监控到server socket发送过来的数据时，需要增加一个STDOUT_FILENO的标准输出（EPOLLOUT），来讲数据显示到屏幕上。</li>
+<li>此后会触发do_write，将数据写到屏幕上后，再删除该标准输出STDOUT_FILENO的epoll。</li>
+</ol> 
+<p>总结来看：</p> 
+<ol>
+<li>当一个fd的epoll已经被add过，再执行add(EPOLL_CTL_ADD)操作 ，此后并不会触发add指定的读/写操作，而应该使用modify(EPOLL_CTL_MOD)。</li>
+<li>同理，某些fd的epoll也可以采用先delete(EPOLL_CTL_DEL)，再add(EPOLL_CTL_ADD)操作也可以。</li>
+</ol> 
+<p> </p> 
+<p>服务端代码，服务端引用了网络上线程池的代码，待深入了解。</p> 
+<pre><code class="hljs">#include &lt;sys/socket.h&gt;
+#include &lt;sys/epoll.h&gt;
+#include &lt;netinet/in.h&gt;
+#include &lt;arpa/inet.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;string.h&gt;
+#include &lt;strings.h&gt;
+#include &lt;errno.h&gt;
+  
+#define MAXLINE 10
+#define OPEN_MAX 100
+#define LISTENQ 20
+#define SERV_PORT 4444
+#define INFTIM 1000
+  
+//线程池任务队列结构体
+struct task{
+  int fd; //需要读写的文件描述符
+  struct task *next; //下一个任务
+};
+  
+//用于读写两个的两个方面传递参数
+struct user_data{
+  int fd;
+  unsigned int n_size;
+  char line[MAXLINE];
+};
+  
+//线程的任务函数
+void * readtask(void *args);
+void * writetask(void *args);
+  
+//声明epoll_event结构体的变量,ev用于注册事件,数组用于回传要处理的事件
+struct epoll_event ev,events[20];
+int epfd;
+pthread_mutex_t mutex;
+pthread_cond_t cond1;
+struct task *readhead=NULL,*readtail=NULL,*writehead=NULL;
+  
+static void setnonblocking(int sock)
+{
+	int opts;
+	opts=fcntl(sock,F_GETFL);
+	if(opts&lt;0){
+		perror("fcntl(sock,GETFL)");
+		return;
+	}
+	opts = opts|O_NONBLOCK;
+	if(fcntl(sock,F_SETFL,opts)&lt;0){
+		perror("fcntl(sock,SETFL,opts)");
+		return;
+	}
+}
+  
+int main()
+{
+	int i, maxi, listenfd, connfd, sockfd,nfds;
+	pthread_t tid1,tid2;
+
+	struct task *new_task=NULL;
+	//struct user_data *rdata=NULL;
+	socklen_t clilen;
+
+	pthread_mutex_init(&amp;mutex,NULL);
+	pthread_cond_init(&amp;cond1,NULL);
+	//初始化用于读线程池的线程
+	pthread_create(&amp;tid1,NULL,readtask,NULL);
+	pthread_create(&amp;tid2,NULL,readtask,NULL);
+
+	listenfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	
+	//生成用于处理accept的epoll专用的文件描述符
+	epfd=epoll_create(256);
+
+	struct sockaddr_in clientaddr;
+	struct sockaddr_in serveraddr;
+	//把socket设置为非阻塞方式
+
+	//setnonblocking(listenfd);
+	//设置与要处理的事件相关的文件描述符
+	ev.data.fd=listenfd;
+	//设置要处理的事件类型
+	ev.events=EPOLLIN|EPOLLET;
+	//注册epoll事件
+	epoll_ctl(epfd,EPOLL_CTL_ADD,listenfd,&amp;ev);
+
+	bzero(&amp;serveraddr, sizeof(serveraddr));
+	serveraddr.sin_family = AF_INET;
+	serveraddr.sin_port=htons(SERV_PORT);
+	serveraddr.sin_addr.s_addr = INADDR_ANY;
+	bind(listenfd,(struct sockaddr *)&amp;serveraddr, sizeof(serveraddr));
+	listen(listenfd, LISTENQ);
+
+	printf("server listenfd=%d n",listenfd);
+  //处理连接
+  //while(1)
+  sleep(1);
+    		
+	maxi = 0;
+	for ( ; ; ) {
+		//等待epoll事件的发生
+		nfds = epoll_wait(epfd,events,20,500);
+		
+		//printf("trigered event num=%d n",nfds);
+		//处理所发生的所有事件
+		for(i=0;i&lt;nfds;++i){
+			if(events[i].data.fd==listenfd){
+				connfd = accept(listenfd,(struct sockaddr *)&amp;clientaddr, &amp;clilen);
+				if(connfd&lt;0){
+	  			perror("connfd&lt;0");
+	  			return 0;
+				}
+				setnonblocking(connfd);
+				
+        printf("new connection connfd = %dn", connfd);
+	      printf("new client add success,%s:%dn",inet_ntoa(clientaddr.sin_addr),ntohs(clientaddr.sin_port));  
+ 
+				//设置用于读操作的文件描述符
+				ev.data.fd=connfd;
+				//设置用于注测的读操作事件
+				ev.events=EPOLLIN|EPOLLET;
+				//注册ev
+				epoll_ctl(epfd,EPOLL_CTL_ADD,connfd,&amp;ev);
+			}
+			else if(events[i].events&amp;EPOLLIN){
+				printf("reading event[%d].data.fd=%d/n",i,events[i].data.fd);
+				if((sockfd = events[i].data.fd) &lt; 0) 
+					continue;
+				new_task = malloc(sizeof(struct task));	
+				//new_task=new task();
+				new_task-&gt;fd=sockfd;
+				new_task-&gt;next=NULL;
+				//添加新的读任务
+				pthread_mutex_lock(&amp;mutex);
+				if(readhead==NULL){
+				  readhead=new_task;
+				  readtail=new_task;
+				}
+				else{
+				 	readtail-&gt;next=new_task;
+				  readtail=new_task;
+				}
+				//唤醒所有等待cond1条件的线程
+				pthread_cond_broadcast(&amp;cond1);
+				pthread_mutex_unlock(&amp;mutex);
+			}
+			else if(events[i].events&amp;EPOLLOUT){
+				printf("writing event[%d].data.fd=%d/n",i,events[i].data.fd);
+			/*
+			rdata=(struct user_data *)events[i].data.ptr;
+			sockfd = rdata-&gt;fd;
+			write(sockfd, rdata-&gt;line, rdata-&gt;n_size);
+			delete rdata;
+			//设置用于读操作的文件描述符
+			ev.data.fd=sockfd;
+			//设置用于注测的读操作事件
+			ev.events=EPOLLIN|EPOLLET;
+			//修改sockfd上要处理的事件为EPOLIN
+			epoll_ctl(epfd,EPOLL_CTL_MOD,sockfd,&amp;ev);
+			*/
+			}          
+		}
+	}
+}
+
+static int count111 = 0;
+static time_t oldtime = 0, nowtime = 0;
+void * readtask(void *args)
+{
+	int fd=-1;
+	unsigned int n = 0;
+	//用于把读出来的数据传递出去
+	struct user_data *data = NULL;
+	while(1){
+		pthread_mutex_lock(&amp;mutex);
+		//等待到任务队列不为空
+
+		while(readhead==NULL)
+			pthread_cond_wait(&amp;cond1,&amp;mutex);
+
+		fd=readhead-&gt;fd;
+		//从任务队列取出一个读任务
+		struct task *tmp=readhead;
+		readhead = readhead-&gt;next;
+		//delete tmp;
+		free(tmp);
+		tmp = NULL;
+		pthread_mutex_unlock(&amp;mutex);
+		//data = new user_data();
+		data = malloc(sizeof(struct user_data));
+		data-&gt;fd=fd;
+
+		char recvBuf[1024] = {0};
+		int ret = 999;
+		int rs = 1;
+
+		while(rs){
+			ret = recv(fd,recvBuf,1024,0);// 接受客户端消息
+
+			if(ret &lt; 0){
+				//由于是非阻塞的模式,所以当errno为EAGAIN时,表示当前缓冲区已无数据可//读在这里就当作是该次事件已处理过。
+				if(errno == EAGAIN){
+					printf("EAGAINn");
+					break;
+				}
+				else{
+					printf("recv error!n");
+					close(fd);
+					break;
+				}
+			}
+			else if(ret == 0){
+				// 这里表示对端的socket已正常关闭.
+				rs = 0;
+			}
+			if(ret == sizeof(recvBuf))
+				rs = 1; // 需要再次读取
+			else
+				rs = 0;
+		}
+		if(ret&gt;0){
+			//-------------------------------------------------------------------------------
+			data-&gt;n_size=n;
+			count111 ++;
+			struct tm *today;
+			time_t ltime;
+			time( &amp;nowtime );
+
+			if(nowtime != oldtime){
+				printf("%dn", count111);
+				oldtime = nowtime;
+				count111 = 0;
+			}
+
+			char buf[1000] = {0};
+			sprintf(buf,"HTTP/1.0 200 OKrnContent-type: text/plainrnrn%s","Hello world!n");
+			send(fd,buf,strlen(buf),0);
+			//close(fd);
+		}
+	}
+}</code></pre> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

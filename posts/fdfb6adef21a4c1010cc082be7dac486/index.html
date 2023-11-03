@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>分布式架构 - ID 生成器 hash 算法 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">分布式架构 - ID 生成器 hash 算法</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p>在日常开发中，如果我们在设计数据库表的时候要考虑到如下内容</p> 
+<blockquote> 
+ <p>1、索引列和常用的字段尽量放置在一张表上<br> 2、不常用的字段可以作为扩展字段放置在扩展表上<br> 3、索引的优化<br> 4、分库分表的实现<br> 5、查询的优化</p> 
+</blockquote> 
+<p>那么本章我们以用户表为例，说明一个上亿级别的用户量，如何进行拆分？如何进行查询优化？</p> 
+<p>user 表</p> 
+<pre><code>#表结构
+CREATE TABLE `users2` (
+  `id` bigint(30) unsigned NOT NULL AUTO_INCREMENT,
+  `member_id` char(21) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '用户id',
+  `username` varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '用户名',
+  `password` varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '密码',
+  `nickname` varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '昵称',
+  `email` varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `id_card` timestamp NULL DEFAULT NULL COMMENT '身份证',
+  `address` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL  COMMENT '地址',
+  `versionId` int(11) NOT NULL COMMENT '版本号',
+  `deleted_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`,`member_id`) USING BTREE,
+  UNIQUE KEY `users_email_unique` (`email`)
+) ENGINE=InnoDB AUTO_INCREMENT=867051400 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+</code></pre> 
+<p>如上，我们看见一个表的结构。首先我们可以对这张表进行优化。</p> 
+<h2>
+<a id="_32"></a>拆表（纵向）</h2> 
+<p>不常用的字段（id_card,address,email）字段，我们完全可以单独放一张表来存储这些字段，并建立关联关系（通过user表id建立关系），在使用的时候，我们才从这张表中获取数据，姑且就叫users2_ext吧<br> ，好处：mysql 单行数据体积减少，mysql 以row为单位，将数据load到内存buffer中，单位行越小，存储的数据越多，命中率越高。</p> 
+<h2>
+<a id="_38"></a>水平拆分（横向）</h2> 
+<p>水平拆分，我个人建议不仅分表同时也分库，这样可以使得，多张用户表可以位于不同的数据库上，因在不同的数据库上，后期也可以转到不同的物理机上，给单台服务器数据库减压。然后，水平拆分会带来一系列问题。</p> 
+<h2>
+<a id="____Id_range__41"></a>水平拆分 - 分表 - 通过Id range 区分</h2> 
+<p>这种模式下，我们可以通过用户ID区间值来查询用户属于哪个分区，哪个数据库。（因拆分完后，数据新增在新的表上，老数据表仅做更新、查询、删除操作，此时的ID因没有新增将会是一个固定区间值，我们在设计新表的作为插入数据表时，要设置要auto_increment的起始值，不要和老数据表ID冲突）。</p> 
+<p>如 users1 =&gt; id (0,10000000)<br> users2=&gt; id(10000000,~~)</p> 
+<p>假如我们要查询的ID为888888的用户，那么我们仅需要知道这个ID属于哪个区间，我们就去对应的数据表查询就可以了。 这种实现比较简单。</p> 
+<p>如果你是采用的第三方数据库，如阿里云的RDS 那么底层采用的是双机热备。（库1以0为开头，以2为自增键，库2以1为开头，以2为自增键，通过id%2==0 判断去库1查询还是库2查询，如果做了读写分离，那么就回去读库查询，而主从有延迟，如果一个新增的数据立刻执行了查询，那么走的是主库查询，相关算法参看官网文档）</p> 
+<h2>
+<a id="____hash__51"></a>水平拆分 - 分表 - hash 分表</h2> 
+<p>hash分表我们要知道，hash在什么情况使用？是用来做什么的？业务场景如何？<br> 业务场景：用户登录、注册 都有使用到username 这个字段，也就是说，我这张表用的最频繁的字段也是username以及id。那么hash 算法就是区解释 username 与 目标模型表之间的关系的<br> 假设hash算法如下</p> 
+<pre><code>//username 以a-z开头  或是A-Z开头的都映射到表users1 
+hash	=&gt;	[a-zA-Z]s	=&gt;	user1
+
+//username 以0-9开头的都映射到users2表
+hash	=&gt;	[0-9]				=&gt;	users2
+</code></pre> 
+<p>那么我们在进行查询的时候，我们就可以用username 用过hash算法直接找到目标数据表，并进行查询操作。</p> 
+<h2>
+<a id="__Hash_66"></a>代码示例 - Hash</h2> 
+<p>我以准备好示例，依赖laravel框架。需要的同学可以参考下</p> 
+<p>id采用uuid，并且不是在需要的时候才生成，而是根据一定算法，一次生成n个id存入redis队列当中，当需要数据表id时，再从redis中消费id，如果id不存在则会触发事件，该事件将会检查队列，并将id生成出来插入redis指定队列中，这里采用的redis队列为hash队列，因为hash队列采用hash算法，查询的时间复杂度为O(1)</p> 
+<p>UserIdGenerateInterface.php （模型生成器接口）</p> 
+<pre><code>&lt;?php
+
+
+namespace AppServicesUser;
+
+/**
+ * @copyright Copyright&amp;copy;2022,
+ * Notes:用户id生成器
+ * History：文件历史
+ * tanyong 2022/7/11
+ */
+interface UserIdGenerateInterface
+{
+    /**
+     * Notes:获得有效id
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $username 用户名
+     * @return array[
+     *      'model' =&gt;  '模型',
+     *      'id'    =&gt;  '匹配id'
+     * ]
+     */
+    public function getId(string $username);
+
+    /**
+     * Notes:生成指定模型有效id
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $model 指定模型
+     * @param int $length 一次性生成长度
+     * @return array $ids
+     */
+    public function generateIds(string $model,int $length = 1);
+
+    /**
+     * Notes:获取指定模型queue长度
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $model 指定模型
+     * @return int $queueLength 队列长度
+     */
+    public function getModelQueueLength(string $model);
+
+    /**
+     * Notes:向指定模型的队列添加id
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $model 是否生成成功
+     * @param string $id id
+     * @return boolean 是否添加成功
+     */
+    public function addModelQueueId(string $model,string ... $ids);
+
+    /**
+     * Notes:从队列中返回一个有效id
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @param string $queueName 队列名名称
+     * @return int $id
+     */
+    public function popQueueId(string $queueName);
+
+    /**
+     * Notes:向队列中添加一个id
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @param string $queueName 队列名称
+     * @param int $ids 用户id
+     * @return boolean 是否添加成功
+     */
+    public function pushQueueId(string $queueName,string ... $ids);
+
+    /**
+     * Notes:清楚缓存clearId
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @return boolean
+     */
+    public function clearQueueId();
+
+    /**
+     * Notes:获得模型对应队列名称
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $model 模型名称
+     * @return string 队列名称
+     */
+    public function getModelRelationQueueName(string $model);
+
+    /**
+     * Notes:获取关联模型 (hash 算法)
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $username 用户名
+     * @return array $models 关联模型
+     */
+    public function hashRelationModel(string $username);
+
+    /**
+     * Notes:获得所有关联模型
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @return mixed
+     */
+    public function getModels();
+
+    /**
+     * Notes:获得队列最大长度
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @return mixed
+     */
+    public function getMaxQueueLength();
+
+    /**
+     * Notes:获得指定模型的库存ids
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @param string $model
+     * @return array $list
+     */
+    public function getQueueList(string $model);
+
+    /**
+     * Notes:获取模型
+     * Author:tanyong
+     * DateTime:2022/7/18
+     * @param string $model 模型
+     * @return array 模型信息
+     */
+    public function getModelInfo(string $model);
+}
+</code></pre> 
+<p>Id 生成器实现</p> 
+<pre><code>&lt;?php
+/**
+ * @copyright Copyright&amp;copy;2022
+ * Notes:描述该文件的用途
+ * History：文件历史
+ * tanyong 2022/7/11
+ */
+
+namespace AppServicesUser;
+
+use AppComponentsUtilStringUtil;
+use AppEventsRegisterUserNotGetIdEvent;
+use IlluminateSupportFacadesRedis;
+
+class UserIdGenerate implements UserIdGenerateInterface
+{
+    public $redis;
+
+	//一次性生成100个id
+    public $maxLength = 100;
+	
+	//模型组
+    public $models = [];
+
+    public function __construct()
+    {
+        $this-&gt;redis = Redis::connection()-&gt;client();
+
+        $this-&gt;models = require("userGenerateConfig.php");
+    }
+
+    public function getId(string $username)
+    {
+        $models = $this-&gt;hashRelationModel($username);
+
+        $randModel = $models[array_rand($models)];
+
+        $queueName = $this-&gt;getModelRelationQueueName($randModel);
+
+        $id = $this-&gt;popQueueId($queueName);
+
+        if(empty($id))
+        {
+            //触发id生成
+            $event = new RegisterUserNotGetIdEvent($this-&gt;getMaxQueueLength());
+            event($event);
+
+            return $this-&gt;getId($username);
+        }
+
+        return [
+            'model' =&gt;  $randModel,
+            'id'    =&gt;  $id
+        ];
+    }
+
+    public function generateIds(string $model,int $length = 1)
+    {
+        $ids = [];
+        for($i=1;$i&lt;=$length;$i++)
+            $ids[] = $this-&gt;create_uuid($this-&gt;getModelInfo($model)['idPrefix']);
+        return $ids;
+    }
+	
+	//uuid生成
+    private function create_uuid($prefix = ""){
+        return $prefix . StringUtil::randStr(6) . uniqid();
+    }
+
+    public function addModelQueueId(string $model, string ... $ids)
+    {
+        return $this-&gt;pushQueueId($this-&gt;getModelRelationQueueName($model), ... $ids);
+    }
+
+    public function popQueueId(string $queueName)
+    {
+        return $this-&gt;redis-&gt;sPop($queueName);
+    }
+
+    public function pushQueueId(string $queueName, string ... $ids)
+    {
+        return $this-&gt;redis-&gt;sAdd($queueName,... $ids);
+    }
+
+    public function getQueueList(string $model)
+    {
+        $queueName = $this-&gt;getModelRelationQueueName($model);
+
+        return $this-&gt;redis-&gt;sMembers($queueName);
+    }
+
+    public function getModelInfo(string $model)
+    {
+        return $this-&gt;getModels()[$model] ?? null;
+    }
+
+    public function getModelQueueLength(string $model)
+    {
+        return $this-&gt;redis-&gt;sCard($this-&gt;getModelRelationQueueName($model));
+    }
+
+    public function clearQueueId()
+    {
+
+        $models = $this-&gt;getModels();
+
+        foreach($models as $model)
+        {
+            $this-&gt;redis-&gt;del($this-&gt;getModelRelationQueueName($model));
+        }
+
+        return true;
+    }
+
+    public function getModelRelationQueueName(string $model)
+    {
+        return 'table_' . (new $model())-&gt;getTable() . "_ids";
+    }
+
+    public function hashRelationModel(string $username)
+    {
+        $start = substr($username,0,1);
+
+        $targetModels = [];
+
+        foreach($this-&gt;getModels() as $k=&gt;$modelInfo)
+        {
+            if(is_string($modelInfo['regular']))
+            {
+                if(preg_match($modelInfo['regular'],$start))
+                {
+                    $targetModels[] = $k;
+                }
+            }else if(is_callable($modelInfo['regular']))
+            {
+                $result = call_user_func($modelInfo['regular'],$k,$start);
+
+                if($result !== false)
+                    $targetModels[] = $result;
+            }
+        }
+
+        return $targetModels;
+    }
+
+    public function getModels()
+    {
+        return $this-&gt;models;
+    }
+
+    public function getMaxQueueLength()
+    {
+        return $this-&gt;maxLength;
+    }
+}
+
+</code></pre> 
+<p>面模型配置</p> 
+<pre><code>&lt;?php
+
+use AppModelsUsers;
+use AppModelsUsers1;
+
+return [
+    Users::class    =&gt;  [
+        "regular"   =&gt;   "/^[a-zA-Zs]+$/",
+        "idPrefix"  =&gt;   "a"
+    ],
+    Users1::class   =&gt;  [
+        "regular"   =&gt;  "/^[0-9d]+$/",
+        "idPrefix"  =&gt;  1
+    ],
+    AppModelsUsers2::class    =&gt;  [
+        "regular"   =&gt;  function($k,$value){
+            if(in_array($value,['a','b','c','d','e']))
+                return $k;
+
+            return false;
+        },
+        'idPrefix'  =&gt;  "b"
+    ]
+];
+
+</code></pre> 
+<p>事件 及 触发器<br> 用于当从redis队列中获取不到member_id时，将触发事件，重新生成指定（目前设置的是100个）个数的id</p> 
+<p>event</p> 
+<pre><code>&lt;?php
+
+namespace AppEvents;
+
+use IlluminateBroadcastingChannel;
+use IlluminateBroadcastingInteractsWithSockets;
+use IlluminateBroadcastingPresenceChannel;
+use IlluminateBroadcastingPrivateChannel;
+use IlluminateContractsBroadcastingShouldBroadcast;
+use IlluminateFoundationEventsDispatchable;
+use IlluminateQueueSerializesModels;
+
+class RegisterUserNotGetIdEvent
+{
+    /**
+     * Create a new event instance.
+     *
+     * @return void
+     */
+    public function __construct(
+        public int $length
+    )
+    {}
+
+    /**
+     * Get the channels the event should broadcast on.
+     *
+     * @return IlluminateBroadcastingChannel|array
+     */
+//    public function broadcastOn()
+//    {
+//        return new PrivateChannel('channel-name');
+//    }
+}
+
+</code></pre> 
+<p>listener</p> 
+<pre><code>&lt;?php
+
+namespace AppListeners;
+
+use AppEventsRegisterUserNotGetIdEvent;
+use AppServicesUserUserIdGenerateInterface;
+use IlluminateContractsQueueShouldQueue;
+use IlluminateQueueInteractsWithQueue;
+
+class RegisterUserIdListener
+{
+    /**
+     * Create the event listener.
+     *
+     * @return void
+     */
+    public function __construct()
+    {
+        //
+    }
+
+    /**
+     * Handle the event.
+     *
+     * @param  RegisterUserNotGetIdEvent  $event
+     * @return void
+     */
+    public function handle(RegisterUserNotGetIdEvent $event)
+    {
+        /**
+         * id 生成器
+         * @var UserIdGenerateInterface $idGenerate
+         */
+        $idGenerate = app()-&gt;get(UserIdGenerateInterface::class);
+
+        $models = $idGenerate-&gt;getModels();
+
+        $limitLength = $event-&gt;length;
+
+        foreach($models as $k=&gt;$model)
+        {
+            $modelLength = $idGenerate-&gt;getModelQueueLength($k);
+
+            if($limitLength &gt; $modelLength)
+            {
+                $secLength = $limitLength - $modelLength;
+                $ids = $idGenerate-&gt;generateIds($k,$secLength);
+                if(!empty($ids))
+                {
+                    foreach($ids as $id)
+                    {
+                        $idGenerate-&gt;addModelQueueId($k,$id);
+                    }
+                }
+            }
+        }
+    }
+}
+
+</code></pre> 
+<p>用户服务</p> 
+<pre><code>&lt;?php
+/**
+ * @copyright Copyright&amp;copy;2022,
+ * Notes:描述该文件的用途
+ * History：文件历史
+ * tanyong 2022/7/11
+ */
+
+namespace AppServicesUser;
+
+use AppModelsUsers;
+
+interface UserServiceInterface
+{
+    /**
+     * Notes:获取用户信息
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $username 用户名
+     * @return Users | null 用户信息
+     */
+    public function getUsernameInfo(string $username);
+
+    /**
+     * Notes:获取用户信息
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param int $id 用户id
+     * @param string|null $targetModel 指定模型
+     * @return Users | null 用户信息
+     */
+    public function get(int $id,string $targetModel=null);
+
+    /**
+     * Notes:用户注册
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param array $data
+     * @return Users | null 用户信息
+     */
+    public function registerUser(array $data);
+
+    /**
+     * Notes:用户信息更新
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $username 用户名
+     * @param array $data 要更新的数据
+     * @return boolean 是否更新成功
+     */
+    public function update(string $username,array $data);
+
+    /**
+     * Notes:用户更新
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param Users $user 用户对象
+     * @return boolean 是否更新成功
+     */
+    public function updateObj(Users $user);
+
+    /**
+     * Notes:获得模型最大id
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @param string $model 模型
+     * @return int $id
+     */
+    public function getUserModelMaxId(string $model);
+
+    /**
+     * Notes:根据邮箱获取用户信息
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @param string $email 邮箱地址
+     * @return Users
+     */
+    public function getEmailInfo(string $email);
+}
+
+</code></pre> 
+<p>用户实现<br> 工厂设计模式：这里关于用户表CURD操作，都交由用户工厂去操作，服务本身不做具体实现。用户工厂的一些查询算法，本身会依据hash算法</p> 
+<pre><code>&lt;?php
+/**
+ * @copyright Copyright&amp;copy;2022
+ * Notes:描述该文件的用途
+ * History：文件历史
+ * tanyong 2022/7/11
+ */
+
+namespace AppServicesUser;
+
+use AppExceptionsAppException;
+use AppExceptionsCodes;
+use AppFactorySuperFactoryInterface;
+use AppFactoryUserModelFactoryInterface;
+use AppModelsUsers;
+
+class UserService implements UserServiceInterface
+{
+    /**
+     * 用户工厂
+     * @var UserModelFactoryInterface|AppFactoryModelFactoryInterface $userFactory
+     */
+    public UserModelFactoryInterface $userFactory;
+
+    public function __construct(SuperFactoryInterface $superFactory)
+    {
+    	//从超级工厂中获取出用户工厂的实例
+        $this-&gt;userFactory = $superFactory-&gt;getModelFactory('user');
+    }
+
+    public function getUsernameInfo(string $username)
+    {
+        return $this-&gt;userFactory-&gt;getUsernameInfo($username);
+    }
+
+    public function get(int $id,string $targetModel=null)
+    {
+        return $this-&gt;userFactory-&gt;get($id,$targetModel);
+    }
+
+    public function registerUser(array $data)
+    {
+        return $this-&gt;userFactory-&gt;registerUser($data);
+    }
+
+    public function update(string $username, array $data)
+    {
+        return $this-&gt;userFactory-&gt;update($username,$data);
+    }
+
+    public function updateObj(Users $user)
+    {
+        return $this-&gt;userFactory-&gt;updateObj($user);
+    }
+
+    public function getUserModelMaxId(string $model)
+    {
+        return $this-&gt;userFactory-&gt;getUserModelMaxId($model);
+    }
+
+    public function getEmailInfo(string $email)
+    {
+        return $this-&gt;userFactory-&gt;getEmailInfo($email);
+    }
+}
+
+</code></pre> 
+<p>用户工厂</p> 
+<pre><code>&lt;?php
+
+
+namespace AppFactory;
+
+use AppModelsUsers;
+
+/**
+ * @copyright Copyright&amp;copy;2022
+ * Notes:用户工厂
+ * History：文件历史
+ * tanyong 2022/7/15
+ */
+interface UserModelFactoryInterface extends ModelFactoryInterface
+{
+    /**
+     * Notes:获取用户信息
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $username 用户名
+     * @return Users | null 用户信息
+     */
+    public function getUsernameInfo(string $username);
+
+    /**
+     * Notes:获取用户信息
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param int $id 用户id
+     * @param string|null $targetModel 指定模型
+     * @return Users | null 用户信息
+     */
+    public function get(int $id,string $targetModel=null);
+
+    /**
+     * Notes:用户注册
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param array $data
+     * @return Users | null 用户信息
+     */
+    public function registerUser(array $data);
+
+    /**
+     * Notes:用户信息更新
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param string $username 用户名
+     * @param array $data 要更新的数据
+     * @return boolean 是否更新成功
+     */
+    public function update(string $username,array $data);
+
+    /**
+     * Notes:用户更新
+     * Author:tanyong
+     * DateTime:2022/7/11
+     * @param Users $user 用户对象
+     * @return boolean 是否更新成功
+     */
+    public function updateObj(Users $user);
+
+    /**
+     * Notes:获得模型最大id
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @param string $model 模型
+     * @return int $id
+     */
+    public function getUserModelMaxId(string $model);
+
+    /**
+     * Notes:根据邮箱获取用户信息
+     * Author:tanyong
+     * DateTime:2022/7/12
+     * @param string $email 邮箱地址
+     * @return Users
+     */
+    public function getEmailInfo(string $email);
+}
+
+</code></pre> 
+<pre><code>&lt;?php
+/**
+ * @copyright Copyright&amp;copy;2022
+ * Notes:描述该文件的用途
+ * History：文件历史
+ * tanyong 2022/7/15
+ */
+
+namespace AppFactory;
+
+use AppExceptionsAppException;
+use AppExceptionsCodes;
+use AppModelsUsers;
+use AppServicesUserUserIdGenerateInterface;
+
+class UserFactory implements UserModelFactoryInterface
+{
+    public UserIdGenerateInterface $idGenerateService;
+
+    public function __construct()
+    {
+        $this-&gt;idGenerateService = app()-&gt;get(UserIdGenerateInterface::class);
+    }
+
+    public function getUsernameInfo(string $username)
+    {
+        $models = $this-&gt;idGenerateService-&gt;hashRelationModel($username);
+
+        foreach($models as $model)
+        {
+            $user = $model::query()-&gt;where('username',$username)-&gt;first();
+            if(!empty($user))
+                return $user;
+        }
+
+        return null;
+    }
+
+    public function get(int $id, string $targetModel = null)
+    {
+        if(empty($model))
+        {
+            foreach($this-&gt;idGenerateService-&gt;getModels() as $model)
+            {
+                $user = $model::query()-&gt;where('id',$id)-&gt;first();
+                if(!empty($user))
+                    return $user;
+            }
+        }else{
+            return $targetModel::query()-&gt;where('id',$id)-&gt;first();
+        }
+
+        return null;
+    }
+
+    public function registerUser(array $data)
+    {
+        if(!isset($data['username']) || empty($data['username']))
+            throw new AppException('not get username',Codes::BUSINESS_ERROR);
+
+        $relation = $this-&gt;idGenerateService-&gt;getId($data['username']);
+        if(empty($relation))
+            throw new AppException('not get relation username:' . $data['username'],Codes::BUSINESS_ERROR);
+
+        $data = array_merge($data,[
+            'member_id'    =&gt;  $relation['id']
+        ]);
+
+        return $relation['model']::create($data);
+    }
+
+    public function update(string $username, array $data)
+    {
+        $user = $this-&gt;getUsernameInfo($username);
+
+        foreach ($data as $k=&gt;$v)
+            $user-&gt;{$k} = $v;
+
+        return $this-&gt;updateObj($user);
+    }
+
+    public function updateObj(Users $user)
+    {
+        return $user-&gt;save();
+    }
+
+    public function getUserModelMaxId(string $model)
+    {
+        $id = $model::query()-&gt;max('id');
+
+        return $id ?? 0;
+    }
+
+    public function getEmailInfo(string $email)
+    {
+        foreach($this-&gt;idGenerateService-&gt;getModels() as $model)
+        {
+            $user = $model::query()-&gt;where('email',$email)-&gt;first();
+            if(!empty($user))
+                return $user;
+        }
+
+        return null;
+    }
+}
+
+</code></pre> 
+<h2>
+<a id="ID_857"></a>ID雪花算法</h2> 
+<p>现在的服务基本是分布式、微服务形式的，而且大数据量也导致分库分表的产生，对于水平分表就需要保证表中 id 的全局唯一性。</p> 
+<p>对于 MySQL 而言，一个表中的主键 id 一般使用自增的方式，但是如果进行水平分表之后，多个表中会生成重复的 id 值。那么如何保证水平分表后的多张表中的 id 是全局唯一性的呢？</p> 
+<p>如果还是借助数据库主键自增的形式，那么可以让不同表初始化一个不同的初始值，然后按指定的步长进行自增。例如有3张拆分表，初始主键值为1，2，3，自增步长为3。</p> 
+<p>当然也有人使用 UUID 来作为主键，但是 UUID 生成的是一个无序的字符串，对于 MySQL 推荐使用增长的数值类型值作为主键来说不适合。</p> 
+<p>也可以使用 Redis 的自增原子性来生成唯一 id，但是这种方式业内比较少用。</p> 
+<p>当然还有其他解决方案，不同互联网公司也有自己内部的实现方案。雪花算法是其中一个用于解决分布式 id 的高效方案，也是许多互联网公司在推荐使用的。</p> 
+<p>PHP扩展 - 雪花算法<br> <a href="https://github.com/godruoyi/php-snowflake">https://github.com/godruoyi/php-snowflake</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【数据库迁移系列】使用pgloader将数据从MySQL迁移到openGauss的最佳实践 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【数据库迁移系列】使用pgloader将数据从MySQL迁移到openGauss的最佳实践</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    
+                        
+                    
+                    <p>数据库迁移是实际工作中经常遇到的问题，比如由于磁盘空间、业务性能、项目改造等等原因，有从甲服务器迁移到乙服务器，从A种数据库迁移到B种数据库，从源路径迁移到另一个目标路径、同一个机器下从一个用户迁移到另一个用户等各种场景，有时需要整个数据库所有文件都迁移，有时只需要迁移部分数据文件如REDO、表空间文件等。<br> </p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul>
+<li><a href="#_3">一、概述</a></li>
+<li><a href="#_12">二、迁移前准备：</a></li>
+<li>
+<ul>
+<li><a href="#pgloader_13">下载pgloader</a></li>
+<li><a href="#openGauss_25">修改openGauss加密方式（重要）</a></li>
+<li><a href="#openGauss_42">openGauss设置监听</a></li>
+<li><a href="#_57">测试用户和数据</a></li>
+</ul> 
+  </li>
+<li><a href="#_102">三、配置文件</a></li>
+<li><a href="#_135">四、执行迁移</a></li>
+<li><a href="#_163">五、结果验证</a></li>
+</ul> 
+</div> 
+<p></p> 
+<h2>
+<a id="_3"></a>一、概述</h2> 
+<p>云原生数据库openGauss也支持若干数据库迁移工具，其中的pgloader是一个数据导入工具，使用COPY命令将数据导入到PostgreSQL。pgloader有两种工作模式，一种是从文件导入，一种是迁移数据库。pgloader在两种情况下都使用PostgreSQL的COPY协议高效的传输数据。<br> openGauss兼容PostgreSQL的通信协议以及绝大部分语法，本文就介绍如何使用pgloader将MySQL数据库迁移至openGauss。<br> <img src="https://images2.imgbox.com/47/9c/LBlTHEag_o.png" alt="在这里插入图片描述"></p> 
+<p>整个过程可以基本分为四步：<br> 迁移前准备 &gt; 相关文件配置 &gt; 执行迁移 &gt; 结果验证</p> 
+<h2>
+<a id="_12"></a>二、迁移前准备：</h2> 
+<h3>
+<a id="pgloader_13"></a>下载pgloader</h3> 
+<p>除了 源数据库<code>MySQL </code>和目标数据库<code>openGauss</code>，它们之间需要网络互通外。还需要关键工具pgloader。因为某些网络原因，我这里使用的是docker 版本的pgloader 下载，安装在目标库所在服务器上。<br> 默认pull最新版本。</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@pekphisprb70593 software<span class="token punctuation">]</span><span class="token comment"># docker pull dimitri/pgloader</span>
+<span class="token punctuation">[</span>root@pekphisprb70593 software<span class="token punctuation">]</span><span class="token comment"># docker run --rm --name pgloader dimitri/pgloader:latest pgloader --version</span>
+pgloader version <span class="token string">"3.6.7~devel"</span>
+compiled with SBCL <span class="token number">2.1</span>.1.debian
+</code></pre> 
+<p>需要注意的是，它只是命令行工具，所以一旦执行完毕会自动退出。故每次都需要“docker run --rm --name pgloader dimitri/pgloader:latest pgloader + 具体操作”的命令。</p> 
+<h3>
+<a id="openGauss_25"></a>修改openGauss加密方式（重要）</h3> 
+<p>用户密码存储在系统表pg_authid中，为防止用户密码泄露，openGauss对用户密码进行加密存储，所采用的加密算法由配置参数password_encryption_type决定。</p> 
+<ul>
+<li>当参数password_encryption_type设置为0时，表示采用md5方式对密码加密。</li>
+<li>当参数password_encryption_type设置为1时，表示采用sha256和md5方式对密码加密。</li>
+<li>当参数password_encryption_type设置为2时，表示采用sha256方式对密码加密，为默认配置。<br> <img src="https://images2.imgbox.com/6a/2b/ZVPMrtly_o.png" alt="在这里插入图片描述">
+</li>
+</ul> 
+<p>由于MD5加密算法安全性低，存在安全风险，不建议使用。openGauss 对原生PostgreSQL的通信协议进行了安全加固，这导致与PostgreSQL的默认通信协议互相不兼容了，因此，使用pgloader的PostgreSQL原生版本默认是不能连接openGauss的。会报类似下述错误：<br> <img src="https://images2.imgbox.com/ba/05/47RKsyQ0_o.png" alt="在这里插入图片描述"></p> 
+<p>通过修改该GUC参数修改数据库加密算法，执行如下命令将参数修改为1 ，同时支持md5 和sha256</p> 
+<pre><code class="prism language-bash">gs_guc reload -N all -I all -c <span class="token string">"password_encryption_type=1"</span>
+</code></pre> 
+<p>一定要在设置完上述参数后，再新建用户。</p> 
+<h3>
+<a id="openGauss_42"></a>openGauss设置监听</h3> 
+<p>若不设置，可能会像我一样遇到“Failed to connect to pgsql at “xxx” (port 15400) as user “opengauss_test”: Database error 28000: no pg_hba.conf entry for host “172.17.0.2”.”<br> <img src="https://images2.imgbox.com/e4/43/B2n290SK_o.png" alt="在这里插入图片描述"><br> 设置方法：</p> 
+<pre><code class="prism language-bash"><span class="token builtin class-name">cd</span> /opt/huawei/install/data/dn/
+<span class="token function">vi</span> pg_hba.conf
+在IPv4中新增一行
+<span class="token function">host</span>    all    all     <span class="token number">0.0</span>.0.0/0                      md5
+然后重启数据库
+<span class="token punctuation">[</span>omm@pekphisprb70593 dn<span class="token punctuation">]</span>$ gs_om -t stop
+<span class="token punctuation">[</span>omm@pekphisprb70593 dn<span class="token punctuation">]</span>$ gs_om -t start
+</code></pre> 
+<p><img src="https://images2.imgbox.com/87/db/8mtkeJmb_o.png" alt="在这里插入图片描述"></p> 
+<h3>
+<a id="_57"></a>测试用户和数据</h3> 
+<p>这一步是可选的，包括源库的数据库、用户和原始数据，目标库的数据库和用户。如果都已经有了则直接跳过看下一步，缺啥补啥。<br> 创建目标库openGauss的用户及database.</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>omm@pekphisprb70593 ~<span class="token punctuation">]</span>$ gsql -d postgres -p <span class="token number">15400</span> 
+<span class="token assign-left variable">openGauss</span><span class="token operator">=</span><span class="token comment"># CREATE USER opengauss_test identified by 'Gauss_234'; </span>
+<span class="token assign-left variable">openGauss</span><span class="token operator">=</span><span class="token comment"># GRANT ALL PRIVILEGES TO opengauss_test; </span>
+<span class="token assign-left variable">openGauss</span><span class="token operator">=</span><span class="token comment"># CREATE DATABASE opengauss_db with owner opengauss_test ENCODING 'utf8' template = template0;  </span>
+</code></pre> 
+<p>新建了一个空表test2。</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>omm@pekphisprb70593 dn<span class="token punctuation">]</span>$ gsql -d opengauss_db -p <span class="token number">15400</span>
+<span class="token assign-left variable">opengauss_db</span><span class="token operator">=</span><span class="token comment"># create table if not exists test2(id integer);</span>
+CREATE TABLE
+</code></pre> 
+<p>创建源数据库和用户，刷新系统授权表。</p> 
+<pre><code class="prism language-bash">CREATE DATABASE IF NOT EXISTS mysql_db1 default charset utf8<span class="token punctuation">;</span>
+CREATE <span class="token environment constant">USER</span> mysql_t1 identified by <span class="token string">'Mysql_234'</span> <span class="token punctuation">;</span>
+GRANT ALL PRIVILEGES ON *.* TO <span class="token string">'mysql_t1'</span> WITH GRANT OPTION<span class="token punctuation">;</span>
+FLUSH PRIVILEGES<span class="token punctuation">;</span>
+</code></pre> 
+<p>构造数据</p> 
+<pre><code class="prism language-bash">mysql@siaphisprk01345:~<span class="token operator">&gt;</span> mysql -u mysql_t1 -p
+mysql<span class="token operator">&gt;</span> use mysql_db1<span class="token punctuation">;</span>
+create table <span class="token keyword">if</span> not exists test1 <span class="token punctuation">(</span>id int<span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span>,name char<span class="token punctuation">(</span><span class="token number">20</span><span class="token punctuation">)</span>,salary float,time datetime<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">)</span>,addr varchar<span class="token punctuation">(</span><span class="token number">200</span><span class="token punctuation">)</span>,primary key<span class="token punctuation">(</span>id<span class="token punctuation">))</span> <span class="token punctuation">;</span>
+insert into test1 values <span class="token punctuation">(</span><span class="token number">1</span>,<span class="token string">'zhangsan'</span>,2000.00,<span class="token string">'2018-06-01 00:00:00'</span>,<span class="token string">'beijing'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+insert into test1 values <span class="token punctuation">(</span><span class="token number">2</span>,<span class="token string">'李四'</span>,2000.89,<span class="token string">'2018-06-01 00:00:00'</span>,<span class="token string">'西安'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+insert into test1 values <span class="token punctuation">(</span><span class="token number">3</span>,<span class="token string">'Bob'</span>,2000,<span class="token string">'2018-06-02 00:00:00'</span>,<span class="token string">'南京'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">#创建了一个和目标数据库表结构不同的test2。</span>
+create table <span class="token keyword">if</span> not exists test2<span class="token punctuation">(</span>id int<span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span>,name varchar<span class="token punctuation">(</span><span class="token number">20</span><span class="token punctuation">))</span><span class="token punctuation">;</span>
+insert into test2 values <span class="token punctuation">(</span><span class="token number">1234567</span>,<span class="token string">'Kevin'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">#创建空表test3。</span>
+create table <span class="token keyword">if</span> not exists test3<span class="token punctuation">(</span>id int<span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">))</span><span class="token punctuation">;</span>
+</code></pre> 
+<h2>
+<a id="_102"></a>三、配置文件</h2> 
+<p>pgloader提供丰富的配置项，我们可以自由定义迁移时的各类动作，如通过include drop，删除目标数据库中名称出现在MySQL数据库中的所有表，以允许连续多次使用同一命令，从干净的环境自动启动。<br> 在pgloader所在服务器任意路径下创建一个配置文件，文件可以命名为opengauss.loader。下面是一个配置文件示例，里面的值需要修改为自己环境的实际值。</p> 
+<pre><code class="prism language-bash">LOAD DATABASE 
+  
+FROM mysql://mysql_t1:Mysql_234@1.1.1.1:3306/mysql_db1 
+  
+INTO postgresql://opengauss_test:Gauss_234@2.2.2.2:15400/opengauss_db 
+  
+WITH include drop, create tables, create indexes, reset no sequences, 
+  
+workers <span class="token operator">=</span> <span class="token number">8</span>, concurrency <span class="token operator">=</span> <span class="token number">1</span>, 
+  
+multiple readers per thread, rows per range <span class="token operator">=</span> <span class="token number">50000</span> 
+  
+CAST 
+  
+<span class="token builtin class-name">type</span> varchar when<span class="token punctuation">(</span><span class="token operator">=</span> <span class="token number">1</span> precision<span class="token punctuation">)</span> to <span class="token string">"boolean"</span> drop typemod keep default keep not null<span class="token punctuation">;</span>
+</code></pre> 
+<p>几个配置项简单介绍下：</p> 
+<ul>
+<li>FROM：源库，格式：<br> mysql://用户名:密码@IP:端口/数据库名称</li>
+<li>INTO：目标库，格式：<br> postgresql://用户名:密码@IP:端口/数据库名称</li>
+<li>WITH：从MySQL数据库加载时的选项。有include drop、create tables、create indexes等选项。</li>
+<li>CAST：因为两种数据库的数据类型并不完全一致，工具允许用户覆盖已有的默认转换规则或者使用特殊情况修改它们，自定义类型转换规则。<br> 还有个比较重要的功能是部分迁移：用户可以通过 including only table names matching 和 excluding table names matching 实现只迁移特定的表或者在迁移过程中排除特定的表。</li>
+</ul> 
+<p>更详细的配置项解读，可查看官网的说明：https://pgloader.readthedocs.io/en/latest/ref/mysql.html<br> Migratinga MySQL Database to PostgreSQL — pgloader 3.4.1 documentation</p> 
+<h2>
+<a id="_135"></a>四、执行迁移</h2> 
+<p>启动docker：</p> 
+<pre><code class="prism language-bash"><span class="token function">docker</span> run -tid --name pgloader_test dimitri/pgloader 
+</code></pre> 
+<p>复制配置文件到docker：</p> 
+<pre><code class="prism language-bash"><span class="token function">docker</span> <span class="token function">cp</span> ./openGauss.loader pgloader_test:/ 
+</code></pre> 
+<p>进入docker环境：</p> 
+<pre><code class="prism language-bash"><span class="token function">docker</span> <span class="token builtin class-name">exec</span> -it pgloader_test /bin/bash
+</code></pre> 
+<p>启动迁移</p> 
+<pre><code class="prism language-bash">root@548498fb64a6:/<span class="token comment"># pgloader opengauss.loader</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/19/ee/FvHWtZAU_o.png" alt="在这里插入图片描述"></p> 
+<p>如果遇到问题可以先按照上面的配置步骤去检查下。</p> 
+<h2>
+<a id="_163"></a>五、结果验证</h2> 
+<p>现在来看下迁移结果与预期是否一致：<br> 在目标库进行查询：</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>omm@pekphisprb70593 dn<span class="token punctuation">]</span>$ gsql -d opengauss_db -p <span class="token number">15400</span>
+</code></pre> 
+<p>可以看出表 test1和test3包括数据都已经迁移过来。test2由于迁移前后的数据库结构不一致并没有迁移成功。与预期一致。<br> 但是之前mysql定义的float类型，被强制转成double precision。其他的一些不同和限制有兴趣或者必须要迁移的同学自行探索下。<br> <img src="https://images2.imgbox.com/bf/8b/sKAPb8nx_o.png" alt=""></p> 
+<p>总结：使用pgloader进行数据库的迁移过程还是比较简单的，有兴趣的同学可以尝试下。</p> 
+<p>openGauss: 一款高性能、高安全、高可靠的企业级开源关系型数据库。</p> 
+<p>?如果您觉得博主的文章还不错或者有帮助的话，请关注一下博主，如果三连点赞评论收藏就更好啦！谢谢各位大佬给予的支持！</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

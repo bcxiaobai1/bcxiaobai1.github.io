@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【嵌入式】FreeRTOS的移植、任务运行状态以及源码的优化改进 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【嵌入式】FreeRTOS的移植、任务运行状态以及源码的优化改进</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p></p>
+<div class="toc">
+ <h3>目录</h3>
+ <ul><li>
+<ul>
+<li><a href="#_1">前言</a></li>
+<li><a href="#FreeRTOS_9">一、FreeRTOS移植的注意事项</a></li>
+<li><a href="#_57">二、任务运行状态的获取</a></li>
+<li><a href="#_141">三、任务运行状态的源码优化</a></li>
+</ul>
+ </li></ul>
+</div>
+<p></p> 
+<h2>
+<a id="_1"></a>前言</h2> 
+<p>FreeRTOS因其简洁小巧、功能齐全而深受嵌入式领域欢迎，如下图所示，除Linux外，FreeRTOS为全球嵌入式领域市场份额最多的实时操作系统。与之对标的uCOS、RTX、ThreadX等都被远远的甩在其后。加之近年又被亚马逊收购，FreeRTOS的应用应该会进一步扩大。网上已有很多各实时操作系统的对比，我也使用过几种操作系统包括FreeRTOS、uCOS等，但FreeRTOS给我的最深的印象就是移植方便，能够针对不同芯片进行快速移植，并且该有的功能也都有了。<br> <img src="https://images2.imgbox.com/33/28/hJmXJjkd_o.png" alt="在这里插入图片描述"><br> 本文包含以下内容（本文不适用于初学者，默认读者已有了良好的工程搭建基础，以及良好的嵌入式代码阅读、编写能力）：<br> <strong>1</strong> 对FreeRTOS移植过程中的重点做简要说明；<br> <strong>2</strong> 讲解开发阶段需要用到的【任务运行状态监视】该如何配置；<br> <strong>3</strong> 针对实际软件稳定性对FreeRTOS的源码稍作修改，使得任务运行状态可根据自己的需求随意扩展。文中主要是在源码中增加了【任务切换次数】这个属性，在任务发生切换时进行自加，并能通过FreeRTOS自带的任务状态获取函数获取。</p> 
+<h2>
+<a id="FreeRTOS_9"></a>一、FreeRTOS移植的注意事项</h2> 
+<p>由于移植教程网上已有很多，而且基于KEIL、IAR的工程Demo也不在少数，故本文不对FreeRTOS的移植过程作详细讲解，只讲大概步骤和主要的注意事项。<br> 1.从<a href="https://www.freertos.org/a00104.html">【官网】</a>下载源码后，将source目录下的c文件加入到工程中，将include目录拷贝到工程目录下，然后在source/portable目录下找到适合自己MCU内核的接口文件，并加入到工程中。<br> 2.在Demo文件夹中找到适合自己MCU的文件夹，并将FreeRTOSConfig.h文件拷贝到工程目录下；<br> 3.操作系统转起来需要在滴答定时器中断中定时运行调度函数、并依赖SVC异常处理函数获取当前任务控制块、依赖Pending中断来进行上下文切换。以上几个中断、异常时执行的函数都在source/portable目录下的文件port.c或portasm.s中给出，一般为汇编函数。FreeRTOS中分别如下命名：</p> 
+<pre><code>xPortSysTickHandler
+vPortSVCHandler
+xPortPendSVHandler
+</code></pre> 
+<p>而在启动文件的中断向量表中，以上三个中断、异常按如下命名：</p> 
+<pre><code>SysTick_Handler  
+SVC_Handler 
+PendSV_Handler 
+</code></pre> 
+<p>因此，当发生以上中断、异常时，为了能顺利调用FreeRTOS已经写好的调度、切换函数，需要在FreeRTOSConfig.h中作如下宏定义：</p> 
+<pre><code>#define vPortSVCHandler    SVC_Handler
+#define xPortPendSVHandler PendSV_Handler
+</code></pre> 
+<p>这样一来，FreeRTOS源码中的vPortSVCHandler、xPortPendSVHandler函数就被替换成了中断向量表中对应的中断服务函数，从而在中断发生时能进入FreeRTOS写好的调度、任务切换函数。<br> 到这里，有人会问，不还有个xPortSysTickHandler吗，怎么没有替换。原因是现在的嵌入式系统，无论裸机还是跑操作系统，一般都使能滴答定时器中断，并在中断中对一个变量进行自加操作，从而使这个变量成为整个系统的时间戳。因此，系统一初始化我就配置了周期为1ms的滴答定时器中断，并在中断函数中进行了时间戳的自加，这样一来，只需要把xPortSysTickHandler函数放到滴答定时器的中断处理函数中即可，如下所示：</p> 
+<pre><code>volatile static uint32_t uwTick = 0;
+
+void uwTickInc(void)
+{
+	uwTick++;
+}
+
+uint32_t sys_getTick(void)
+{
+	return uwTick;
+}
+
+void SysTick_Handler(void)
+{
+	uwTickInc();
+	xPortSysTickHandler();
+}
+</code></pre> 
+<p>如此一来，拥有了滴答定时器驱动的调度函数、用于上下文切换的Pending中断函数，FreeRTOS就可以跑起来了，具体的任务创建、系统开启等就不再赘述了。</p> 
+<h2>
+<a id="_57"></a>二、任务运行状态的获取</h2> 
+<p>开发阶段需要在长期运行、测试中发现并解决问题，因此获取每个任务的运行状态是很有必要的。好在FreeRTOS中也提供了这个功能，一般说来，系统的监视最好放在等级最高的任务中，这样才能保证能监视所有任务。FreeRTOS中开启任务运行状态获取主要分以下几步：<br> 1.在FreeRTOSConfig.h中添加宏定义：</p> 
+<pre><code>#define configUSE_TRACE_FACILITY	1
+#define configGENERATE_RUN_TIME_STATS 1
+</code></pre> 
+<p>这样一来，在空闲任务中就会统计各个任务运行的总耗时以及系统运行的总时长。既然说到时间统计了，那么定时器必不可少，在下一步中配置。<br> 2.需要配置FreeRTOS给出的两个宏定义：</p> 
+<pre><code>#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()
+#define portGET_RUN_TIME_COUNTER_VALUE()
+</code></pre> 
+<p>其中第一个是运行时间的定时器配置函数，第二个是定时器的时间戳获取函数。由于我们已经配置了1ms的滴答定时器，并创建了一个永远自加的时间戳变量，因此，这里的第一个宏定义可以直接为空，第二个宏定义配置为上文中的sys_getTick( )即可：</p> 
+<pre><code>#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()
+#define portGET_RUN_TIME_COUNTER_VALUE()      sys_getTick( )
+</code></pre> 
+<p>3.在监视任务中调用uxTaskGetSystemState进行各个任务状态的获取：</p> 
+<pre><code>void watchTask(void *arg)
+{
+	TaskStatus_t task_state[N];
+	uint32_t total_time;
+
+	while(1)
+	{
+		vTaskDelay(pdMS_TO_TICKS(arg));
+		uxTaskGetSystemState(task_state,N,&amp;total_time);
+	}
+</code></pre> 
+<p>其中，函数的传入参数void *arg为该任务的空转时间，用于释放cpu占用权供其他低优先级任务使用；N为你创建的任务总数(包括一个空闲任务)，调用uxTaskGetSystemState后，就将所有任务的状态拉取到task_state数组中了，并将系统运行的总时长赋值给total_time，也就是滴答定时器中的时间戳。其中，TaskStatus_t 结构体元素如下所示，能够展示任务句柄、名称、序号、当前状态等等：</p> 
+<pre><code>/* Used with the uxTaskGetSystemState() function to return the state of each task
+ * in the system. */
+typedef struct xTASK_STATUS
+{
+    TaskHandle_t xHandle;                            /* The handle of the task to which the rest of the information in the structure relates. */
+    const char * pcTaskName;                         /* A pointer to the task's name.  This value will be invalid if the task was deleted since the structure was populated! */ /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+    UBaseType_t xTaskNumber;                         /* A number unique to the task. */
+    eTaskState eCurrentState;                        /* The state in which the task existed when the structure was populated. */
+    UBaseType_t uxCurrentPriority;                   /* The priority at which the task was running (may be inherited) when the structure was populated. */
+    UBaseType_t uxBasePriority;                      /* The priority to which the task will return if the task's current priority has been inherited to avoid unbounded priority inversion when obtaining a mutex.  Only valid if configUSE_MUTEXES is defined as 1 in FreeRTOSConfig.h. */
+    uint32_t ulRunTimeCounter;                       /* The total run time allocated to the task so far, as defined by the run time stats clock.  See https://www.FreeRTOS.org/rtos-run-time-stats.html.  Only valid when configGENERATE_RUN_TIME_STATS is defined as 1 in FreeRTOSConfig.h. */
+    StackType_t * pxStackBase;                       /* Points to the lowest address of the task's stack area. */
+    configSTACK_DEPTH_TYPE usStackHighWaterMark;     /* The minimum amount of stack space that has remained for the task since the task was created.  The closer this value is to zero the closer the task has come to overflowing its stack. */
+} TaskStatus_t;
+</code></pre> 
+<p>但有一点不好的是，uCOS中的TCB控制块还有【任务切换次数】这个元素，而FreeRTOS的TCB控制块中竟然没有。而这个元素往往揭示了系统切换有无异常发生，在开发阶段是一个重要信息。有人会说，不是有个ulRunTimeCounter元素，能体现该任务的运行总用时吗，这似乎可以替代切换次数吧？其实不然，因为任务运行时间的统计依赖于#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()定义的定时器的最小步长，通过对通过对ulRunTimeCounter统计源码的阅读，发现如果定时器步长时间太长，如10ms，那么很有可能任务已经转完一圈了，仍不能被统计到ulRunTimeCounter中，因为任务被切换时，由任务执行到任务释放CPU所占用的时间如果还不足10ms，就不能够被累加到ulRunTimeCounter。ulRunTimeCounter的统计源码部分如下所示：</p> 
+<pre><code>#if ( configGENERATE_RUN_TIME_STATS == 1 )
+            {
+                #ifdef portALT_GET_RUN_TIME_COUNTER_VALUE
+                    portALT_GET_RUN_TIME_COUNTER_VALUE( ulTotalRunTime );
+                #else
+                    ulTotalRunTime = portGET_RUN_TIME_COUNTER_VALUE();
+                #endif
+
+                /* Add the amount of time the task has been running to the
+                 * accumulated time so far.  The time the task started running was
+                 * stored in ulTaskSwitchedInTime.  Note that there is no overflow
+                 * protection here so count values are only valid until the timer
+                 * overflows.  The guard against negative values is to protect
+                 * against suspect run time stat counter implementations - which
+                 * are provided by the application, not the kernel. */
+                if( ulTotalRunTime &gt; ulTaskSwitchedInTime )
+                {
+                    pxCurrentTCB-&gt;ulRunTimeCounter += ( ulTotalRunTime - ulTaskSwitchedInTime );
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+
+                ulTaskSwitchedInTime = ulTotalRunTime;
+            }
+        #endif /* configGENERATE_RUN_TIME_STATS */
+</code></pre> 
+<h2>
+<a id="_141"></a>三、任务运行状态的源码优化</h2> 
+<p>为了解决运行状态信息中，不包含【任务切换次数】这个元素的问题，需要对源码进行修改，使得其支持这个功能，能让我们直观的查看某个任务被调度了多少次。具体的思路步骤为【任务控制块中加入此元素】-&gt;【任务创建时初始化此元素】-&gt;【任务状态结构体中加入此元素】-&gt;【任务切换时对此元素加1】-&gt;【获取任务状态时能返回此元素】。按以下步骤进行源码修改：<br> 1.在tasks.c中的typedef struct tskTaskControlBlock结构体中加入uint32_t switchTime元素，如下代码所示：</p> 
+<pre><code>typedef struct tskTaskControlBlock       /* The old naming convention is used to prevent breaking kernel aware debuggers. */
+{
+    volatile StackType_t * pxTopOfStack; /*&lt; Points to the location of the last item placed on the tasks stack.  THIS MUST BE THE FIRST MEMBER OF THE TCB STRUCT. */
+
+    #if ( portUSING_MPU_WRAPPERS == 1 )
+        xMPU_SETTINGS xMPUSettings; /*&lt; The MPU settings are defined as part of the port layer.  THIS MUST BE THE SECOND MEMBER OF THE TCB STRUCT. */
+    #endif
+	uint32_t switchTime;
+    ListItem_t xStateListItem;                  /*&lt; The list that the state list item of a task is reference from denotes the state of that task (Ready, Blocked, Suspended ). */
+    ListItem_t xEventListItem;                  /*&lt; Used to reference a task from an event list. */
+    UBaseType_t uxPriority;                     /*&lt; The priority of the task.  0 is the lowest priority. */
+    StackType_t * pxStack;                      /*&lt; Points to the start of the stack. */
+    char pcTaskName[ configMAX_TASK_NAME_LEN ]; /*&lt; Descriptive name given to the task when created.  Facilitates debugging only. */ /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+
+    #if ( ( portSTACK_GROWTH &gt; 0 ) || ( configRECORD_STACK_HIGH_ADDRESS == 1 ) )
+        StackType_t * pxEndOfStack; /*&lt; Points to the highest valid address for the stack. */
+    #endif
+
+    #if ( portCRITICAL_NESTING_IN_TCB == 1 )
+        UBaseType_t uxCriticalNesting; /*&lt; Holds the critical section nesting depth for ports that do not maintain their own count in the port layer. */
+    #endif
+
+    #if ( configUSE_TRACE_FACILITY == 1 )
+        UBaseType_t uxTCBNumber;  /*&lt; Stores a number that increments each time a TCB is created.  It allows debuggers to determine when a task has been deleted and then recreated. */
+        UBaseType_t uxTaskNumber; /*&lt; Stores a number specifically for use by third party trace code. */
+    #endif
+
+    #if ( configUSE_MUTEXES == 1 )
+        UBaseType_t uxBasePriority; /*&lt; The priority last assigned to the task - used by the priority inheritance mechanism. */
+        UBaseType_t uxMutexesHeld;
+    #endif
+
+    #if ( configUSE_APPLICATION_TASK_TAG == 1 )
+        TaskHookFunction_t pxTaskTag;
+    #endif
+
+    #if ( configNUM_THREAD_LOCAL_STORAGE_POINTERS &gt; 0 )
+        void * pvThreadLocalStoragePointers[ configNUM_THREAD_LOCAL_STORAGE_POINTERS ];
+    #endif
+
+    #if ( configGENERATE_RUN_TIME_STATS == 1 )
+        uint32_t ulRunTimeCounter; /*&lt; Stores the amount of time the task has spent in the Running state. */
+    #endif
+
+    #if ( configUSE_NEWLIB_REENTRANT == 1 )
+
+        /* Allocate a Newlib reent structure that is specific to this task.
+         * Note Newlib support has been included by popular demand, but is not
+         * used by the FreeRTOS maintainers themselves.  FreeRTOS is not
+         * responsible for resulting newlib operation.  User must be familiar with
+         * newlib and must provide system-wide implementations of the necessary
+         * stubs. Be warned that (at the time of writing) the current newlib design
+         * implements a system-wide malloc() that must be provided with locks.
+         *
+         * See the third party link http://www.nadler.com/embedded/newlibAndFreeRTOS.html
+         * for additional information. */
+        struct  _reent xNewLib_reent;
+    #endif
+
+    #if ( configUSE_TASK_NOTIFICATIONS == 1 )
+        volatile uint32_t ulNotifiedValue[ configTASK_NOTIFICATION_ARRAY_ENTRIES ];
+        volatile uint8_t ucNotifyState[ configTASK_NOTIFICATION_ARRAY_ENTRIES ];
+    #endif
+
+    /* See the comments in FreeRTOS.h with the definition of
+     * tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE. */
+    #if ( tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE != 0 ) /*lint !e731 !e9029 Macro has been consolidated for readability reasons. */
+        uint8_t ucStaticallyAllocated;                     /*&lt; Set to pdTRUE if the task is a statically allocated to ensure no attempt is made to free the memory. */
+    #endif
+
+    #if ( INCLUDE_xTaskAbortDelay == 1 )
+        uint8_t ucDelayAborted;
+    #endif
+
+    #if ( configUSE_POSIX_ERRNO == 1 )
+        int iTaskErrno;
+    #endif
+} tskTCB;
+</code></pre> 
+<p>2.在tasks.c中的prvInitialiseNewTask任务初始化函数中加入switchTime的初始化，部分代码如下所示：</p> 
+<pre><code>/* This is used as an array index so must ensure it's not too large.  First
+     * remove the privilege bit if one is present. */
+    if( uxPriority &gt;= ( UBaseType_t ) configMAX_PRIORITIES )
+    {
+        uxPriority = ( UBaseType_t ) configMAX_PRIORITIES - ( UBaseType_t ) 1U;
+    }
+    else
+    {
+        mtCOVERAGE_TEST_MARKER();
+    }
+
+    pxNewTCB-&gt;uxPriority = uxPriority;
+    pxNewTCB-&gt;switchTime = 0;
+    #if ( configUSE_MUTEXES == 1 )
+        {
+            pxNewTCB-&gt;uxBasePriority = uxPriority;
+            pxNewTCB-&gt;uxMutexesHeld = 0;
+        }
+    #endif /* configUSE_MUTEXES */
+</code></pre> 
+<p>3.在task.h的TaskStatus_t结构体中加入uint32_t switchTime，代码如下所示。因为需要调用uxTaskGetSystemState函数来获得状态信息，其参数就是TaskStatus_t指针。</p> 
+<pre><code>typedef struct xTASK_STATUS
+{
+    TaskHandle_t xHandle;                            /* The handle of the task to which the rest of the information in the structure relates. */
+    const char * pcTaskName;                         /* A pointer to the task's name.  This value will be invalid if the task was deleted since the structure was populated! */ /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+    UBaseType_t xTaskNumber;                         /* A number unique to the task. */
+    eTaskState eCurrentState;                        /* The state in which the task existed when the structure was populated. */
+    UBaseType_t uxCurrentPriority;                   /* The priority at which the task was running (may be inherited) when the structure was populated. */
+    UBaseType_t uxBasePriority;                      /* The priority to which the task will return if the task's current priority has been inherited to avoid unbounded priority inversion when obtaining a mutex.  Only valid if configUSE_MUTEXES is defined as 1 in FreeRTOSConfig.h. */
+    uint32_t ulRunTimeCounter;                       /* The total run time allocated to the task so far, as defined by the run time stats clock.  See https://www.FreeRTOS.org/rtos-run-time-stats.html.  Only valid when configGENERATE_RUN_TIME_STATS is defined as 1 in FreeRTOSConfig.h. */
+    StackType_t * pxStackBase;                       /* Points to the lowest address of the task's stack area. */
+    configSTACK_DEPTH_TYPE usStackHighWaterMark;     /* The minimum amount of stack space that has remained for the task since the task was created.  The closer this value is to zero the closer the task has come to overflowing its stack. */
+	uint32_t switchTime;
+} TaskStatus_t;
+</code></pre> 
+<p>4.在任务上下文切换的函数中对switchTime进行++操作。具体为：在tasks.c的vTaskSwitchContext函数中加入pxCurrentTCB-&gt;switchTime++，代码如下所示：</p> 
+<pre><code>void vTaskSwitchContext( void )
+{
+    if( uxSchedulerSuspended != ( UBaseType_t ) pdFALSE )
+    {
+        /* The scheduler is currently suspended - do not allow a context
+         * switch. */
+        xYieldPending = pdTRUE;
+    }
+    else
+    {
+        xYieldPending = pdFALSE;
+        pxCurrentTCB-&gt;switchTime++;
+        traceTASK_SWITCHED_OUT();
+
+        #if ( configGENERATE_RUN_TIME_STATS == 1 )
+        .
+        .
+        .
+        .
+ }
+</code></pre> 
+<p>5.通过阅读源码得知，uxTaskGetSystemState函数真正获得任务运行信息是调用的vTaskGetInfo函数。因此在tasks.c的vTaskGetInfo函数中加入pxTaskStatus-&gt;switchTime = pxTCB-&gt;switchTime，代码如下所示。这样一来，调用uxTaskGetSystemState函数时，TCB中的switchTime元素就被赋值到TaskStatus_t指针中了。</p> 
+<pre><code>#if ( configUSE_TRACE_FACILITY == 1 )
+
+    void vTaskGetInfo( TaskHandle_t xTask,
+                       TaskStatus_t * pxTaskStatus,
+                       BaseType_t xGetFreeStackSpace,
+                       eTaskState eState )
+    {
+        TCB_t * pxTCB;
+
+        /* xTask is NULL then get the state of the calling task. */
+        pxTCB = prvGetTCBFromHandle( xTask );
+
+        pxTaskStatus-&gt;xHandle = ( TaskHandle_t ) pxTCB;
+        pxTaskStatus-&gt;pcTaskName = ( const char * ) &amp;( pxTCB-&gt;pcTaskName[ 0 ] );
+        pxTaskStatus-&gt;uxCurrentPriority = pxTCB-&gt;uxPriority;
+        pxTaskStatus-&gt;pxStackBase = pxTCB-&gt;pxStack;
+        pxTaskStatus-&gt;xTaskNumber = pxTCB-&gt;uxTCBNumber;
+        pxTaskStatus-&gt;switchTime = pxTCB-&gt;switchTime;
+        .
+        .
+        .
+}
+</code></pre> 
+<p>经过以上优化，在监视任务中就可以直接调用uxTaskGetSystemState来获取到各个任务的切换次数，从而为监视任务增加了强有力的监管判断条件，即某个任务一定时间内切换次数未变，则相应地做出什么处理。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

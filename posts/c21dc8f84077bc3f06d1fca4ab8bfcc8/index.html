@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【Redis系列】Redis布隆过滤之8亿大数据集实战 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Redis系列】Redis布隆过滤之8亿大数据集实战</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h1 id="%E2%80%8B%E7%BC%96%E8%BE%91%C2%A0" style="text-align:center"><img alt="" height="534" src="https://images2.imgbox.com/d4/58/O9kel4Dz_o.png" width="737"></h1> 
+<h1 id="%E5%BA%8F%E8%A8%80">序言</h1> 
+<blockquote> 
+ <p><span style="background-color:#fbd4d0">即便平凡的日子仿佛毫无波澜，但在某个特定的时刻，执着的努力便会显现出它的价值和意义。</span></p> 
+</blockquote> 
+<blockquote> 
+ <p>文章标记颜色说明：</p> 
+ <ul>
+<li>
+<span style="background-color:#ffd900">黄色</span>：重要标题</li>
+<li>
+<span style="background-color:#fbd4d0">红色</span>：用来标记结论</li>
+<li>
+<span style="background-color:#a2e043">绿色</span>：用来标记一级重要</li>
+<li>
+<span style="background-color:#38d8f0">蓝色</span>：用来标记二级重要</li>
+</ul> 
+</blockquote> 
+<blockquote> 
+ <p><span style="background-color:#fbd4d0">希望这篇文章能让你不仅有一定的收获，而且可以愉快的学习，如果有什么建议，都可以留言和我交流</span></p> 
+</blockquote> 
+<h1 id="1%20%E9%97%AE%E9%A2%98%E6%8F%8F%E8%BF%B0" style="margin-left:.0001pt;text-align:justify"><strong>1 问题描述</strong></h1> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#ffd900">接到一个优化场景</span>：</p> 
+ <p style="margin-left:.0001pt;text-align:left">小程序用户的openid作为最主要的业务查询字段，在做了缓存设计之后仍有非常高频的查询，通过埋点简单统计约在每日1000w次。</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">其中：由于有新增用户，新增矩阵小程序等原因</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">导致请求的openid根本不存在MySQL数据库中，<span style="background-color:#a2e043">这部分统计约占30%左右，也就是约300w次查询是浪费的。</span></p> 
+</blockquote> 
+<h1 id="2%20%E8%A7%A3%E5%86%B3%E6%80%9D%E8%B7%AF%C2%A0">2 解决思路 </h1> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">优化的思路也非常简单：<span style="background-color:#fbd4d0">布隆过滤（bloom filter）</span></p> 
+ <p style="margin-left:.0001pt;text-align:left">它作为非常成熟的方案很适合类似场景，所以<span style="background-color:#a2e043">使用bloom在查MySQL之前优先判断openid是否存在</span>就可以解决这个问题。</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">虽然平时对bloom的原理有所了解，但是本次<span style="background-color:#a2e043">主要的挑战是需要过滤的openid数据集有8亿</span>，具体实施的过程中遇到了很多没有考虑过的细节，因此整理分享一下。</p> 
+</blockquote> 
+<h1 id="3%20%E6%96%B9%E6%A1%88%E4%BB%8B%E7%BB%8D" style="margin-left:.0001pt;text-align:left">3 方案介绍</h1> 
+<h2 id="1.%20%E5%B8%83%E9%9A%86%E8%BF%87%E6%BB%A4" style="margin-left:.0001pt;text-align:left"><strong>1. 布隆过滤</strong></h2> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">先简单描述一下bloom filter的原理</p> 
+</blockquote> 
+<p style="text-align:center"><img alt="" src="https://images2.imgbox.com/39/1c/YrvJLqAh_o.jpg"></p> 
+<blockquote> 
+ <p><span style="background-color:#ffd900">布隆过滤器（Bloom Filter）</span></p> 
+ <ul>
+<li>
+<span style="background-color:#fbd4d0">是一种数据结构</span>，其<span style="background-color:#a2e043">主要功能是判断某个元素是否出现在集合中</span>。</li>
+<li>它通过<span style="background-color:#a2e043">使用多个哈希函数将元素映射到一个位数组中</span>，并将对应位标记为1，来实现对元素的判重。</li>
+<li>如果一个元素在位数组中<span style="background-color:#a2e043">对应的位置上有一位为0</span>，那么该元素<span style="background-color:#38d8f0">一定不存在于集合中</span>，</li>
+<li>
+<span style="background-color:#a2e043">如果所有对应位都为1</span>，那么该元素<span style="background-color:#a2e043">可能存在于集合中。</span>
+</li>
+</ul> 
+</blockquote> 
+<blockquote> 
+ <p>具体来说：</p> 
+ <p>当要加入一个元素时，<span style="background-color:#a2e043">使用多个不同的哈希函数对该元素进行哈希，得到多个哈希值</span>，然后将这些哈希值对应的位数组上的位置置为1。</p> 
+ <p>当查找一个元素时，同样使用多个哈希函数进行哈希，然后查看对应位置上的位，</p> 
+ <ul>
+<li>如果存在任意一位为0，那么该元素不存在于集合中；</li>
+<li>如果所有位都为1，那么该元素可能存在于集合中，需要进一步确认。</li>
+</ul> 
+</blockquote> 
+<blockquote> 
+ <p>由于布隆过滤器的<span style="background-color:#a2e043">判重操作只需对位数组进行一次查找，无需遍历整个集合</span>，因此<span style="background-color:#fbd4d0">它的查找效率非常高</span>，并且它所占用的空间相对于集合本身也非常少。</p> 
+</blockquote> 
+<blockquote> 
+ <p>但是，<span style="background-color:#fbd4d0">布隆过滤器存在一定的误判率</span>。</p> 
+ <p>对于一个元素，如果多个哈希函数将其映射到的位都已被标记为1，则它可能被误判为存在于集合中，即有一定的假阳性率 。</p> 
+ <p><span style="background-color:#a2e043">误判率取决于哈希函数的数量和位向量的长度。</span></p> 
+</blockquote> 
+<h2 id="2.%208%E4%BA%BF%E6%95%B0%E6%8D%AE%E9%9B%86%E6%80%8E%E4%B9%88%E5%81%9A%E5%B8%83%E9%9A%86%EF%BC%9F" style="margin-left:.0001pt;text-align:left"><strong>2. 8亿数据集怎么做布隆？</strong></h2> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">8亿数据集做布隆过滤主要需要规划的问题是 </p> 
+ <ul>
+<li><span style="background-color:#ffd900">内存占用|分配、分片</span></li>
+<li><span style="background-color:#ffd900">Hash函数规划</span></li>
+<li><span style="background-color:#ffd900">如何论证效果</span></li>
+</ul> 
+</blockquote> 
+<h3 id="%E5%86%85%E5%AD%98%E5%8D%A0%E7%94%A8" style="margin-left:.0001pt;text-align:left"><strong>内存占用</strong></h3> 
+<blockquote> 
+ <p> 说bloom的内存占用前，要来说明一下bloom在redis中的实现：</p> 
+ <ul><li><span style="background-color:#ffd900">Bitmap</span></li></ul> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">Bitmap：<span style="background-color:#a2e043">是一种Bit数组数据结构，它的主要作用是储存0和1两个状态。</span></p> 
+ <p style="margin-left:.0001pt;text-align:left">在Redis中，Bitmap通过字符串来实现，一个字符串可以存储超过2^32个元素，<span style="background-color:#38d8f0">所以一个bloom能存储的最大上限就是2^32个，约42.9亿。</span></p> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">那么在redis底层bitmap 和string 其实是同一个结构，只是提供了不同的命令来进行操作，想要看一个redis 对象占用多少内存可以使用 <span style="background-color:#62d256">MEMORY USAGE Key</span>，返回的是<span style="background-color:#62d256">字节数</span>：</p> 
+</blockquote> 
+<p style="margin-left:.0001pt;text-align:left"><img alt="" height="720" src="https://images2.imgbox.com/04/43/enBwVdsb_o.png" width="1200"></p> 
+<h3 id="Bitmap%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D" style="margin-left:.0001pt;text-align:left"><strong>Bitmap内存分配</strong></h3> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">如上图bitmap操作命令：</p> 
+ <pre><code class="language-php">setbit  key  index  1 </code></pre> 
+ <p style="margin-left:.0001pt;text-align:left">这里有个需要注意的问题是，如果index比较大，比如<span style="background-color:#a2e043">在10亿位上写1</span>，那么redis在内存分配时其实<span style="background-color:#38d8f0">是分配了一个完整的10亿长度的数组</span>（<span style="background-color:#38d8f0">10亿位是1，前面的全部补0</span>）。</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">可以理解为<span style="background-color:#a2e043">是一个非常长的字符串</span>，而不是下意识我们想象很简单的1个bit那么小，<span style="background-color:#38d8f0">它瞬间分配的内存大概在128M</span></p> 
+</blockquote> 
+<h3 id="Bitmap%E8%AF%BB%E5%8F%96" style="margin-left:.0001pt;text-align:left"><strong>Bitmap读取</strong></h3> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#a2e043">既然一个10亿位的bitmap需要128M内存</span>，那么很直接的想法就是，这么大的内存，<span style="background-color:#38d8f0">bitmap读起来会慢吗？</span></p> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#fbd4d0">结论当然是不会的</span>。</p> 
+ <p style="margin-left:.0001pt;text-align:left">因为bitmap是一个位数组，它在内存中是连续的，CPU并不需要去读取完整的128M内存，它只要获取到这个数组起始位置，+ index 就可以计算出对应的位置然后进行读取，也就是说，<span style="background-color:#a2e043">它的时间复杂度是 O(1)</span></p> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#a2e043">虽然读操作是O(1)</span>的，但是很显然创建一个大的bitmap时<span style="background-color:#38d8f0">是非常重量级的一个操作</span>，布隆过滤的Hash函数计算<span style="background-color:#38d8f0">基本都是32位，64位长度的Hash值</span></p> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#a2e043">我们无法控制bitmap的增长是一个顺序过程，所以最直接的办法就是控制最大长度</span></p> 
+</blockquote> 
+<h3 id="%E5%88%86%E7%89%87%20--%20Roaring%20Bitmap" style="margin-left:.0001pt;text-align:left"><strong>分片 -- Roaring Bitmap</strong></h3> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">目前openid数据总量已经有8亿+，肯定不能都放入一个Bitmap中，这样就会有个非常大的key，最简单的优化方向就是分片。</p> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#a2e043">Roaring Bitmap (RBM)就是类似的算法</span>：</p> 
+</blockquote> 
+<blockquote> 
+ <p>RBM 的主要思想并不复杂，简单来讲，有如下三条：</p> 
+ <ol>
+<li>
+<span style="background-color:#ffd900">范围划分</span>：将 <span style="background-color:#a2e043">32-bit 的范围 ([0, n)) 划分为 2^16 个桶</span>，每一个桶有一个 Container 来存放一个数值的低16位；</li>
+<li>
+<span style="background-color:#ffd900">存储</span>：在存储和查询数值的时候，<span style="background-color:#a2e043">将一个数值 k 划分为高 16 位(k % 2^16)和低 16 位(k mod 2^16)</span>，取高 16 位找到对应的桶，然后在低 16 位存放在相应的 Container 中；</li>
+<li>
+<span style="background-color:#ffd900">查询判断</span>：当查询一个数值 k 是否存在时，<span style="background-color:#a2e043">我们只需要判断 k mod 2^16 是否存在于对应的 Container 中即可</span>。</li>
+</ol> 
+</blockquote> 
+<blockquote> 
+ <p>这个例子可以用计算器按一下，就很直观的理解了<br><span style="background-color:#ffd900">举例</span>：</p> 
+ <p><span style="background-color:#a2e043">821697800 对应的 16 进制数为 30FA1D08， 其中高 16 位为 30FA， 低16位为 1D08。</span><br> 找到数值为 30FA 的容器（如果该容器不存在，则新建一个）</p> 
+ <p>这里用 Bitmap 做存储，找到了相应的容器后，看一下低 16 位的数值 1D08，它相当于是 7432，因此在 Bitmap 中找到相应的位置，将其置为 1 即可。 </p> 
+</blockquote> 
+<p style="margin-left:.0001pt;text-align:center"><img alt="" height="858" src="https://images2.imgbox.com/84/6e/7ZqWtkVj_o.png" width="720"></p> 
+<h3 id="%E5%AE%9E%E7%8E%B0%E5%8F%96%E9%AB%98%E4%BD%8D%E5%92%8C%E4%BD%8E%E4%BD%8D%E4%BB%A3%E7%A0%81%EF%BC%9A" style="margin-left:.0001pt;text-align:left">实现取高位和低位代码：</h3> 
+<blockquote> 
+ <p>取高位作桶,就是通过位运算向右移16位<br> 将一个数的二进制位向左或向右移动特定的位数。向左移动相当于在该数的二进制表示中加上多个0，向右移动相当于去掉多余的二进制位</p> 
+ <pre><code class="language-php">$container = $hash &gt;&gt; 16;   </code></pre> 
+ <p>取低位作数据字段，就是通过&amp;位运算取低16位<br> 它对两个数的每一个二进制位进行比较，只有当两个数的对应二进制位都为1时，结果才会将该位置设置为1，否则设置为0<br> 0xFFFF是16位全1的二进制数的16进制表示方式<br> 可以简单理解为就是截取了一个数的低16位<br>  </p> 
+ <pre><code class="language-php">$index     = $hash &amp; 0xFFFF;  </code></pre> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">做一个git演示，可以看到821697800转换为二进制后，通过位移取值，可以一次一次移，也可以一次移16位</p> 
+</blockquote> 
+<p style="margin-left:.0001pt;text-align:center"><img alt="" height="857" src="https://images2.imgbox.com/b4/fb/WEzaVEfg_o.png" width="720"></p> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">总结一下，<span style="background-color:#a2e043">Roaring Bitmap 先取高16位做桶，是为了做分片，取低16位做index</span>，主要是<span style="background-color:#38d8f0">为了压缩Bitmap长度，达到节省内存的作用</span></p> 
+</blockquote> 
+<h3 id="Hash%E5%87%BD%E6%95%B0%E8%A7%84%E5%88%92" style="margin-left:.0001pt;text-align:left"><strong>Hash函数规划</strong></h3> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">已知openid 8亿，按照预留一倍空间规划，这个布隆过滤器总量为20亿，通过RBM分片分散到2^16 = 65525 个container中，也就是每个container承担3w个元素，这样取低16位长度就不太够了</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">我们可以取低17位，这样一个container可以存储13w个，我们期望的误差率为千分之一，</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">那么可以通过布隆计算公式得出需要的Hash函数个数，这里我们直接利用ChatGPT计算就好了：</p> 
+</blockquote> 
+<p style="margin-left:.0001pt;text-align:left"><img alt="" height="517" src="https://images2.imgbox.com/22/a2/rQLgktmd_o.png" width="1200"></p> 
+<p style="margin-left:.0001pt;text-align:center"></p> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">得出需要15个哈希函数，其实按照公式算出来这个值还是有待论证，</p> 
+ <p style="margin-left:.0001pt;text-align:left">我对它的存疑是这样的：</p> 
+ <p style="margin-left:.0001pt;text-align:left">15个哈希函数，3w个元素，如果不考虑哈希冲突，也就是有15*3w = 45w，而一个container的总长度才13w，真的能满足千分之一的误差率吗？</p> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">我去验证了，答案是不能。</p> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#38d8f0">45w次hash结果存入一个container中</span>，大多数的位都存满了1，<span style="background-color:#a2e043">导致误差率高达50%以上</span>，</p> 
+ <p style="margin-left:.0001pt;text-align:left">那么问题出在哪里？没有深究这个公式是如何推导出来的，就用最朴素的方法去尝试了多种条件下的测试。</p> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">得出的结论是： 元素n  ✖️  哈希个数k ，不能超过位图长度m（或者超过太多）， 在这个基础上，公式推导的结论是可靠的</p> 
+</blockquote> 
+<h3 id="%E7%BB%A7%E7%BB%AD%E6%80%9D%E8%80%83%C2%A0">继续思考 </h3> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">既然65535个container不能满足需要，那可选的方案就只有继续扩大bitmap长度或者是扩大container数量，</p> 
+ <p style="margin-left:.0001pt;text-align:left">最终用的方案是扩大一倍container数量，也就是取高17位作为container，公式推导需要10个hash，最终也验证了这个结果是对的。</p> 
+</blockquote> 
+<p style="margin-left:.0001pt;text-align:center"><img alt="" height="476" src="https://images2.imgbox.com/e1/99/DuI5e1wj_o.png" width="1200"></p> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">得出了hash个数之后，就需要找一些具体的hash函数，这里贴一些搜集到的hash算法和具体实现的代码：</p> 
+</blockquote> 
+<h3 id="Redis%20key%E6%95%B0%E9%87%8F%E5%AF%B9%E6%80%A7%E8%83%BD%E6%98%AF%E5%90%A6%E6%9C%89%E5%BD%B1%E5%93%8D" style="margin-left:.0001pt;text-align:left"><strong>Redis key数量对性能是否有影响</strong></h3> 
+<blockquote> 
+ <p> 既然选择了扩大container数量，紧接着需要思考的问题是：</p> 
+ <ul><li> <span style="background-color:#ffd900">选择增大key数量会对redis性能有影响吗？</span>
+</li></ul> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">Redis把<span style="background-color:#a2e043">所有的key都放在了一个字典</span>当中<span style="background-color:#a2e043">，它的查询时间复杂度是O(1)</span>，</p> 
+ <p style="margin-left:.0001pt;text-align:left">所以基本上key的数量对于读写操作是不影响的，可以看下Redis 键空间示意图：</p> 
+</blockquote> 
+<p style="margin-left:.0001pt;text-align:left"><img alt="" height="628" src="https://images2.imgbox.com/4d/b3/FnHYNIjI_o.png" width="1200">​</p> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">但是也不是说Redis 中key过多完全没有影响，它更主要的会影响到备份的效率，特别是启动一个RDB 备份 Process时，key的数量过多会影响RDB的执行效率，而负责数据读取和备份是两个线程，并不影响。</p> 
+</blockquote> 
+<h3 id="%E6%80%BB%E7%BB%93%C2%A0">总结 </h3> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">结论就是，只是多了6w的key而已，对Redis来说还是很小case的，相对于可能形成的大key造成的影响，还是简单的多加点key吧。</p> 
+</blockquote> 
+<h2 id="3%20%E5%A6%82%E4%BD%95%E8%AE%BA%E8%AF%81" style="margin-left:.0001pt;text-align:left"><strong>3 如何论证</strong></h2> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">在整个实战的过程中，非常大的一个难点是数据集很大，想要验证一遍非常耗时，那么提升redis写入性能就非常重要，所以一开始就想到了使用批处理的方式</p> 
+</blockquote> 
+<pre><code class="language-php">
+    $redis-&gt;multi()
+    -&gt;set('key1', 'val1')
+    -&gt;get('key1')
+    -&gt;set('key2', 'val2')
+    -&gt;get('key2')
+    -&gt;exec();</code></pre> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">​​​​</p> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">但是这里有一个细节， $redis-&gt;multi() 支持两种模式，</p> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#ffd900">Redis::MULTI  </span> </p> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#ffd900">Redis::PIPELINE</span></p> 
+ <p style="margin-left:.0001pt;text-align:left">默认是使用Redis::MULTI，但它们的作用和使用方式略有不同：</p> 
+ <ul><li style="text-align:left">
+<span style="background-color:#ffd900">Pipeline</span>：将多个命令打包发送给 Redis 服务器，减少了客户端与服务器之间的网络往返次数，从而提高了性能。但是，<span style="background-color:#a2e043">pipeline 并没有原子化地执行这些命令</span>，因此如果出现错误会导致部分命令执行失败。</li></ul> 
+ <ul><li style="text-align:left">
+<span style="background-color:#ffd900">Multi</span>：通过开启一个事务（transaction），将多个命令打包成一个事务，确保这些命令被原子化地执行。由于事务需要等待 EXEC 命令的触发才会真正执行，因此 multi 的性能可能会受到影响。但是，multi 提供了回滚（rollback）和乐观锁控制机制，可以避免在多个客户端同时修改同一资源时出现数据竞争问题。</li></ul> 
+</blockquote> 
+<h1>总结 </h1> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left">虽然Multi 功能更强，但是相对的执行效率也慢（当然还是要比单个命令执行要快的，节省了很多网络io时间）</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">而<span style="background-color:#a2e043">pipeline模式的性能要比Multi快50倍</span> （<span style="background-color:#38d8f0"> 这个基准测试是以100w次 setbit操作测试的</span>）</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">按照pipeline模式下8亿openid * 10 hash  = 20个小时来算，</p> 
+ <p style="margin-left:.0001pt;text-align:left"></p> 
+ <p style="margin-left:.0001pt;text-align:left">如果用multi，我可能要跑一个月 ?</p> 
+</blockquote> 
+<blockquote> 
+ <p style="margin-left:.0001pt;text-align:left"><span style="background-color:#fbd4d0">选对批处理模式，对于大批量数据导入相当重要</span></p> 
+</blockquote> 
+<h1 id="%E6%8A%95%E7%A5%A8" style="margin-left:.0001pt;text-align:left">投票</h1> 
+<p id="main-toc"></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<p></p> 
+<p style="margin-left:.0001pt;text-align:left"></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

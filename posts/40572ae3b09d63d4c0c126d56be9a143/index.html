@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【ZooKeeper】上班摸鱼时间——一文了解 ZAB 协议 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【ZooKeeper】上班摸鱼时间——一文了解 ZAB 协议</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <blockquote> 
+ <p>本文将会围绕<a href="http://www.tcs.hut.fi/Studies/T-79.5001/reports/2012-deSouzaMedeiros.pdf">《ZooKeeper’s atomic broadcast protocol: Theory and practice》</a>这篇论文讲解 ZooKeeper 和 ZAB 的精髓之处。</p> 
+</blockquote> 
+<p>???大家好，我是周周，前几周开组会时被点名回答一些 ZooKeeper 相关问题，竟然一问三不知，组长直呼当初被我帅气外表所骗，稀里糊涂的招了进来。</p> 
+<p>于是下来后对这个在我手发挥极其重要作用的这项基建产生了浓厚兴趣，所以决定痛改前非，先从 ZAB 出发，开启一系列的 ZooKeeper 进阶之旅。</p> 
+<p>tips：</p> 
+<p><strong>本文主要是对 Paper 的消化和理解，稍显枯燥，建议工作累了划水时对着 Paper 慢慢看。</strong><br> </p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul>
+<li><a href="#1__10">1 概述</a></li>
+<li>
+<ul>
+<li><a href="#11__ZooKeeper_14">1.1 什么是 ZooKeeper</a></li>
+<li><a href="#12__ZAB_42">1.2 什么是 ZAB</a></li>
+<li><a href="#13__61">1.3 奔溃恢复模型</a></li>
+<li><a href="#14_ZAB__76">1.4 ZAB 的基本属性</a></li>
+</ul>
+  </li>
+<li><a href="#2__100">2 原子广播协议</a></li>
+<li>
+<ul>
+<li><a href="#21__132">2.1 选举阶段</a></li>
+<li><a href="#22__137">2.2 发现阶段</a></li>
+<li><a href="#23__160">2.3 同步阶段</a></li>
+<li><a href="#24__186">2.4 广播阶段</a></li>
+</ul>
+  </li>
+<li><a href="#3_ZAB__216">3 ZAB 协议实现</a></li>
+<li>
+<ul>
+<li><a href="#31_Discover_225">3.1 Discover</a></li>
+<li><a href="#32_Fast_Leader_Election_260">3.2 Fast Leader Election</a></li>
+<li>
+<ul>
+<li><a href="#_PK_269">选票 PK</a></li>
+<li><a href="#_275">接收选票</a></li>
+<li><a href="#FLE__288">FLE 算法</a></li>
+<li><a href="#_340">算法精髓</a></li>
+</ul>
+  </li>
+</ul>
+  </li>
+<li><a href="#4__351">4 总结</a></li>
+</ul>
+</div>
+<p></p> 
+<h1>
+<a id="1__10"></a>1 概述</h1> 
+<p>ZooKeeper 作为一项重要的基础设施应用于各大厂商中，其可用性和可靠性不言而喻，而 ZAB（ZooKpeeper 原子广播协议）更是保证 ZK 可用性和可靠性的基础，也是本文主要的分享点。</p> 
+<h2>
+<a id="11__ZooKeeper_14"></a>1.1 什么是 ZooKeeper</h2> 
+<p>在了解 ZAB 之前，我们要先了解 ZooKeeper 是究竟什么？</p> 
+<p>关于这个问题，ZK 官方给出了自己的定义：<em>A Distributed Coordination Service for Distributed Applications</em>。即 <strong>ZK 是一个为分布式系统提供协调能力的系统。</strong></p> 
+<p><strong>ZK 作用</strong></p> 
+<ul>
+<li>配置服务</li>
+<li>分布式锁</li>
+<li>服务管理</li>
+<li>服务注册与发现</li>
+</ul> 
+<p><strong>数据模型</strong></p> 
+<p><strong>ZK 本质还是一个基于内存的 KV 系统</strong>，但与一般 KV 系统不同的是 ZK 以 Path 来作为 Key，以 DataTree 树视图来组织这些 Path。<br> <img src="https://images2.imgbox.com/0a/3c/CDz3DO09_o.png" alt="在这里插入图片描述"><br> 如上图所示，数据信息被保存在⼀个个的数据节点上，这些节点被称为 ZNode，ZNode 是 ZooKeeper 中最⼩数据单位，在 ZNode 下⾯⼜可以再挂 ZNode，这样⼀层层下去就形成了⼀个层次化命名空间 ZNode 树。</p> 
+<p>ZK 内部用 <code>ConcurrentHashMap&lt;String /*Path*/, DataNode&gt;</code> 来维持所有的 Path，每个 ZNode 会挂一个子节点的 Path 列表。</p> 
+<p><strong>所以 ZK 对某个 Path 的插入和查询性能很高，并不需要遍历什么树，是直接对 HashMap 的操作。</strong></p> 
+<p><strong>节点角色</strong></p> 
+<ul>
+<li>
+<strong>Leader</strong> 所有的写操作均需要通过该节点完成</li>
+<li>
+<strong>Follower</strong> 处理读请求和转发写请求给 Leader，并对 Leader 广播的写请求投票</li>
+<li>
+<strong>Observer</strong> 类似 Follower，但无投票权</li>
+</ul> 
+<h2>
+<a id="12__ZAB_42"></a>1.2 什么是 ZAB</h2> 
+<p>ZAB 协议是为 Zookeeper 专门设计的一种支持<strong>崩溃恢复</strong>的<strong>原子广播协议</strong>。而 Paxos 是一种通用的<strong>分布式一致性算法</strong>，故不能把 ZAB 和 Paxos 进行等同。</p> 
+<p>在 ZK 中主要依赖 ZAB 来实现分布式数据的一致性。从本质上讲，ZK 也是一种主备模式（Leader-Follower-Observer）的系统架构，用来保持集群中各副本之间的一致性，即在 Leader 进行单点写，同时也能在 Leader crash 后进行恢复重新选主。</p> 
+<p><strong>ZAB 协议的核心是定义了那些会改变 ZooKeeper 服务器数据状态的事务请求（Transaction）的处理方式</strong>。即：</p> 
+<p>1）所有事务请求必须由一个全局唯一的服务器（Leader）来协调处理，剩余的服务器称为 Follower（有权利参与选主）或者 Observer（只负责从 Leader 同步数据，用于读扩展和分担集群整体连接数）。</p> 
+<p>2）Leader 负责将一个客户端事务请求转换成一个事务 Proposal（提议），并将该 Proposal 分发给集群中所有的 Follower 节点（Leader 会维持一个 Follower 列表）。</p> 
+<p>3）之后 Leader 需要等待 Follower 的反馈，一旦超过半数的 Follower 进行了正确的反馈，Leader 则会对所有 Follower 发起 Commit 消息，要求所有 Follower 将该 Proposal 进行提交（即写入 Transaction Log）。</p> 
+<p><img src="https://images2.imgbox.com/7f/86/hnaRyAn5_o.jpg" alt="在这里插入图片描述"></p> 
+<ul><li>Refer <a href="https://dbaplus.cn/news-141-1875-1.html">实例详解ZooKeeper ZAB协议、分布式锁与领导选举</a>
+</li></ul> 
+<h2>
+<a id="13__61"></a>1.3 奔溃恢复模型</h2> 
+<blockquote> 
+ <p>Crash-recovery system model</p> 
+</blockquote> 
+<p><strong>ZooKeeper 是一个奔溃恢复系统模型，即有能力从崩溃状态中自我恢复</strong>。如某个节点挂掉或者 Leader 挂掉，只要过半的节点存活并且能通信就能保证 ZooKeeper 的高可用和高可靠能力。</p> 
+<p>假设系统是由 N 个进程组成 <code>Π = {p1, p2, . . . , pN }</code>，每个进程称为 Peer（节点），且节点之间能够相互通信，并有各自的存储来记录事务日志和 DataTree 的快照。</p> 
+<p><code>Q (quorum of Π)</code> 表示进程集合中的过半节点集合，满足 <code>Q ⊆ Π</code> 和 <code>|Q| &gt; N/2</code>。任何的两个 Q 必然会有 Peer 之间的交集。</p> 
+<p>进程有两种状态：<em>up</em> 和 <em>down</em>。<strong>ZK 节点什么时候提供写能力呢？</strong></p> 
+<p>一个 Follower 节点挂了重启后不是立马就能对外响应请求的，因为 Follower 落后 Leader 的 Proposal，只有待数据同步后才能对外提供服务。</p> 
+<p>所以 Peer 奔溃后到开始恢复前阶段称为 down 状态，从开始恢复阶段到下次奔溃称为 up 状态。</p> 
+<h2>
+<a id="14_ZAB__76"></a>1.4 ZAB 的基本属性</h2> 
+<p><strong>在崩溃恢复模型中，需要保证同一时刻只有一个 Leader 存在，每个时期（epoch）的 Leader 可以不同</strong>，如 <code>p1.p2.p3....pe..., ρe ∈ Π</code>。</p> 
+<p>每个 Proposal 用 <code>&lt;v, z&gt;</code> 表示，其中 <code>v</code> 是提交的新状态值，<code>z</code> 则是 <em>zxid</em>。</p> 
+<p><em>zxid</em> 用于唯一标示一个事务请求（Transaction），一个事务请求有两种状态：</p> 
+<ul>
+<li>
+<em>proposed</em> 表示一个事务已经被 Leader 提出，但尚未被 Quorum 进行 ACK，</li>
+<li>
+<em>commited</em> 表示这个 Transaction 已经被 Quorum 进行 ACK，后续 Leader 对所有的 Follower 发出 commit 的请求，所有节点进行了本地 commit 操作。</li>
+</ul> 
+<p>因为，为了实现 ZooKeeper 副本的一致性，ZAB 需要满足一下基本条件：</p> 
+<ul>
+<li> <p><strong>Integrity（正确性）</strong>：如果有节点收到 commit Proposal（提交议案） 的请求，那么肯定是有节点对该 Proposal 进行了广播。即 Proposal 不能是<strong>拜占庭问题</strong>。</p> </li>
+<li> <p><strong>Total order（全局顺序性）</strong>：，即某个 Peer 按序提交了 <code>&lt;v, z&gt;</code>和 <code>&lt;v', z'&gt;</code> 两个 Proposal， 那么任意其它 Peer 上也必然是 <code>&lt;v, z&gt;</code> 比 <code>&lt;v', z'&gt;</code> 先被提交。</p> </li>
+<li> <p><strong>Agreement（契约性）</strong>：如果 Pi 提交了 <code>&lt;v, z&gt;</code>， Pj 提交了 <code>&lt;v', z'&gt;</code>，那么要不 Pi 已经提交了了 <code>&lt;v', z'&gt;</code> , 要不 Pj 已经提交了 <code>&lt;v, z&gt;</code>。</p> </li>
+</ul> 
+<p>此外，对于 Leader 节点而言，还需满足其顺序属性：</p> 
+<ul>
+<li>
+<strong>Local primary order（本地顺序性）</strong>：如果 Leader 在原子广播阶段先后 commit了 <code>&lt;v, z&gt;</code> 和 <code>&lt;v', z'&gt;</code>， 一个 Follower 提交了 <code>&lt;v', z'&gt;</code>， 那么 Follower 肯定先提交了 <code>&lt;v, z&gt;</code>。</li>
+<li>
+<strong>Global primary order（全局一致性）</strong>：如果 ρi 是 epoch 为 i 的 Leader，ρj 是 epoch 为 j 的 Leader，且 i &lt; j, 表示 ρi 是之前的 Leader， ρj 是之后的 Leader。ρi 提交了 <code>&lt;v, z&gt;</code>， pj 提交了 <code>&lt;v', z'&gt;</code>, 如果 Leader 提交了 <code>&lt;v, z&gt;</code> 和 <code>&lt;v', z'&gt;</code>， 那么肯定是 <code>&lt;v, z&gt;</code> 先于 <code>&lt;v', z'&gt;</code> 被提交.</li>
+<li>
+<strong>Primary integrity (正确性）</strong>：ρi 如果广播了&lt;v, z&gt; ，并且其他Follower commit了&lt;v’, z’&gt;，而&lt;v’, z’&gt; 是pj先于pi提交的，即pj的epoch比pi的epoch小，那么pi肯定也commit了&lt;v, z&gt;。</li>
+</ul> 
+<h1>
+<a id="2__100"></a>2 原子广播协议</h1> 
+<blockquote> 
+ <p>Atomic broadcast protocol</p> 
+</blockquote> 
+<p>在了解原子广播协议前，先来了解一些概念：</p> 
+<p><strong>三种状态</strong><br> 在 ZAB 协议中，每个服务器节点 Peer 有三种可能状态：<em>following</em>、<em>leading</em> 以及 <em>election</em>。（其中处于 following 的节点称为 Follower，处于 leading 的节点称为 Leader）</p> 
+<p><strong>四个阶段</strong><br> 同时 ZAB 协议整体分为四个阶段：0）<em>Leader election</em>、 1）<em>discovery</em>、 2）<em>synchronization</em>、 3）<em>broadcast</em>。</p> 
+<p>处于阶段 0）到阶段 2）的 ZK 集群还处于不可用的状态，即不能响应客户端的读写请求操作。只有选出主并完成上一个 epoch 期间的 Proposal 的广播后，整个集群才会对外服务。<strong>也就是说只有处于阶段3即原子广播阶段才能对外服务。</strong></p> 
+<p>ZAB 的每个阶段是顺序推进的，如果在阶段 1）-3） 任何一个阶段出现故障，比如失败或者超时，则会重新进入阶段 0）再来一轮。</p> 
+<p><strong>zxid</strong><br> zxid 作为 ZooKeeper 最核心的一个概念，唯一标识一个 Transaction，即 Proposal 表示为 <code>&lt;value, zxid&gt;</code>。为了保证顺序性，zkid 必须单调递增，因此全局唯一递增的 64 位正整数，所以 zxid 又由 <code>&lt;epoch, count&gt;</code> 构造。</p> 
+<p>epoch 是 zxid 的高 32 位，指的是每个 Leader 生命周期的一个标识，简单来说就是年号。每次选出新的 Leader，epoch 就加一。</p> 
+<p>count 是低 32 位，标识一个 epoch 期间每个 Transaction ID，每个 epoch 的 count 都会从 0 开始递增。</p> 
+<p><strong>核心变量</strong><br> 1）history：被 Peer 提交的历史 Proposal<br> 2）acceptedEpoch：接收最新 NEWEPOCH 的 epoch<br> 3）currentEpoch：接收最新 NEWLEADER 的 epoch<br> 4）lastZxid：history 中最近一个提交的 Proposal 的 zxid</p> 
+<p>简单的来说，acceptedEpoch 用于 Discovery 阶段来判断要不要接收新的 NEWEPOCH。currentEpoch 用于存放上个 epoch 的值。</p> 
+<p>这几个值都会进行存储，其中 acceptedEpoch 和 currentEpoch 会存储在磁盘上，history 和 lastZxid 可以从 DataTree 的 snapshot 中恢复。</p> 
+<h2>
+<a id="21__132"></a>2.1 选举阶段</h2> 
+<blockquote> 
+ <p>Leader Election</p> 
+</blockquote> 
+<p>这个阶段的目的是选出一个 Leader，然后进入后续阶段。具体的算法将会在后续 ZK 的实现小节中阐述，也就是 FLE（Fast Leader Election）算法。</p> 
+<h2>
+<a id="22__137"></a>2.2 发现阶段</h2> 
+<blockquote> 
+ <p>Discovery</p> 
+</blockquote> 
+<p>该阶段的目的就是确定一个新 Leader 的 epoch 值，然后找到上个 epoch 周期内拥有最大 zxid 的 Follower 节点。之所以可以取最大 zxid 作为新的 Leader 的 history，是基于一个假设，因为 zxid 是全局递增的，也就是拥有最大 zxid 的节点也拥有了最新的 Proposal 提交记录。</p> 
+<p><img src="https://images2.imgbox.com/0f/13/Shq8nzok_o.png" alt="在这里插入图片描述"></p> 
+<p>具体流程如下：</p> 
+<p>1）Follower 向准 Leader 发送一个 FOLLOWERINFO 类型消息，将自己的信息上报给准 Leader，该信息包括自己的 epoch 内容 F.acceptedEpoch。</p> 
+<p>2）Leader 等待收到过半的 FOLLOWERINFO 消息后，从这些 Follower 节点的 acceptedEpoch 中取出最大的 epoch，并且加1，即 <code>newEpoch = max {F.acceptedEpoch} + 1</code>，再将新的 epoch 信息 NEWEPOCH 发给集群中的节点。</p> 
+<p>3）Follower 收到 NEWEPOCH 后，将新的 epoch 与自己的 epoch 比较：</p> 
+<ul>
+<li>新 epoch &gt; acceptedEpoch, 即更新自己的 acceptedEpoch为 为新 epoch，然后给 Leader 发送一个 ACKEPOCH 信息，该信息包括上个 epoch、history 和 lastZxid。</li>
+<li>新 epoch &lt; acceptedEpoch，则回退到阶段0</li>
+</ul> 
+<p>4）Leader 收到所有 Follower 的 ACKEPOCH 后，从中找出 currentEpoch 最大的或者 lastZxid 最大的 Follower，把该 Follower 的 history 作为自己的 history。</p> 
+<p><strong>值得注意的是，Quorum 是包括 Leader 自身的。这里的 Leader 还只是准 Leader。</strong></p> 
+<h2>
+<a id="23__160"></a>2.3 同步阶段</h2> 
+<blockquote> 
+ <p>Synchronization</p> 
+</blockquote> 
+<p>同步阶段的目的就是准 Leader 需要将最新的 history 同步给集群内所有的 Follower。</p> 
+<p><img src="https://images2.imgbox.com/37/7c/ArwoK0bf_o.png" alt="在这里插入图片描述"></p> 
+<p>1）在上阶段准 Leader 拿到过半的 ACKEPOCH 后，也就是有了最新的 Proprosal history。</p> 
+<p>2）Leader 给所有 Follower 发一个 NEWLEADER 类型消息，把最新的 epoch 和 histroy 带过去。</p> 
+<p>3）Follower 收到 NEWLEADER 消息后，判断自己的 acceptedEpoch 和新 epoch 是否相等。</p> 
+<ul>
+<li> <p>如果相等则表示自己已经跟上了新 epoch，那么更新自己的 currentEpoch 为新 epoch，表示进入新的朝代。同时按照 zxid 的大小逐一进行本地 proposed（此时这些 Transaction 还未 commit），然后更新history，返回一个 ACKNEWLEADER 消息表示已经同步完数据。</p> </li>
+<li> <p>如果不相等，那么退回到选举阶段，重新进行选主。</p> </li>
+</ul> 
+<p>3）Leader 收到集群中节点的 ACKNEWLEADER 后，对 history 中的这些 Proposal 进行 commit，即向所有 Follower 发送 commit 请求。</p> 
+<p>4）Follower 收到 Leader 对 history 的 COMMIT 消息后，对于 outstanding（即已经 proposed，但还未 commit）的事务按 zxid 顺序进行 commit。</p> 
+<p>5）Leader 和 Follower 都完成数据同步后进入广播阶段.</p> 
+<h2>
+<a id="24__186"></a>2.4 广播阶段</h2> 
+<p>如果所有节点都安然无恙，那么集群就会永远停留在这个阶段，也就是原子广播阶段。该阶段才真正对外通过服务，也就是开始接收外界写请求（Transaction）。</p> 
+<p>这个阶段不可能会存在双主，但可以加入新的 Follower 或 Observer 节点。</p> 
+<p><img src="https://images2.imgbox.com/ca/09/WSWrNYoE_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>发起 Proposal 流程</strong><br> 1）Leader 在接收到 write 请求后，生成一个 <code>Proposal &lt;value, zxid&gt;, zxid = lastzxid + 1</code>，然后对集群 Quorum 中的 Follower 节点发起 propose 请求</p> 
+<p>2）Follower 接收到 propose 请求后，将 Proposal 放入自己 history 队列中，并返回 ACK</p> 
+<p>3）Leader 收到过半的针对 Proposal 的 ACK 后，认为获得了大部分的同意，则对 Proposal 进行提交，向所有 Follower 发起 COMMIT 请求</p> 
+<p>4）Follower 收到 <code>Propose &lt;value, zxid&gt;</code> 的 COMMIT 请求后开始提交，但是为了满足 zxid 的全局一致性，如果存在比该 zxid 更小的 <code>zxid‘</code> 还未提交，那么需要等待 <code>zxid’</code> 的 <code>Propose &lt;value', zxid'&gt;</code> 被提交</p> 
+<p><strong>新增 Follower 流程</strong></p> 
+<p>1）新加入的节点会给 Leader 发一个 FOLLOWERINFO 请求<br> 2）Leader 收到 FOLLOWERINFO 请求后会回复 NEWEPOCH 和 NEWLEADER，即告诉 Follower 当前的 epoch 和 history<br> 3）新节点收到 NEWLEADER 后，如果正常逻辑处理后，回一个 ACKNEWLEADER 给 Leader<br> 4）Leader 收到 ACKNEWLEADER 后给该新节点一个 COMMIT 请求，让新节点提交 history<br> 5）Leader 最后把新加入的 Follower 节点放入自己的 Quorum 列表中。</p> 
+<p>值得注意的是：</p> 
+<ul>
+<li>整个 propose 过程是并行的，对于 Leader 来说，一个 Proposal 不会等上一个 commit 才会发起新 Proposal 的 propose 请求</li>
+<li>每个 Peer 进行本地 commit Proposal 的时候是有序的，即 zxid 小的需要先 commit。这也是为了保障全局顺序性</li>
+</ul> 
+<h1>
+<a id="3_ZAB__216"></a>3 ZAB 协议实现</h1> 
+<p>在 ZooKeeper 实现原子广播协议中，对上面描述的几个阶段进行了优化，如图所示：<br> <img src="https://images2.imgbox.com/27/39/TYIF51bb_o.png" alt="在这里插入图片描述"></p> 
+<p>ZK 将阶段 0）选主和阶段 1）发现合二为一，实现为 Fast Leader Election 阶段，其算法核心内容是尝试选出一个拥有最新 history 数据（即最大 lastZxid）的节点作为 Leader。这样就可以把 Discovery 阶段省掉。</p> 
+<p>同时 ZK 还针对阶段 2）同步进行了一些调整，实现为发现阶段，接下来我们将详细描述这两个阶段的具体实现。</p> 
+<h2>
+<a id="31_Discover_225"></a>3.1 Discover</h2> 
+<p><img src="https://images2.imgbox.com/10/64/Dv1Nst1X_o.png" alt="在这里插入图片描述"></p> 
+<p>当 ZK 集群进入到恢复阶段，Leader 节点已由 FLE 阶段选举出来，并且拥有最大的 zxid。</p> 
+<p>为了将集群中节点数据恢复到一致，Follower 将处理来自准 Leader 的三种请求：</p> 
+<ul>
+<li>
+<strong>SNAP</strong>：从 Leader 拉一份 snapshot（快照），再进行本地提交</li>
+<li>
+<strong>DIFF</strong>：提交请求体中的 Proposal</li>
+<li>
+<strong>TRUNC</strong>：Follower 节点丢弃 <code>Leader.lastCommitedZxid～lastZxid</code> 之间所有的 Proposal</li>
+</ul> 
+<p>接下来的主要流程：</p> 
+<p>1）Leader 从 lastZxid 中拿出 epoch 进行加 1 作为新的 epoch，并且低 32 位重置为 0，即 <code>LastZxid ← {lastZxid.epoch + 1, 0}</code>。</p> 
+<p>2）Follower 连接上准 Leader 节点后，向其发送携带自己 lastZxid 的 FOLLOWERINFO 信息。如果 Leader 拒绝了连接，可能是因为 Leader 的 epoch 比自己小等原因，那么 Follower 重新将状态设置回 election，回退到FLE阶段。</p> 
+<p>3）Leader 接收到 Follower 请求后，发送 NEWLEADER 信息给 Follower。</p> 
+<p>4）如果 Follower 的 lastZxid 小于 Leader 中的 lastCommittedZxid，证明 Follower 的提交落后于 Leader，需要同步：</p> 
+<ul>
+<li>如果 Follower 的 lastZxid 比 Leader 设置的同步 DIFF 阈值还小，需要同步整个 snapshot，即向 Follower 发一个 SNAP 类型消息</li>
+<li>否则 发送一个 DIFF 类型消息，消息内容是 Leader 已经提交的 history 中的那些 diff 的议案</li>
+</ul> 
+<p>5）Follower 收到准 Leader 的 NEWLEADER 请求后，需要对比 epoch：</p> 
+<ul>
+<li>如果 NEWLEADER.newLeaderZxid.epoch 比当前小，那么不能认可该 Leader，自己更新为选主状态，重新选主</li>
+<li>如果 epoch 是同一个轮次中，那么则需要处理 SNAP、DIFF 和 TRUNC 请求</li>
+<li>完成同步后，返回一个 ACKNEWLEADER 消息，进入广播阶段</li>
+</ul> 
+<p>6）Leader 收到集群大部分 Follower 节点的 ACKNEWLEADER 后，表示过半节点完成了同步，也进入阶段3——广播阶段。</p> 
+<p>至于为什么出现 TRUNC 请求，原因很简单，因为出现了一个有意思的例子：https://issues.apache.org/jira/browse/ZOOKEEPER-1154</p> 
+<h2>
+<a id="32_Fast_Leader_Election_260"></a>3.2 Fast Leader Election</h2> 
+<p>FLE 算法的核心是在集群 Quorum 中找出 lastZxid 最大的那个节点。那么每个节点之间需要同步选票，就需要几个核心信息：</p> 
+<ul>
+<li>
+<strong>id</strong>：投票节点的 myid（在配置文件中配置）</li>
+<li>
+<strong>vote</strong>：被投票节点的 myid</li>
+<li>
+<strong>state</strong>：投票节点的状态，可以是 leading、following 或 election（只有重新发起新一轮 FLE 后才会变更为 election）</li>
+<li>
+<strong>round</strong>：投票轮次，每一轮 FLE 都会有一个 round，并在之前基础上加 1</li>
+</ul> 
+<h3>
+<a id="_PK_269"></a>选票 PK</h3> 
+<p>我们将定义 <code>Vote(zi , i)</code> 表示一次投票，即 myid 为 i 的节点当前 zxid 是 zi。同时定义 Vote 间的优劣： <code>(zi, i) &gt; (zj, j), 满足zi &gt; zj || (zi = zj &amp;&amp; i &gt; j)</code>，通俗来说，zxid 大的优先，谁大选谁，zxid 相同时再比较 myid，大的优先。</p> 
+<p>所以我们在配置 ZK 集群时，需要给每个节点配置一个全局唯一的 myid。</p> 
+<h3>
+<a id="_275"></a>接收选票</h3> 
+<p>在 FLE 阶段，集群中每个节点都会维护一个列表当做 “投票箱” 以存放其他节点的选票信息，当然，也包括节点自身的选票。ZK 还会启动一个线程以便发送自身选票和接收其他节点的选票，同时还会根据对方选票记录和变更自己的状态和选择。</p> 
+<p><img src="https://images2.imgbox.com/12/45/HGc5FoQM_o.png" alt="在这里插入图片描述"></p> 
+<p>1）如果当前节点是选主（election）状态，则先将对方投票信息放入列表中<br> 2）如果对方节点状态也是选主，那么将先比较一下选举轮次（round），如果当前节点轮次小于对方节点，则通知对方自己的投票信息<br> 3）如果当前节点非选主状态，说明当前节点已经是 Leader 或 Follower，且对方节点还是选主状态的话，则需要告知对方当前节点的状态<br> 4）如果双方都非选主状态，则代表这一轮选举结束</p> 
+<p>整个流程的精髓在于：<strong>记录对方的选票，然后互通有无。</strong></p> 
+<h3>
+<a id="FLE__288"></a>FLE 算法</h3> 
+<p><img src="https://images2.imgbox.com/d2/44/ZZNfWlOy_o.png" alt="在这里插入图片描述"></p> 
+<p>先看主流程：</p> 
+<p>1）节点 P 在启动初始化后，会投票给自己，即投票是 <code>vote &lt;P.zxid, P.myid&gt;</code>，此时<code>round = round + 1</code>，就是 1。</p> 
+<p>2）然后开始给所有节点发送自己的投票 <code>（&lt;P.zxid, P.myid&gt;, P.myid, election, 1）</code>。</p> 
+<p>3）完成对自己的投票后，开始等待接收其它节点的投票信息。（这里需要注意一下，收到的投票不是投给 P 的，是由其它节点广播给所有集群内的节点自己的选择）</p> 
+<p>4）当节点收到了对法节点状态是 Leading 的通知或者在循环内达成了投票共识（即决策了Leader）后，退出循环，结束选主状态。</p> 
+<p><strong>决策流程</strong></p> 
+<p>首先从当前节点的选票队列中弹出收到的选票 n，如果当前没有收到的投票，那么发出自己的投票信息，等待 2 倍的 timeout 时间。</p> 
+<p>当拿到选票后，对选票处理也很简单，根据选票中投票节点的状态可以做出两种行为：<br> 1 如果选票 n 是选主状态，即 <code>P.state = election</code>：</p> 
+<p>1）比较选票的投票轮次</p> 
+<ul>
+<li>如果选票中的轮次大于当前节点，代表自身轮次落后，需要更新当前节点的轮次和选票队列<br> （i）更新节点自身的 round 为选票 n 的 round，同时清空选票队列 ReceivedVotes<br> （ii）PK 选票 <code>v = Vote(zxid , myid)</code> ，如果对方节点的选票较新，则修改自身选票为 v<br> （iii）向集群广播自己新一轮选票</li>
+<li>如果选票轮次与当前节点相同，表示在同一个选票轮次中，那么更新自身的 vote 为选票 n 中的 vote，然后再次进行广播</li>
+<li>如果选票轮次比当前节点小，则忽略改选票，继续处理下一条新</li>
+</ul> 
+<p>2）如果投票 n 是有效的，那么就放入到队列 ReceivedVotes 中</p> 
+<p>3）如果当前 ReceivedVotes 等于 SizeEnsemble，也就是所有节点都进行了投票，则进行开票流程</p> 
+<p>4）如果当前节点获得的投票已经占了过半数，则等一个选举时间（tickTime）后进行开票</p> 
+<p>2 如果选票 n 已经是 leading 或 following 状态，那么说明某个节点已经进行开票并决策出结果，当前的节点进行更新状态即可：</p> 
+<p>1）如果选票 n 和当前节点处于同一个投票轮次，则选票有效，放入队列中：</p> 
+<ul>
+<li> <p>如果 n 的状态是 leading，表示对方节点已经是 leading 状态，那么直接开票，不用继续看其余选票。</p> </li>
+<li> <p>如果 n 是 following，那么对比下选票看看是不是自己中选（超过过半节点）了，如果是则开票更新，否则看下票的 id 是不是处于 leading 状态，是则开票</p> </li>
+</ul> 
+<p>2）OutOfElection 是已经出结果的集合，因为这个选票 n 不是 following 就是 leading，所以放入 OutOfElection，然后根据 OutOfElection 进行判断自己结果</p> 
+<ul>
+<li>当前选票 n 投票的是自己，并且自己获取了 OutOfElection 中的过半，那么开票，变更状态</li>
+<li>如果 OutOfElection 中有过半的投票投给了 n, 并且被投票的节点处于 leading 状态，也属于 OutOfElection，进行开票</li>
+</ul> 
+<p>3 如果以上逻辑均未命中，拿出下个选票，继续循环。</p> 
+<h3>
+<a id="_340"></a>算法精髓</h3> 
+<p>1）节点会随着收到投票的状态而变更自己的投票结果，即如果有人投票比自身新，那就变票然后再次发声。</p> 
+<p>2）在裁定状态及退出循环的判断中，只接收轮次不比自身小的。不仅会判断 <code>(vote, id, state, round)</code> 中投票者的状态，也会判断这个被投票节点的状态，另外还要满足过半节点的策略。</p> 
+<p>3）每个节点会维持俩个状态集合 ReceivedVotes 和 OutOfElection， ReceivedVotes存放接收到的合法选票，OutOfElection 存放节点已经是 leading 或 following 状态的选票。这也不难理解，ReceivedVotes 是还没开票，需要判断，OutOfElection 则是已经大选已经接收了，明确的状态了。</p> 
+<p>4）总有一个节点会在 election 选主状态先拿到过半节点，判定自己就是 leading 状态，然后广播给其其它节点，其它节点收到广播后进行自身状态修改。</p> 
+<h1>
+<a id="4__351"></a>4 总结</h1> 
+<p>其实 ZAB 的哲学和 Paxos 一致，即限制未来就是更好的选择。</p> 
+<p>就如德州扑克一样，随着不断开牌，胜算小的选手就会不断放弃自己的 call，最终只剩一个赢家拿走所有筹码。</p> 
+<p>??? 最后，如果大家觉得对你有帮助的话还希望大家动动手指给个免费的一键三连~，你的支持是我前进最大的动力。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

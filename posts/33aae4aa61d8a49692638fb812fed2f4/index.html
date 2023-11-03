@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>在自定义数据集上微调Alpaca和LLaMA - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">在自定义数据集上微调Alpaca和LLaMA</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p>本文将介绍使用LoRa在本地机器上微调Alpaca和LLaMA，我们将介绍在特定数据集上对Alpaca LoRa进行微调的整个过程，本文将涵盖数据处理、模型训练和使用流行的自然语言处理库(如Transformers和hugs Face)进行评估。此外还将介绍如何使用grado应用程序部署和测试模型。</p> 
+<p><img src="https://images2.imgbox.com/44/66/WUZNOKs2_o.png" alt=""></p> 
+<h2>
+<a id="_4"></a>配置</h2> 
+<p>首先，alpaca-lora1 GitHub存储库提供了一个脚本(finetune.py)来训练模型。在本文中，我们将利用这些代码并使其在Google Colab环境中无缝地工作。</p> 
+<p>首先安装必要的依赖:</p> 
+<pre><code> !pip install -U pip
+ !pip install accelerate==0.18.0
+ !pip install appdirs==1.4.4
+ !pip install bitsandbytes==0.37.2
+ !pip install datasets==2.10.1
+ !pip install fire==0.5.0
+ !pip install git+https://github.com/huggingface/peft.git
+ !pip install git+https://github.com/huggingface/transformers.git
+ !pip install torch==2.0.0
+ !pip install sentencepiece==0.1.97
+ !pip install tensorboardX==2.6
+ !pip install gradio==3.23.0
+</code></pre> 
+<p>安装完依赖项后，继续导入所有必要的库，并为matplotlib绘图配置设置:</p> 
+<pre><code> import transformers
+ import textwrap
+ from transformers import LlamaTokenizer, LlamaForCausalLM
+ import os
+ import sys
+ from typing import List
+ 
+ from peft import (
+     LoraConfig,
+     get_peft_model,
+     get_peft_model_state_dict,
+     prepare_model_for_int8_training,
+ )
+ 
+ import fire
+ import torch
+ from datasets import load_dataset
+ import pandas as pd
+ 
+ import matplotlib.pyplot as plt
+ import matplotlib as mpl
+ import seaborn as sns
+ from pylab import rcParams
+ 
+ %matplotlib inline
+ sns.set(rc={'figure.figsize':(10, 7)})
+ sns.set(rc={'figure.dpi':100})
+ sns.set(style='white', palette='muted', font_scale=1.2)
+ 
+ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+ DEVICE
+</code></pre> 
+<h2>
+<a id="_61"></a>数据</h2> 
+<p>我们这里使用BTC Tweets Sentiment dataset4，该数据可在Kaggle上获得，包含大约50,000条与比特币相关的tweet。为了清理数据，删除了所有以“转发”开头或包含链接的推文。</p> 
+<p>使用Pandas来加载CSV:</p> 
+<pre><code> df = pd.read_csv("bitcoin-sentiment-tweets.csv")
+ df.head()
+</code></pre> 
+<p><img src="https://images2.imgbox.com/40/f4/Lg5HBTYK_o.png" alt=""></p> 
+<p>通过清理的数据集有大约1900条推文。</p> 
+<p>情绪标签用数字表示，其中-1表示消极情绪，0表示中性情绪，1表示积极情绪。让我们看看它们的分布:</p> 
+<pre><code> df.sentiment.value_counts()
+ 
+ 
+ # 0.0    860
+ # 1.0    779
+ # -1.0    258
+ # Name: sentiment, dtype: int64
+</code></pre> 
+<p>数据量差不多，虽然负面评论较少，但是可以简单的当成平衡数据来对待：</p> 
+<pre><code> df.sentiment.value_counts().plot(kind='bar');
+</code></pre> 
+<p><img src="https://images2.imgbox.com/72/e4/E5jZhZJZ_o.png" alt=""></p> 
+<h2>
+<a id="JSON_96"></a>构建JSON数据集</h2> 
+<p>原始Alpaca存储库中的dataset5格式由一个JSON文件组成，该文件具有具有指令、输入和输出字符串的对象列表。</p> 
+<p>让我们将Pandas的DF转换为一个JSON文件，该文件遵循原始Alpaca存储库中的格式:</p> 
+<pre><code> def sentiment_score_to_name(score: float):
+     if score &gt; 0:
+         return "Positive"
+     elif score &lt; 0:
+         return "Negative"
+     return "Neutral"
+ 
+ dataset_data = [
+     {
+         "instruction": "Detect the sentiment of the tweet.",
+         "input": row_dict["tweet"],
+         "output": sentiment_score_to_name(row_dict["sentiment"])
+     }
+     for row_dict in df.to_dict(orient="records")
+ ]
+ 
+ dataset_data[0]
+</code></pre> 
+<p>结果如下：</p> 
+<pre><code> {
+   "instruction": "Detect the sentiment of the tweet.",
+   "input": "@p0nd3ea Bitcoin wasn't built to live on exchanges.",
+   "output": "Positive"
+ }
+</code></pre> 
+<p>然后就是保存生成的JSON文件，以便稍后使用它来训练模型:</p> 
+<pre><code> import json
+ with open("alpaca-bitcoin-sentiment-dataset.json", "w") as f:
+    json.dump(dataset_data, f)
+</code></pre> 
+<h2>
+<a id="_140"></a>模型权重</h2> 
+<p>虽然原始的Llama模型权重不可用，但它们被泄露并随后被改编用于HuggingFace Transformers库。我们将使用decapoda-research6:</p> 
+<pre><code> BASE_MODEL = "decapoda-research/llama-7b-hf"
+ 
+ model = LlamaForCausalLM.from_pretrained(
+     BASE_MODEL,
+     load_in_8bit=True,
+     torch_dtype=torch.float16,
+     device_map="auto",
+ )
+ 
+ tokenizer = LlamaTokenizer.from_pretrained(BASE_MODEL)
+ 
+ tokenizer.pad_token_id = (
+     0  # unk. we want this to be different from the eos token
+ )
+ tokenizer.padding_side = "left"
+</code></pre> 
+<p>这段代码使用来自Transformers库的LlamaForCausalLM类加载预训练的Llama 模型。load_in_8bit=True参数使用8位量化加载模型，以减少内存使用并提高推理速度。</p> 
+<p>代码还使用LlamaTokenizer类为同一个Llama模型加载标记器，并为填充标记设置一些附加属性。具体来说，它将pad_token_id设置为0以表示未知的令牌，并将padding_side设置为“left”以填充左侧的序列。</p> 
+<h2>
+<a id="_166"></a>数据集加载</h2> 
+<p>现在我们已经加载了模型和标记器，下一步就是加载之前保存的JSON文件，使用HuggingFace数据集库中的load_dataset()函数:</p> 
+<pre><code> data = load_dataset("json", data_files="alpaca-bitcoin-sentiment-dataset.json")
+ data["train"]
+</code></pre> 
+<p>结果如下：</p> 
+<pre><code> Dataset({
+     features: ['instruction', 'input', 'output'],
+     num_rows: 1897
+ })
+</code></pre> 
+<p>接下来，我们需要从加载的数据集中创建提示并标记它们:</p> 
+<pre><code> def generate_prompt(data_point):
+     return f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.  # noqa: E501
+ ### Instruction:
+ {data_point["instruction"]}
+ ### Input:
+ {data_point["input"]}
+ ### Response:
+ {data_point["output"]}"""
+ 
+ 
+ def tokenize(prompt, add_eos_token=True):
+     result = tokenizer(
+         prompt,
+         truncation=True,
+         max_length=CUTOFF_LEN,
+         padding=False,
+         return_tensors=None,
+     )
+     if (
+         result["input_ids"][-1] != tokenizer.eos_token_id
+         and len(result["input_ids"]) &lt; CUTOFF_LEN
+         and add_eos_token
+     ):
+         result["input_ids"].append(tokenizer.eos_token_id)
+         result["attention_mask"].append(1)
+ 
+     result["labels"] = result["input_ids"].copy()
+ 
+     return result
+ 
+ def generate_and_tokenize_prompt(data_point):
+     full_prompt = generate_prompt(data_point)
+     tokenized_full_prompt = tokenize(full_prompt)
+     return tokenized_full_prompt
+</code></pre> 
+<p>第一个函数generate_prompt从数据集中获取一个数据点，并通过组合指令、输入和输出值来生成提示。第二个函数tokenize接收生成的提示，并使用前面定义的标记器对其进行标记。它还向输入序列添加序列结束标记，并将标签设置为与输入序列相同。第三个函数generate_and_tokenize_prompt结合了前两个函数，生成并标记提示。</p> 
+<p>数据准备的最后一步是将数据集分成单独的训练集和验证集:</p> 
+<pre><code> train_val = data["train"].train_test_split(
+     test_size=200, shuffle=True, seed=42
+ )
+ train_data = (
+     train_val["train"].map(generate_and_tokenize_prompt)
+ )
+ val_data = (
+     train_val["test"].map(generate_and_tokenize_prompt)
+ )
+</code></pre> 
+<p>我们还需要数据进行打乱，并且获取200个样本作为验证集。generate_and_tokenize_prompt()函数应用于训练和验证集中的每个示例，生成标记化的提示。</p> 
+<h2>
+<a id="_241"></a>训练</h2> 
+<p>训练过程需要几个参数，这些参数主要来自原始存储库中的微调脚本:</p> 
+<pre><code> LORA_R = 8
+ LORA_ALPHA = 16
+ LORA_DROPOUT= 0.05
+ LORA_TARGET_MODULES = [
+     "q_proj",
+     "v_proj",
+ ]
+ 
+ BATCH_SIZE = 128
+ MICRO_BATCH_SIZE = 4
+ GRADIENT_ACCUMULATION_STEPS = BATCH_SIZE // MICRO_BATCH_SIZE
+ LEARNING_RATE = 3e-4
+ TRAIN_STEPS = 300
+ OUTPUT_DIR = "experiments"
+</code></pre> 
+<p>下面就可以为训练准备模型了:</p> 
+<pre><code> model = prepare_model_for_int8_training(model)
+ config = LoraConfig(
+     r=LORA_R,
+     lora_alpha=LORA_ALPHA,
+     target_modules=LORA_TARGET_MODULES,
+     lora_dropout=LORA_DROPOUT,
+     bias="none",
+     task_type="CAUSAL_LM",
+ )
+ model = get_peft_model(model, config)
+ model.print_trainable_parameters()
+ 
+ #trainable params: 4194304 || all params: 6742609920 || trainable%: 0.06220594176090199
+</code></pre> 
+<p>我们使用LORA算法初始化并准备模型进行训练，通过量化可以减少模型大小和内存使用，而不会显着降低准确性。</p> 
+<p>LoraConfig7是一个为LORA算法指定超参数的类，例如正则化强度(lora_alpha)、dropout概率(lora_dropout)和要压缩的目标模块(target_modules)。</p> 
+<p>然后就可以直接使用Transformers库进行训练：</p> 
+<pre><code> training_arguments = transformers.TrainingArguments(
+     per_device_train_batch_size=MICRO_BATCH_SIZE,
+     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+     warmup_steps=100,
+     max_steps=TRAIN_STEPS,
+     learning_rate=LEARNING_RATE,
+     fp16=True,
+     logging_steps=10,
+     optim="adamw_torch",
+     evaluation_strategy="steps",
+     save_strategy="steps",
+     eval_steps=50,
+     save_steps=50,
+     output_dir=OUTPUT_DIR,
+     save_total_limit=3,
+     load_best_model_at_end=True,
+     report_to="tensorboard"
+ )
+</code></pre> 
+<p>这段代码创建了一个TrainingArguments对象，该对象指定用于训练模型的各种设置和超参数。这些包括:</p> 
+<ul>
+<li>gradient_accumulation_steps:在执行向后/更新之前累积梯度的更新步数。</li>
+<li>warmup_steps:优化器的预热步数。</li>
+<li>max_steps:要执行的训练总数。</li>
+<li>learning_rate:学习率。</li>
+<li>fp16:使用16位精度进行训练。</li>
+</ul> 
+<p>DataCollatorForSeq2Seq是transformer库中的一个类，它为序列到序列(seq2seq)模型创建一批输入/输出序列。在这段代码中，DataCollatorForSeq2Seq对象用以下参数实例化:</p> 
+<pre><code> data_collator = transformers.DataCollatorForSeq2Seq(
+     tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
+ )
+</code></pre> 
+<p>pad_to_multiple_of:表示最大序列长度的整数，四舍五入到最接近该值的倍数。</p> 
+<p>padding:一个布尔值，指示是否将序列填充到指定的最大长度。</p> 
+<p>以上就是训练的所有代码准备，下面就是训练了</p> 
+<pre><code> trainer = transformers.Trainer(
+     model=model,
+     train_dataset=train_data,
+     eval_dataset=val_data,
+     args=training_arguments,
+     data_collator=data_collator
+ )
+ model.config.use_cache = False
+ old_state_dict = model.state_dict
+ model.state_dict = (
+     lambda self, *_, **__: get_peft_model_state_dict(
+         self, old_state_dict()
+     )
+ ).__get__(model, type(model))
+ 
+ model = torch.compile(model)
+ 
+ trainer.train()
+ model.save_pretrained(OUTPUT_DIR)
+</code></pre> 
+<p>在实例化训练器之后，代码在模型的配置中将use_cache设置为False，并使用get_peft_model_state_dict()函数为模型创建一个state_dict，该函数为使用低精度算法进行训练的模型做准备。</p> 
+<p>然后在模型上调用torch.compile()函数，该函数编译模型的计算图并准备使用PyTorch 2进行训练。</p> 
+<p>训练过程在A100上持续了大约2个小时。我们看一下Tensorboard上的结果:</p> 
+<p><img src="https://images2.imgbox.com/69/26/BJb4rzry_o.png" alt=""></p> 
+<p>训练损失和评估损失呈稳步下降趋势。看来我们的微调是有效的。</p> 
+<p>如果你想将模型上传到Hugging Face上，可以使用下面代码，</p> 
+<pre><code> from huggingface_hub import notebook_login
+ 
+ notebook_login()
+ model.push_to_hub("curiousily/alpaca-bitcoin-tweets-sentiment", use_auth_token=True)
+</code></pre> 
+<h2>
+<a id="_371"></a>推理</h2> 
+<p>我们可以使用generate.py脚本来测试模型:</p> 
+<pre><code> !git clone https://github.com/tloen/alpaca-lora.git
+ %cd alpaca-lora
+ !git checkout a48d947
+</code></pre> 
+<p>我们的脚本启动的gradio应用程序</p> 
+<pre><code> !python generate.py 
+     --load_8bit 
+     --base_model 'decapoda-research/llama-7b-hf' 
+     --lora_weights 'curiousily/alpaca-bitcoin-tweets-sentiment' 
+     --share_gradio
+</code></pre> 
+<p>简单的界面如下：</p> 
+<p><img src="https://images2.imgbox.com/b8/6f/jyiWr5wf_o.png" alt=""></p> 
+<h2>
+<a id="_395"></a>总结</h2> 
+<p>我们已经成功地使用LoRa方法对Llama 模型进行了微调，还演示了如何在Gradio应用程序中使用它。</p> 
+<p>如果你对本文感兴趣，请看原文：</p> 
+<p><a href="https://avoid.overfit.cn/post/34b6eaf7097a4929b9aab7809f3cfeaa">https://avoid.overfit.cn/post/34b6eaf7097a4929b9aab7809f3cfeaa</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

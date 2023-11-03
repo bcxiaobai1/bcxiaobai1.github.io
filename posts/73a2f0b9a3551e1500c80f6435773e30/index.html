@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【Redis】分别从互斥锁与逻辑过期两个方面来解决缓存击穿问题 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Redis】分别从互斥锁与逻辑过期两个方面来解决缓存击穿问题</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul>
+<li><a href="#_1">前言</a></li>
+<li>
+<ul>
+<li><a href="#_3">一.什么是缓存击穿</a></li>
+<li><a href="#_9">二.基于互斥锁解决缓存击穿</a></li>
+<li><a href="#_105">三.基于逻辑过期解决缓存击穿</a></li>
+<li><a href="#_205">四.接口测试</a></li>
+<li><a href="#_212">五.两者对比</a></li>
+</ul>
+ </li>
+</ul>
+</div>
+<p></p> 
+<h1>
+<a id="_1"></a>前言</h1> 
+<p><strong>身逢乱世，未雨绸缪</strong></p> 
+<h2>
+<a id="_3"></a>一.什么是缓存击穿</h2> 
+<p>说直白点，就是<font color="green"><strong>一个被非常频繁使用的key突然失效了请求没命中缓存，而因此造成了无数的请求落到数据库上</strong></font>，瞬间将数据库拖垮。而这样的key也被叫做<font color="red"><strong>热key!</strong></font></p> 
+<p><img src="https://images2.imgbox.com/38/ed/eqHD3hce_o.png" alt="在这里插入图片描述"><br> 可以直观地看到，要想解决缓存击穿绝对不能让这么多线程的请求在某一时段大量去访问到数据库。<br> 以此为基础，针对访问数据库的限制有两种解决方案：</p> 
+<h2>
+<a id="_9"></a>二.基于互斥锁解决缓存击穿</h2> 
+<p>对于一个访问频繁的id查询接口，可能会发生缓存击穿问题，下面通过互斥锁的方式来解决<br> <img src="https://images2.imgbox.com/2a/ee/UhFO5oVB_o.png" alt="在这里插入图片描述"><br> 在以前，id查询信息的接口里一般将查询的信息写到缓存里，针对是否命中缓存再去做对应的处理。而在并发的情况下，对于热Key失效的情况，大量的请求则会直接打到数据库上并试图重建缓存，很有可能打停数据库，导致服务中断。对于这样的情况往往是在未命中缓存时，最佳的处理点就在于业务中判断缓存是否命中之后的那一步操作，即“多余”的请求对数据库的访问与否。<br> <font color="red"><strong>其他线程的请求能不能去访问数据库？什么时候才能去访问数据库？</strong></font><br> <strong>其他的线程能不能去访问数据库？——加锁，有锁才能<br> 什么时候才能去访问数据库？——等主线程释放锁<br> 那其他线程拿不到锁的时间该干嘛？——睡吧，等会再来</strong></p> 
+<p>为了实现在多个线程并行的情况下只能有一个线程获得锁，我们可以使用Redis自带的setnx<br> <img src="https://images2.imgbox.com/36/f4/oEUuEAeY_o.png" alt="在这里插入图片描述"><br> 他可以保证在key不存在时可以进行写的操作，key存在时无法进行写的操作，这就完美地保证了在并发情况下只有第一个拿到锁的线程才能去写，并且他写完了之后（在不释放的前提下）别人就写不了了。<br> <font color="green"><strong>如何去获取？写个Key—Value进去<br> 如何释放？把Key删了 del lock (通常设置一个有效期，避免长时间未释放的情况)</strong></font></p> 
+<p>这样我就可以以此为条件封装两个方法，一个写key来<strong>尝试</strong>获取锁另一个删key来释放锁。就像这样：</p> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * 尝试获取锁
+ *
+ * @param key
+ * @return
+ */</span>
+<span class="token keyword">private</span> <span class="token keyword">boolean</span> <span class="token function">tryLock</span><span class="token punctuation">(</span>String key<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    Boolean flag <span class="token operator">=</span> stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">setIfAbsent</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> <span class="token string">"1"</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">,</span> TimeUnit<span class="token punctuation">.</span>SECONDS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> BooleanUtil<span class="token punctuation">.</span><span class="token function">isTrue</span><span class="token punctuation">(</span>flag<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">/**
+ * 释放锁
+ *
+ * @param key
+ */</span>
+<span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">unlock</span><span class="token punctuation">(</span>String key<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    stringRedisTemplate<span class="token punctuation">.</span><span class="token function">delete</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在并行情况下每当其他线程想要获取锁，来访问缓存都要通过将自己的key写到tryLock（）方法里，setIfAbsent（）返回false则说明有线程在在更新缓存数据，锁未释放。若返回true则说明当前线程拿到锁了可以访问缓存甚至操作缓存。<br> 我们在下面一个热门的查询场景中用代码用代码来实现互斥锁解决缓存击穿<br> <img src="https://images2.imgbox.com/47/51/tCuUnhva_o.png" alt="在这里插入图片描述"></p> 
+<pre><code class="prism language-java">    <span class="token comment">/**
+     * 解决缓存击穿的互斥锁
+     * @param id
+     * @return
+     */</span>
+    <span class="token keyword">public</span> Shop <span class="token function">queryWithMutex</span><span class="token punctuation">(</span>Long id<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        String key <span class="token operator">=</span> CACHE_SHOP_KEY <span class="token operator">+</span> id<span class="token punctuation">;</span>
+        <span class="token comment">//1.从Redis查询缓存</span>
+        String shopJson <span class="token operator">=</span> stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//JSON格式</span>
+        <span class="token comment">//2.判断是否存在</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>StrUtil<span class="token punctuation">.</span><span class="token function">isNotBlank</span><span class="token punctuation">(</span>shopJson<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">//不为空就返回 此工具类API会判断＂＂为false</span>
+            <span class="token comment">//存在则直接返回</span>
+            Shop shop <span class="token operator">=</span> JSONUtil<span class="token punctuation">.</span><span class="token function">toBean</span><span class="token punctuation">(</span>shopJson<span class="token punctuation">,</span> Shop<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//return Result.ok(shop);</span>
+            <span class="token keyword">return</span> shop<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//3.判断是否为空值</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>shopJson <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//返回一个空值</span>
+            <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//4.缓存重建</span>
+        <span class="token comment">//4.1获得互斥锁</span>
+        String lockKey <span class="token operator">=</span> <span class="token string">"lock:shop"</span><span class="token operator">+</span>id<span class="token punctuation">;</span>
+        Shop shopById<span class="token operator">=</span>null<span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">boolean</span> isLock <span class="token operator">=</span> <span class="token function">tryLock</span><span class="token punctuation">(</span>lockKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//4.2判断是否获取成功</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>isLock<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//4.3失败，则休眠并重试</span>
+                Thread<span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">50</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+               <span class="token keyword">return</span> <span class="token function">queryWithMutex</span><span class="token punctuation">(</span>id<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//4.4成功，根据id查询数据库</span>
+            shopById <span class="token operator">=</span> <span class="token function">getById</span><span class="token punctuation">(</span>id<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//5.不存在则返回错误</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>shopById <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//将空值写入Redis</span>
+                stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> <span class="token string">""</span><span class="token punctuation">,</span> CACHE_NULL_TTL<span class="token punctuation">,</span> TimeUnit<span class="token punctuation">.</span>MINUTES<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//return Result.fail("暂无该商铺信息");</span>
+                <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//6.存在，写入Redis</span>
+            stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> JSONUtil<span class="token punctuation">.</span><span class="token function">toJsonStr</span><span class="token punctuation">(</span>shopById<span class="token punctuation">)</span><span class="token punctuation">,</span> CACHE_SHOP_TTL<span class="token punctuation">,</span> TimeUnit<span class="token punctuation">.</span>MINUTES<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">InterruptedException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span>e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//7.释放互斥锁</span>
+            <span class="token function">unlock</span><span class="token punctuation">(</span>lockKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">return</span> shopById<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_105"></a>三.基于逻辑过期解决缓存击穿</h2> 
+<p>逻辑过期不是真正的过期，对于对应的Key我们并不需要去设置TTL，而是通过业务逻辑来达到一个类似于“过期”的效果。其本质还是限制落到数据库的请求数量！但前提是牺牲一致性保证可用性，还是上一个业务的接口，通过使用逻辑过期来解决缓存击穿：<br> <img src="https://images2.imgbox.com/ee/b9/FdxgPUqI_o.png" alt="在这里插入图片描述"><br> 这样一来，缓存基本是会被命中的，因为我没有给缓存设置任何过期时间，并且对于Key的set都是事先选择好的，如果出现未命中的情况基本可以判断他不在选择之内,这样我就可以直接返回错误信息。那么对于命中的情况，就需要先判断逻辑时间是否过期，根据结果再来决定是否进行缓存重建。而这里的<font color="red"><strong>逻辑时间就是减少大量请求落到数据库的一个“关口”</strong></font></p> 
+<p><font color="green"><strong>看完上面这一段，相信大家还很迷惑。既然没有设置过期时间，那你为什么还要判断逻辑过期时间，怎么还存在过不过期的问题？<br> 其实，这里所谓的逻辑过期时间只是一个类的属性字段，根本没有上升到Redis，上升到缓存的层面，是用来辅助判断查询对象的，也就是说，所谓的过期时间与缓存数据是剥离开的，所以根本不存在缓存过期的问题，自然数据库也不会有压力。</strong></font></p> 
+<p><strong>代码阶段：</strong></p> 
+<p><font color="green"><strong>为了尽可能地贴合开闭原则，不采用继承的方式来扩展原实体的属性而是通过组合的形式。</strong></font></p> 
+<pre><code class="prism language-Java">@Data
+public class RedisData {
+    private LocalDateTime expireTime;
+    private Object data;  //这里用Object是因为以后可能还要缓存别的数据
+}
+</code></pre> 
+<p>封装一个方法用来模拟更新逻辑过期时间与缓存的数据在测试类里运行起来达到数据与热的效果</p> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * 添加逻辑过期时间
+ *
+ * @param id
+ * @param expireTime
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">saveShopRedis</span><span class="token punctuation">(</span>Long id<span class="token punctuation">,</span> Long expireTime<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//查询店铺信息</span>
+    Shop shop <span class="token operator">=</span> <span class="token function">getById</span><span class="token punctuation">(</span>id<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//封装逻辑过期时间</span>
+    RedisData redisData <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">RedisData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    redisData<span class="token punctuation">.</span><span class="token function">setData</span><span class="token punctuation">(</span>shop<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    redisData<span class="token punctuation">.</span><span class="token function">setExpireTime</span><span class="token punctuation">(</span>LocalDateTime<span class="token punctuation">.</span><span class="token function">now</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">plusSeconds</span><span class="token punctuation">(</span>expireTime<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//将封装过期时间和商铺数据的对象写入Redis</span>
+    stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>CACHE_SHOP_KEY <span class="token operator">+</span> id<span class="token punctuation">,</span> JSONUtil<span class="token punctuation">.</span><span class="token function">toJsonStr</span><span class="token punctuation">(</span>redisData<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>查询接口：</strong></p> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * 逻辑过期解决缓存击穿
+ *
+ * @param id
+ * @return
+ */</span>
+<span class="token keyword">public</span> Shop <span class="token function">queryWithLogicalExpire</span><span class="token punctuation">(</span>Long id<span class="token punctuation">)</span> <span class="token keyword">throws</span> InterruptedException <span class="token punctuation">{<!-- --></span>
+    String key <span class="token operator">=</span> CACHE_SHOP_KEY <span class="token operator">+</span> id<span class="token punctuation">;</span>
+    Thread<span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">200</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//1.从Redis查询缓存</span>
+    String shopJson <span class="token operator">=</span> stringRedisTemplate<span class="token punctuation">.</span><span class="token function">opsForValue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//JSON格式</span>
+    <span class="token comment">//2.判断是否存在</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>StrUtil<span class="token punctuation">.</span><span class="token function">isBlank</span><span class="token punctuation">(</span>shopJson<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//不存在则直接返回</span>
+        <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//3.判断是否为空值</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>shopJson <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//返回一个空值</span>
+        <span class="token comment">//return Result.fail("店铺不存在！");</span>
+        <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//4.命中</span>
+    <span class="token comment">//4.1将JSON反序列化为对象</span>
+    RedisData redisData <span class="token operator">=</span> JSONUtil<span class="token punctuation">.</span><span class="token function">toBean</span><span class="token punctuation">(</span>shopJson<span class="token punctuation">,</span> RedisData<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    Shop shop <span class="token operator">=</span> JSONUtil<span class="token punctuation">.</span><span class="token function">toBean</span><span class="token punctuation">(</span><span class="token punctuation">(</span>JSONObject<span class="token punctuation">)</span> redisData<span class="token punctuation">.</span><span class="token function">getData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> Shop<span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    LocalDateTime expireTime <span class="token operator">=</span> redisData<span class="token punctuation">.</span><span class="token function">getExpireTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//4.2判断是否过期</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>expireTime<span class="token punctuation">.</span><span class="token function">isAfter</span><span class="token punctuation">(</span>LocalDateTime<span class="token punctuation">.</span><span class="token function">now</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//5.未过期则返回店铺信息</span>
+        <span class="token keyword">return</span> shop<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//6.过期则缓存重建</span>
+    <span class="token comment">//6.1获取互斥锁</span>
+    String LockKey <span class="token operator">=</span> LOCK_SHOP_KEY <span class="token operator">+</span> id<span class="token punctuation">;</span>
+    <span class="token keyword">boolean</span> isLock <span class="token operator">=</span> <span class="token function">tryLock</span><span class="token punctuation">(</span>LockKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//6.2判断是否成功获得锁</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>isLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//6.3成功，开启独立线程，实现缓存重建</span>
+        CACHE_REBUILD_EXECUTOR<span class="token punctuation">.</span><span class="token function">submit</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span><span class="token operator">&gt;</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//重建缓存</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">saveShop2Redis</span><span class="token punctuation">(</span>id<span class="token punctuation">,</span> <span class="token number">20</span>L<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span>e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//释放锁</span>
+                <span class="token function">unlock</span><span class="token punctuation">(</span>LockKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//6.4返回商铺信息</span>
+    <span class="token keyword">return</span> shop<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_205"></a>四.接口测试</h2> 
+<p>可以看到通过APIfox模拟并发场景进行接口测试，平均耗时还是很短的，控制台的日志也没有频繁的去访问数据库的记录：<br> <img src="https://images2.imgbox.com/84/8b/s82V0B3g_o.png" alt="在这里插入图片描述"><br> 由于ApiFox不支持大量线程，我又用jmeter拿1550个线程测试了一下，接口依然都可以跑通！<br> <img src="https://images2.imgbox.com/87/ac/7YS3m9WP_o.png" alt="在这里插入图片描述"><br> 看来接口在并发场景下性能还不错，QPS也挺理想</p> 
+<h2>
+<a id="_212"></a>五.两者对比</h2> 
+<p><strong>可以看到，互斥锁的方式代码层面更加简单，只需要封装两个简单的方法来操作锁。而逻辑过期的方式更加复杂，需要额外增添实体类，封装方法之后还要去测试类里模拟数据预热。<br> 相比之下，前者没有消耗额外的内存（不开新线程），数据一致性强，但是线程需要等待，性能可能不好并且有死锁的风险。后者开辟了新的线程有额外的内存消耗，牺牲一致性保证可用性，但是不要需等待性能比较好。</strong></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

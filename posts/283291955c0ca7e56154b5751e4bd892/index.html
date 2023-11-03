@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Android系统原理性问题分析 - 单路情况下的C/S模型 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android系统原理性问题分析 - 单路情况下的C/S模型</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>声明</h1> 
+<ul>
+<li>在Android系统中经常会遇到一些系统原理性的问题，在此专栏中集中来讨论下。</li>
+<li>Android系统中很多地方都采用了I/O多路复用的机制，为了引出I/O多路复用机制，先来分析多路并发情况下的C/S模型。</li>
+<li>此篇参考一些博客和书籍，代码基于Android 7.1.1，不方便逐一列出，仅供学习、知识分享。</li>
+<li>此篇代码下载：<a href="https://download.csdn.net/download/Xiaoma_Pedro/87822109">单路情况下的CS模型 tcp-socket udp-socket ud-socket</a>
+</li>
+</ul> 
+<h1>
+<a id="1__6"></a>1 概述</h1> 
+<p>在一个典型的客户端/服务器场景中，应用程序使用 socket 进行通信的方式如下：</p> 
+<ul>
+<li>各个应用程序创建一个 socket。socket 是一个允许通信的“设备”，两个应用程序都需要用到它。</li>
+<li>服务器将自己的 socket 绑定到一个众所周知的地址(名称)上使得客户端能够定位到它的位置。</li>
+</ul> 
+<p>使用 socket()系统调用能够创建一个 socket，它返回一个用来在后续系统调用中引用该socket 的文件描述符。</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span></span>
+<span class="token keyword">int</span> <span class="token function">socket</span><span class="token punctuation">(</span><span class="token keyword">int</span> domain<span class="token punctuation">,</span> <span class="token keyword">int</span> type<span class="token punctuation">,</span> <span class="token keyword">int</span> protocol<span class="token punctuation">)</span><span class="token punctuation">;</span>		<span class="token comment">//returns file descriptor on success, or -1 on error</span>
+</code></pre> 
+<p>不管参数protocol，此篇中protocol参数都设置为0，如果对这个参数感兴趣，可以自行搜索学习。主要分析下前两个参数： domain 和 type。</p> 
+<h2>
+<a id="11__domain_17"></a>1.1 通信 domain</h2> 
+<p>socket 存在于一个通信 domain 中，它确定：</p> 
+<ul>
+<li>识别出一个 socket 的方法(即 socket“地址”的格式)；</li>
+<li>通信范围（位于同一主机上的应用程序之间还是在位于使用一个网络连接起来的不同主机上的应用程序之间），也就是IPC或RPC的概念。</li>
+</ul> 
+<p>现代操作系统至少支持下列 domain：</p> 
+<ul>
+<li>
+<strong>UNIX(AF_UNIX) domain</strong> ：允许在同一主机上的应用程序之间进行通信。</li>
+<li>
+<strong>IPv4(AF INET) domain</strong> ：允许在使用因特网协议 IP4 网络连接起来的主机上的应用程序之间进行通信。</li>
+<li>
+<strong>IPV6 (AF INET6) domain</strong> ：允许在使用因特网协议 IPV6 网络连接起来的主机上的应用程序之间进行通信。</li>
+</ul> 
+<table>
+<thead><tr>
+<th align="center">Domain</th>
+<th align="center">domain</th>
+<th align="center">执行的通信</th>
+<th align="center">应用程序间的通信</th>
+<th align="center">地址格式</th>
+<th align="center">地址结构</th>
+</tr></thead>
+<tbody>
+<tr>
+<td align="center">Unix Domain</td>
+<td align="center">AF_UNIX</td>
+<td align="center">内核中</td>
+<td align="center">同一主机</td>
+<td align="center">路径名</td>
+<td align="center">sockaddr un</td>
+</tr>
+<tr>
+<td align="center">Internet Domain</td>
+<td align="center">AF_INET</td>
+<td align="center">通过IPv4</td>
+<td align="center">通过 IPv4 网络连接起来的主机</td>
+<td align="center">32位IPV4 地址+16 位端口号</td>
+<td align="center">sockaddrin</td>
+</tr>
+<tr>
+<td align="center">Internet Domain</td>
+<td align="center">AF_INET6</td>
+<td align="center">通过IPv6</td>
+<td align="center">通过 IPv6 网络连按起来的主机</td>
+<td align="center">128 位 IPv6 地址+16 位端口号</td>
+<td align="center">sockaddr in6</td>
+</tr>
+</tbody>
+</table> 
+<h2>
+<a id="12_socket__32"></a>1.2 socket 类型</h2> 
+<p>  每个 socket 实现都至少提供了两种 socket：流和数据报。这两种 socket 类型在 Unix domain 和 Internet domain 中都得到了支持。下表对这两种 socket 类型的属性进行了总结：</p> 
+<table><tbody>
+<tr>
+<th colspan="1" rowspan="2">属性</th>
+<th colspan="2">socket 类型</th>
+</tr>
+<tr>
+<td>流 (SOCK_STREAM)</td>
+<td>数据报 (SOCK_DGRAM)</td>
+</tr>
+<tr>
+<td>可靠传输？</td>
+<td>Yes</td>
+<td>No</td>
+</tr>
+<tr>
+<td>消息边界保留？</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>面向链接？</td>
+<td>Yes</td>
+<td>No</td>
+</tr>
+</tbody></table> 
+<p>  <font color="orange"><strong>流 socket</strong></font> (SOCK_STREAM) 提供了一个可靠的双向的字节流通信信道。在这段描述中的术语的含义如下：</p> 
+<ul>
+<li>可靠的：表示可以保证发送者传输的数据会完整无缺地到达接收应用程序 (假设网络链接和接收者都不会崩溃) 或收到一个传输失败的通知。</li>
+<li>双向的：表示数据可以在两个 socket 之间的任意方向上传输。</li>
+<li>字节流：表示与管道一样不存在消息边界的概念 。</li>
+</ul> 
+<p>  一个流 socket 类似于使用一对允许在两个应用程序之间进行双向通信的管道，它们之间的差别在于 (Internet domain) socket 允许在网络上进行通信。<br>   流 socket 的正常工作需要一对相互连接的 socket，因此流 socket 通常被称为面向连接的。术语“对等 socket”是指连接另一端的 socket，“对等地址”表示该 socket 的地址，“对等应用程序”表示利用这个对等 socket 的应用程序。有些时候，术语“远程”(或外部) 是作为对等的同义词使用。类似地，有些时候术语“本地”被用来指连接的这一端上的应用程序、socket或地址。一个流 socket 只能与一个对等 socket 进行连接。</p> 
+<p>  <font color="orange"><strong>数据报 socket</strong></font> (SOCK_DGRAM)允许数据以被称为数据报的消息的形式进行交换。在数据报 socket 中，消息边界得到了保留，但数据传输是不可靠的。消息的到达可能是无序的、重复的或者根本就无法到达。<br>   数据报 socket 是更一般的无连接 socket 概念的一个示例。与流 socket 不同，一个数据报socket 在使用时无需与另一个 socket 连接。<br> 在 Internet domain 中，数据报 socket 使用了用户数据报协议 (UDP)，而流 socket 则 (通常)使用了传输控制协议 (TCP)。一般来讲，在称呼这两种 socket 时不会使用术语“Internet domain数据报 socket” 和 “Internet domain 流 socket”，而是分别使用术语“UDP socket”和“TCP socket”。</p> 
+<h2>
+<a id="13_Socket__71"></a>1.3 Socket 相关的系统调用</h2> 
+<p>关键的 socket 系统调用包括以下几种：</p> 
+<ul>
+<li>socket() 系统调用创建一个新 socket。</li>
+<li>bind() 系统调用将一个 socket 绑定到一个地址上。通常，服务器需要使用这个调用来将其 socket 绑定到一个众所周知的地址上使得客户端能够定位到该 socket 上。</li>
+<li>listen() 系统调用允许一个流 socket 接受来自其他 socket 的接入连接。</li>
+<li>accept() 系统调用在一个监听流 socket 上接受来自一个对等应用程序的连接，并可选地返回对等 socket 的地址。</li>
+<li>connect() 系统调用建立与另一个 socket 之间的连接。</li>
+</ul> 
+<h1>
+<a id="2_Internet_DOMAINCS_78"></a>2 Internet DOMAIN的C/S模型</h1> 
+<h2>
+<a id="21_TCP_socket_CSSOCK_STREAM_79"></a>2.1 TCP socket 的C/S模型（SOCK_STREAM）</h2> 
+<p><img src="https://images2.imgbox.com/da/eb/SPodx46Z_o.png" alt="在这里插入图片描述" width="620"><br> <strong>1. 建立连接过程</strong>：<br>   服务器调用socket()、bind()、listen() 完成初始化后，调用 accept() 阻塞等待，处于监听端口的状态。客户端调用 socket() 初始化后，调用 connect() 发出 SYN 段并阻塞等待服务器应答，服务器应答一个 SYN-ACK 段，客户端收到后从 connect() 返回，同时应答一个 ACK 段，服务器收到后从 accept() 返回。</p> 
+<p><strong>2. 数据传输的过程</strong>：<br>   建立连接后，TCP 协议提供全双工的通信服务，但是一般的 C/S 程序的流程是由客户端主动发起请求，服务器被动处理请求，一问一答的方式。因此，服务器从 accept() 返回后立刻调用 read()，读 socket 就像读管道一样，如果没有数据到达就阻塞等待，这时客户端调用 write() 发送请求给服务器，服务器收到后从 read() 返回，对客户端的请求进行处理，在此期间客户端调用 read() 阻塞等待服务器的应答，服务器调用 write() 将处理结果发回给客户端，再次调用 read() 阻塞等待下一条请求，客户端收到后从 read() 返回，发送下一条请求，如此循环下去。</p> 
+<p><strong>3. 断开连接过程</strong>：<br>   若客户端没有更多的请求了，就调用 close() 关闭连接，就像写端关闭的管道一样，服务器的 read() 返回 0，这样服务器就知道客户端关闭了连接，也调用 close() 关闭连接。</p> 
+<p><font color="red"><strong>注意</strong></font>：任何一方调用close() 后，连接的两个传输方向都关闭，不能再发送数据了。如果一方调用 shutdown() 则连接处于半关闭状态，仍可接收对方发来的数据。</p> 
+<h3>
+<a id="211_Server_91"></a>2.1.1 Server端代码</h3> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/types.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;strings.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;ctype.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"wrap.h"</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SERV_PORT</span> <span class="token expression"><span class="token number">6666</span></span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> sfd<span class="token punctuation">,</span> cfd<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> len<span class="token punctuation">,</span> i<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span>BUFSIZ<span class="token punctuation">]</span><span class="token punctuation">,</span> clie_IP<span class="token punctuation">[</span>BUFSIZ<span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> serv_addr<span class="token punctuation">,</span> clie_addr<span class="token punctuation">;</span>
+    <span class="token class-name">socklen_t</span> clie_addr_len<span class="token punctuation">;</span>
+
+    sfd <span class="token operator">=</span> <span class="token function">Socket</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> SOCK_STREAM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>serv_addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>serv_addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>           
+    serv_addr<span class="token punctuation">.</span>sin_family <span class="token operator">=</span> AF_INET<span class="token punctuation">;</span>                 
+    serv_addr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> <span class="token function">htonl</span><span class="token punctuation">(</span>INADDR_ANY<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    serv_addr<span class="token punctuation">.</span>sin_port <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>SERV_PORT<span class="token punctuation">)</span><span class="token punctuation">;</span>          
+
+    <span class="token function">Bind</span><span class="token punctuation">(</span>sfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>serv_addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>serv_addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">Listen</span><span class="token punctuation">(</span>sfd<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>                                
+
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"wait for client connect ...n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    clie_addr_len <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>clie_addr_len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    cfd <span class="token operator">=</span> <span class="token function">Accept</span><span class="token punctuation">(</span>sfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>clie_addr<span class="token punctuation">,</span> <span class="token operator">&amp;</span>clie_addr_len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"cfd = ----%dn"</span><span class="token punctuation">,</span> cfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"client IP: %s  port:%dn"</span><span class="token punctuation">,</span> 
+            <span class="token function">inet_ntop</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> <span class="token operator">&amp;</span>clie_addr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">.</span>s_addr<span class="token punctuation">,</span> clie_IP<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>clie_IP<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> 
+            <span class="token function">ntohs</span><span class="token punctuation">(</span>clie_addr<span class="token punctuation">.</span>sin_port<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        len <span class="token operator">=</span> <span class="token function">Read</span><span class="token punctuation">(</span>cfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">Write</span><span class="token punctuation">(</span>STDOUT_FILENO<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> len<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+            buf<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">toupper</span><span class="token punctuation">(</span>buf<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">Write</span><span class="token punctuation">(</span>cfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span> 
+    <span class="token punctuation">}</span>
+
+    <span class="token function">Close</span><span class="token punctuation">(</span>sfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">Close</span><span class="token punctuation">(</span>cfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<h3>
+<a id="212_Client_152"></a>2.1.2 Client端代码</h3> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"wrap.h"</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SERV_IP</span> <span class="token string">"127.0.0.1"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SERV_PORT</span> <span class="token expression"><span class="token number">6666</span></span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> sfd<span class="token punctuation">,</span> len<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> serv_addr<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span>BUFSIZ<span class="token punctuation">]</span><span class="token punctuation">;</span> 
+
+    sfd <span class="token operator">=</span> <span class="token function">Socket</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> SOCK_STREAM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>serv_addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>serv_addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>                       
+    serv_addr<span class="token punctuation">.</span>sin_family <span class="token operator">=</span> AF_INET<span class="token punctuation">;</span>                             
+    <span class="token function">inet_pton</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> SERV_IP<span class="token punctuation">,</span> <span class="token operator">&amp;</span>serv_addr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">.</span>s_addr<span class="token punctuation">)</span><span class="token punctuation">;</span>    
+    serv_addr<span class="token punctuation">.</span>sin_port <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>SERV_PORT<span class="token punctuation">)</span><span class="token punctuation">;</span>                      
+
+    <span class="token function">Connect</span><span class="token punctuation">(</span>sfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>serv_addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>serv_addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">fgets</span><span class="token punctuation">(</span>buf<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token constant">stdin</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> r <span class="token operator">=</span> <span class="token function">Write</span><span class="token punctuation">(</span>sfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> <span class="token function">strlen</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>       
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Write r ======== %dn"</span><span class="token punctuation">,</span> r<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        len <span class="token operator">=</span> <span class="token function">Read</span><span class="token punctuation">(</span>sfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Read len ========= %dn"</span><span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">Write</span><span class="token punctuation">(</span>STDOUT_FILENO<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">Close</span><span class="token punctuation">(</span>sfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>  由于客户端不需要固定的端口号，因此不必调用 bind()，客户端的端口号由内核自动分配。注意，<font color="green"><strong>客户端不是不允许调用 bind()，只是没有必要调用 bind() 固定一个端口号，服务器也不是必须调用 bind()，但如果服务器不调用bind()，内核会自动给服务器分配监听端口，每次启动服务器时端口号都不一样，客户端要连接服务器就很麻烦</strong></font>。</p> 
+<h2>
+<a id="22_UDP_socket_CSSOCK_DGRAM_195"></a>2.2 UDP socket 的C/S模型（SOCK_DGRAM）</h2> 
+<p><img src="https://images2.imgbox.com/10/27/uZHkgMgd_o.png" alt="在这里插入图片描述"><br>   由于UDP不需要维护连接，程序逻辑简单了很多，但是UDP协议是不可靠的，<font color="orange"><strong>保证通讯可靠性的机制需要在应用层实现</strong></font>。</p> 
+<h3>
+<a id="221_Server_198"></a>2.2.1 Server端代码</h3> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;ctype.h&gt;</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SERV_PORT</span> <span class="token expression"><span class="token number">8000</span></span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> serv_addr<span class="token punctuation">,</span> clie_addr<span class="token punctuation">;</span>
+    <span class="token class-name">socklen_t</span> clie_addr_len<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> sockfd<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span>BUFSIZ<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">char</span> str<span class="token punctuation">[</span>INET_ADDRSTRLEN<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span> i<span class="token punctuation">,</span> n<span class="token punctuation">;</span>
+
+    sockfd <span class="token operator">=</span> <span class="token function">socket</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> SOCK_DGRAM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>serv_addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>serv_addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    serv_addr<span class="token punctuation">.</span>sin_family <span class="token operator">=</span> AF_INET<span class="token punctuation">;</span>
+    serv_addr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> <span class="token function">htonl</span><span class="token punctuation">(</span>INADDR_ANY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    serv_addr<span class="token punctuation">.</span>sin_port <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>SERV_PORT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">bind</span><span class="token punctuation">(</span>sockfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>serv_addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>serv_addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Accepting connections ...n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        clie_addr_len <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>clie_addr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        n <span class="token operator">=</span> <span class="token function">recvfrom</span><span class="token punctuation">(</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> BUFSIZ<span class="token punctuation">,</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>clie_addr<span class="token punctuation">,</span> <span class="token operator">&amp;</span>clie_addr_len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+            <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"recvfrom error"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"received from %s at PORT %dn"</span><span class="token punctuation">,</span>
+                <span class="token function">inet_ntop</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> <span class="token operator">&amp;</span>clie_addr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">,</span> str<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>str<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                <span class="token function">ntohs</span><span class="token punctuation">(</span>clie_addr<span class="token punctuation">.</span>sin_port<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> n<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+            buf<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">toupper</span><span class="token punctuation">(</span>buf<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        n <span class="token operator">=</span> <span class="token function">sendto</span><span class="token punctuation">(</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> n<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>clie_addr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>clie_addr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+            <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"sendto error"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">close</span><span class="token punctuation">(</span>sockfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="222_Client_249"></a>2.2.2 Client端代码</h3> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;ctype.h&gt;</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SERV_PORT</span> <span class="token expression"><span class="token number">8000</span></span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span>argv<span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> servaddr<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> sockfd<span class="token punctuation">,</span> n<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span>BUFSIZ<span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+    sockfd <span class="token operator">=</span> <span class="token function">socket</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> SOCK_DGRAM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>servaddr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>servaddr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    servaddr<span class="token punctuation">.</span>sin_family <span class="token operator">=</span> AF_INET<span class="token punctuation">;</span>
+    <span class="token function">inet_pton</span><span class="token punctuation">(</span>AF_INET<span class="token punctuation">,</span> <span class="token string">"127.0.0.1"</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>servaddr<span class="token punctuation">.</span>sin_addr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    servaddr<span class="token punctuation">.</span>sin_port <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>SERV_PORT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token function">fgets</span><span class="token punctuation">(</span>buf<span class="token punctuation">,</span> BUFSIZ<span class="token punctuation">,</span> <span class="token constant">stdin</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        n <span class="token operator">=</span> <span class="token function">sendto</span><span class="token punctuation">(</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> <span class="token function">strlen</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>servaddr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>servaddr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+            <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"sendto error"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        n <span class="token operator">=</span> <span class="token function">recvfrom</span><span class="token punctuation">(</span>sockfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> BUFSIZ<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>         <span class="token comment">//NULL:不关心对端信息</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+            <span class="token function">perror</span><span class="token punctuation">(</span><span class="token string">"recvfrom error"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token function">write</span><span class="token punctuation">(</span>STDOUT_FILENO<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">close</span><span class="token punctuation">(</span>sockfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="23_TCP_socket__UDP_socket__289"></a>2.3 TCP socket 与 UDP socket 的区别</h2> 
+<p>  Internet DOMAIN中的传输层主要应用的协议模型：TCP协议和UDP协议。TCP协议在网络通信中占主导地位，绝大多数的网络通信借助TCP协议完成数据传输。但UDP也是网络通信中不可或缺的重要通信手段。<br>   相较于TCP而言，UDP通信的形式更像是发短信。<font color="green"><strong>不需要在数据传输之前建立、维护连接。只专心获取数据就好。省去了三次握手的过程，通信速度可以大大提高</strong></font>，但与之伴随的通信的稳定性和正确率便得不到保证。因此，称UDP为“无连接的不可靠报文传递”。<br>   与TCP相比，UDP有哪些优点和不足呢？<font color="green"><strong>由于无需创建连接，所以UDP开销较小，数据传输速度快，实时性较强。多用于对实时性要求较高的通信场合，如视频会议、电话会议等</strong></font>。但随之也伴随着数据传输不可靠，传输数据的正确率、传输顺序和流量都得不到控制和保证。所以，<font color="orange"><strong>通常情况下，使用UDP协议进行数据传输，为保证数据的正确性，需要在应用层添加辅助校验协议来弥补UDP的不足，以达到数据可靠传输的目的</strong></font>。<br>   <font color="red"><strong>与TCP类似的，UDP也有可能出现缓冲区被填满后，再接收数据时丢包的现象</strong></font>。由于它没有TCP滑动窗口的机制，通常采用如下两种方法解决：</p> 
+<ol>
+<li>服务器应用层设计流量控制，控制发送数据速度。</li>
+<li>借助 setsockopt 函数改变接收缓冲区大小。如：<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span></span>
+<span class="token keyword">int</span> <span class="token function">setsockopt</span><span class="token punctuation">(</span><span class="token keyword">int</span> sockfd<span class="token punctuation">,</span> <span class="token keyword">int</span> level<span class="token punctuation">,</span> <span class="token keyword">int</span> optname<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">void</span> <span class="token operator">*</span>optval<span class="token punctuation">,</span> <span class="token class-name">socklen_t</span> optlen<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">int</span> n <span class="token operator">=</span> <span class="token number">220</span>x1024
+<span class="token function">setsockopt</span><span class="token punctuation">(</span>sockfd<span class="token punctuation">,</span> SOL_SOCKET<span class="token punctuation">,</span> SO_RCVBUF<span class="token punctuation">,</span> <span class="token operator">&amp;</span>n<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>n<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> </li>
+</ol> 
+<h1>
+<a id="3_Unix_DOMAINCS_303"></a>3 Unix DOMAIN的C/S模型</h1> 
+<p>  socket API 原本是为网络通讯设计的，<font color="green"><strong>后来在 socket 的框架上发展出一种 IPC 机制，也就是Unix Domain Socket</strong></font>。虽然网络 socket 也可用于同一台主机的进程间通讯（通过loopback地址127.0.0.1），但是Unix Domain Socket 用于 IPC 更有效率：<font color="green"><strong>不需要经过网络协议栈，不需要打包拆包、计算校验和、维护序号和应答等，只是将应用层数据从一个进程拷贝到另一个进程</strong></font>。这是因为，IPC机制本质上是可靠的通讯，而网络协议是为不可靠的通讯设计的。<font color="orange"><strong>Unix Domain Socket 也提供面向流和面向数据报两种 API 接口，类似于 TCP 和 UDP，但是面向消息的 Unix Domain Socket 也是可靠的，消息既不会丢失也不会顺序错乱</strong></font>。<br> <img src="https://images2.imgbox.com/dd/69/OISZsgWC_o.png" alt="在这里插入图片描述" width="500"><br>   UNIX Domain Socket是全双工的，API接口语义丰富，相比其它 IPC 机制有明显的优越性，目前已成为使用最广泛的IPC机制。使用Unix Domain Socket的过程和网络 socket 相似，也要先调用 socket() 创建一个 socket 文件描述符，address_family 指定为 AF_UNIX，type 可以选择 SOCK_DGRAM/SOCK_STREAM，protocol 参数仍然指定为 0。<br>   Unix Domain Socket 与网络 socket 编程最明显的不同在于地址格式不同，用结构体 sockaddr_un 表示，<font color="orange"><strong>网络编程的 socket 地址是IP地址+端口号，而 Unix Domain Socket 的地址是一个 socket 类型的文件在文件系统中的路径</strong></font>，<strong>此 socket 文件由 bind() 调用创建，如果调用 bind() 时该文件已存在，则 bind() 错误返回</strong>。</p> 
+<p>对比网络套接字地址结构和本地套接字地址结构：</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> <span class="token punctuation">{<!-- --></span>
+__kernel_sa_family_t sin_family<span class="token punctuation">;</span> 			<span class="token comment">/* Address family */</span>  	地址结构类型
+__be16 sin_port<span class="token punctuation">;</span>					 	<span class="token comment">/* Port number */</span>		端口号
+<span class="token keyword">struct</span> <span class="token class-name">in_addr</span> sin_addr<span class="token punctuation">;</span>					<span class="token comment">/* Internet address */</span>	IP地址
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token keyword">struct</span> <span class="token class-name">sockaddr_un</span> <span class="token punctuation">{<!-- --></span>
+__kernel_sa_family_t sun_family<span class="token punctuation">;</span> 		<span class="token comment">/* AF_UNIX */</span>			地址结构类型
+<span class="token keyword">char</span> sun_path<span class="token punctuation">[</span>UNIX_PATH_MAX<span class="token punctuation">]</span><span class="token punctuation">;</span> 		<span class="token comment">/* pathname */</span>		socket文件名<span class="token punctuation">(</span>含路径<span class="token punctuation">)</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<h2>
+<a id="31_CSSOCK_STREAM_322"></a>3.1 C/S数据模型（SOCK_STREAM）</h2> 
+<h3>
+<a id="311_Server_323"></a>3.1.1 Server端代码</h3> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;strings.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;ctype.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/un.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stddef.h&gt;</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"wrap.h"</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SERV_ADDR</span>  <span class="token string">"serv.socket"</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> lfd<span class="token punctuation">,</span> cfd<span class="token punctuation">,</span> len<span class="token punctuation">,</span> size<span class="token punctuation">,</span> i<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_un</span> servaddr<span class="token punctuation">,</span> cliaddr<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span><span class="token number">4096</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+    lfd <span class="token operator">=</span> <span class="token function">Socket</span><span class="token punctuation">(</span>AF_UNIX<span class="token punctuation">,</span> SOCK_STREAM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>servaddr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>servaddr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    servaddr<span class="token punctuation">.</span>sun_family <span class="token operator">=</span> AF_UNIX<span class="token punctuation">;</span>
+    <span class="token function">strcpy</span><span class="token punctuation">(</span>servaddr<span class="token punctuation">.</span>sun_path<span class="token punctuation">,</span>SERV_ADDR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    len <span class="token operator">=</span> <span class="token function">offsetof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_un</span><span class="token punctuation">,</span> sun_path<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token function">strlen</span><span class="token punctuation">(</span>servaddr<span class="token punctuation">.</span>sun_path<span class="token punctuation">)</span><span class="token punctuation">;</span>     <span class="token comment">/* servaddr total len */</span>
+
+    <span class="token function">unlink</span><span class="token punctuation">(</span>SERV_ADDR<span class="token punctuation">)</span><span class="token punctuation">;</span>                              <span class="token comment">/* 确保bind之前serv.sock文件不存在,bind会创建该文件 */</span>
+    <span class="token function">Bind</span><span class="token punctuation">(</span>lfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>servaddr<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>           <span class="token comment">/* 参3不能是sizeof(servaddr) */</span>
+
+    <span class="token function">Listen</span><span class="token punctuation">(</span>lfd<span class="token punctuation">,</span> <span class="token number">20</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"Accept ...n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        len <span class="token operator">=</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>cliaddr<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        cfd <span class="token operator">=</span> <span class="token function">Accept</span><span class="token punctuation">(</span>lfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>cliaddr<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token class-name">socklen_t</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        len <span class="token operator">-=</span> <span class="token function">offsetof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_un</span><span class="token punctuation">,</span> sun_path<span class="token punctuation">)</span><span class="token punctuation">;</span>      <span class="token comment">/* 得到文件名的长度 */</span>
+        cliaddr<span class="token punctuation">.</span>sun_path<span class="token punctuation">[</span>len<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">''</span><span class="token punctuation">;</span>                       <span class="token comment">/* 确保打印时,没有乱码出现 */</span>
+
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"client bind filename %sn"</span><span class="token punctuation">,</span> cliaddr<span class="token punctuation">.</span>sun_path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>size <span class="token operator">=</span> <span class="token function">read</span><span class="token punctuation">(</span>cfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> size<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+                buf<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">toupper</span><span class="token punctuation">(</span>buf<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">write</span><span class="token punctuation">(</span>cfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> size<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token function">close</span><span class="token punctuation">(</span>cfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token function">close</span><span class="token punctuation">(</span>lfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="312_Client_380"></a>3.1.2 Client端代码</h3> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;unistd.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/types.h&gt;</span>         </span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/socket.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;strings.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;ctype.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;arpa/inet.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;sys/un.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stddef.h&gt;</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"wrap.h"</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SERV_ADDR</span> <span class="token string">"serv.socket"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">CLIE_ADDR</span> <span class="token string">"clie.socket"</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span>  cfd<span class="token punctuation">,</span> len<span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">sockaddr_un</span> servaddr<span class="token punctuation">,</span> cliaddr<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span><span class="token number">4096</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+    cfd <span class="token operator">=</span> <span class="token function">Socket</span><span class="token punctuation">(</span>AF_UNIX<span class="token punctuation">,</span> SOCK_STREAM<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>cliaddr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>cliaddr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    cliaddr<span class="token punctuation">.</span>sun_family <span class="token operator">=</span> AF_UNIX<span class="token punctuation">;</span>
+    <span class="token function">strcpy</span><span class="token punctuation">(</span>cliaddr<span class="token punctuation">.</span>sun_path<span class="token punctuation">,</span>CLIE_ADDR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    len <span class="token operator">=</span> <span class="token function">offsetof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_un</span><span class="token punctuation">,</span> sun_path<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token function">strlen</span><span class="token punctuation">(</span>cliaddr<span class="token punctuation">.</span>sun_path<span class="token punctuation">)</span><span class="token punctuation">;</span>     <span class="token comment">/* 计算客户端地址结构有效长度 */</span>
+
+    <span class="token function">unlink</span><span class="token punctuation">(</span>CLIE_ADDR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">Bind</span><span class="token punctuation">(</span>cfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>cliaddr<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>                                 <span class="token comment">/* 客户端也需要bind, 不能依赖自动绑定*/</span>
+
+    
+    <span class="token function">bzero</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>servaddr<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>servaddr<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>                                          <span class="token comment">/* 构造server 地址 */</span>
+    servaddr<span class="token punctuation">.</span>sun_family <span class="token operator">=</span> AF_UNIX<span class="token punctuation">;</span>
+    <span class="token function">strcpy</span><span class="token punctuation">(</span>servaddr<span class="token punctuation">.</span>sun_path<span class="token punctuation">,</span>SERV_ADDR<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    len <span class="token operator">=</span> <span class="token function">offsetof</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr_un</span><span class="token punctuation">,</span> sun_path<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token function">strlen</span><span class="token punctuation">(</span>servaddr<span class="token punctuation">.</span>sun_path<span class="token punctuation">)</span><span class="token punctuation">;</span>   <span class="token comment">/* 计算服务器端地址结构有效长度 */</span>
+
+    <span class="token function">Connect</span><span class="token punctuation">(</span>cfd<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>servaddr<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token function">fgets</span><span class="token punctuation">(</span>buf<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token constant">stdin</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token constant">NULL</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">write</span><span class="token punctuation">(</span>cfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> <span class="token function">strlen</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        len <span class="token operator">=</span> <span class="token function">read</span><span class="token punctuation">(</span>cfd<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>buf<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">write</span><span class="token punctuation">(</span>STDOUT_FILENO<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">close</span><span class="token punctuation">(</span>cfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="32_CSSOCK_DGRAM_435"></a>3.2 C/S数据模型（SOCK_DGRAM）</h2> 
+<p>  因为Unix Domain Socket是用于IPC的，所以知道SOCK_STREAM类型的就够了，这里暂不做例子的代码编写了。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

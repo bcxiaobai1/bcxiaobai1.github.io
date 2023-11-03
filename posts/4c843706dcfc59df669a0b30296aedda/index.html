@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>谈谈linux网络编程中的应用层协议定制、Json序列化与反序列化那些事 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">谈谈linux网络编程中的应用层协议定制、Json序列化与反序列化那些事</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p></p> 
+<div class="toc"> 
+ <h3>linux【网络编程】之协议定制、序列化与反序列化</h3> 
+ <ul>
+<li><a href="#_1">一、序列化与反序列化</a></li>
+<li><a href="#_6">二、应用层协议如何定制</a></li>
+<li><a href="#_11">三、网络通信中数据流动的本质</a></li>
+<li><a href="#_19">四、网络版计算器编写</a></li>
+<li>
+<ul>
+<li><a href="#41__22">4.1 业务流程</a></li>
+<li><a href="#42__52">4.2 核心代码</a></li>
+</ul> 
+ </li>
+</ul> 
+</div> 
+<p></p> 
+<h1>
+<a id="_1"></a>一、序列化与反序列化</h1> 
+<p>由于socket api的接口，在读写数据的时候是以字符串的方式发送接收的，如果需要传输<strong>结构化的数据</strong>，就需要制定一个协议<br> <img src="https://images2.imgbox.com/e7/f1/1yYoNCZ8_o.png" alt="在这里插入图片描述"><br> 结构化数据在发送到网络中之前需要完成序列化<br> 接收方收到的是序列字节流，需要完成反序列化才能使用（如ChatInfo._name）</p> 
+<h1>
+<a id="_6"></a>二、应用层协议如何定制</h1> 
+<p>当我们进行网络通信的的时候，一端发送时构造的数据, 在另一端能够正确的进行解析（完整的读到一条报文）, 就是可行的的. 这种约定, 就是 应用层协议</p> 
+<p>如何保证读到的消息是一个完整的请求<br> TCP是面向字节流的，无法直接读取，需要明确报文和报文的边界，常见的方法有.定长：<strong>固定报文长度、特殊符号：在报文前面加上一个字段、自描述</strong>。</p> 
+<h1>
+<a id="_11"></a>三、网络通信中数据流动的本质</h1> 
+<p><img src="https://images2.imgbox.com/53/0d/32tJTJly_o.png" alt="在这里插入图片描述"><br> 我们调用的所有的发送函数（read），不是把数据发送到网络中，发送函数的本质是拷贝函数（将数据从应用层缓冲区拷贝到发送缓冲区）</p> 
+<ol>
+<li>Client-&gt;Server:tcp发送的本质，其实就是将数据从Client的发送缓冲区拷贝到Server的接收缓冲区</li>
+<li>反过来Server-&gt;CLient:其实就是将数据从Server的发送缓冲区拷贝到<br> Client的接收缓冲区</li>
+<li>这也说明了网络编程(套接字编程)是全双工的</li>
+</ol> 
+<h1>
+<a id="_19"></a>四、网络版计算器编写</h1> 
+<p>有了前面的知识，下面实现一个服务器版的计算器. 我们需要客户端把要计算的两个数发过去, 然后由服务器进行计算, 最后再把结果返回给客户端</p> 
+<h2>
+<a id="41__22"></a>4.1 业务流程</h2> 
+<p><mark>在完成服务器与客户端正常通信的基础上完成一次请求与响应的流程</mark><br> <strong>客户端：</strong></p> 
+<ol>
+<li>从键盘读取数据并调用ParseLine（）函数将输入的数据转换成类似<code>“123+123"</code>的格式</li>
+<li>序列化字符串，将结构化的数据转化成用于网络通信的一个大字符串，调用请求类的序列化函数enLength()</li>
+<li>添加报头：通过协议定制的规则，将"x op y"----&gt;“content_len”rn"x op y"rn</li>
+<li>向服务端发送已经构建好的报文</li>
+<li>阻塞读取服务端处理后的响应数据<br> <strong>等待服务器发送响应报文</strong>
+</li>
+<li>读取到一个完整的报文</li>
+<li>调用协议方法去掉报头并将结果输出到text里面</li>
+<li>对收到的响应正文序列化填充到响应类对象的成员变量里</li>
+<li>通过正常调用，访问处理后的结果</li>
+<li>发送新的请求</li>
+</ol> 
+<p><strong>服务端：</strong></p> 
+<ol>
+<li>创建子进程去执行任务</li>
+<li>死循环式的读取来自客户端的报文，调用recvRequest，读取一个完整的请求放入输出型参数text里面</li>
+<li>根据协议定制，调用deLength()去掉报文的报头，得到有效数据req_str</li>
+<li>将来自网络的字符串通过调用请求类的反序列化转化成结构化的数据，请求类对象成员完成赋值</li>
+<li>通过回调函数（一个输入型参数（请求类对象），一个输出型参数（响应类对象））传递两个类对象，将计算结果赋值给响应类的成员变量</li>
+<li>开始将处理结果返回给客户端，调用响应类中的序列化方法将结构化数据转换成一个大字符串</li>
+<li>对大字符串添加报头构建成一个完整的报文，发送给客户端</li>
+<li>服务端等待新的请求…</li>
+</ol> 
+<h2>
+<a id="42__52"></a>4.2 核心代码</h2> 
+<p><strong>Protocol.hpp包含了协议定制函数、请求响应序列化与反序列化函数、完整报文获取函数</strong></p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">pragma</span> <span class="token expression">once</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;iostream&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;string&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;cstring&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;jsoncpp/json/json.h&gt;</span></span>
+
+<span class="token keyword">using</span> <span class="token keyword">namespace</span> std<span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SEP</span> <span class="token string">" "</span>             <span class="token comment">// 分隔符</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">SEP_LEN</span> <span class="token expression"><span class="token function">strlen</span><span class="token punctuation">(</span>SEP<span class="token punctuation">)</span> </span><span class="token comment">// 分隔符长度，不能用sizeof</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">LINE_SEP</span> <span class="token string">"rn"</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">LINE_SEP_LINE</span> <span class="token expression"><span class="token function">strlen</span><span class="token punctuation">(</span>LINE_SEP<span class="token punctuation">)</span></span></span>
+
+<span class="token keyword">enum</span>
+<span class="token punctuation">{<!-- --></span>
+    OK <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">,</span>
+    DIV_ZERO<span class="token punctuation">,</span>
+    MOD_ZERO<span class="token punctuation">,</span>
+    OP_ERROR
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 协议定制：给报文段加一个特殊字段：有效载荷的长度</span>
+
+<span class="token comment">//                报头            有效载荷</span>
+<span class="token comment">// </span>
+<span class="token comment">//"exitcode result"----&gt;"content_len"rn"exitcode result"rn----</span>
+std<span class="token operator">::</span>string <span class="token function">enlength</span><span class="token punctuation">(</span><span class="token keyword">const</span> std<span class="token operator">::</span>string <span class="token operator">&amp;</span>text<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+
+
+
+    <span class="token comment">// text就是"x op y"</span>
+    string send_string <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">to_string</span><span class="token punctuation">(</span>text<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// content_len</span>
+    send_string <span class="token operator">+=</span> LINE_SEP<span class="token punctuation">;</span>
+    send_string <span class="token operator">+=</span> text<span class="token punctuation">;</span>
+    send_string <span class="token operator">+=</span> LINE_SEP<span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> send_string<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// 去掉报头，提取有效载荷</span>
+<span class="token comment">//"content_len"rn"exitcode result"rn----&gt;exitcode result</span>
+<span class="token keyword">bool</span> <span class="token function">delength</span><span class="token punctuation">(</span><span class="token keyword">const</span> std<span class="token operator">::</span>string <span class="token operator">&amp;</span>package<span class="token punctuation">,</span> std<span class="token operator">::</span>string <span class="token operator">*</span>text<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+
+
+    <span class="token keyword">auto</span> pos <span class="token operator">=</span> package<span class="token punctuation">.</span><span class="token function">find</span><span class="token punctuation">(</span>LINE_SEP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>pos <span class="token operator">==</span> string<span class="token operator">::</span>npos<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    <span class="token comment">// 提取报头字符串</span>
+    string text_len_string <span class="token operator">=</span> package<span class="token punctuation">.</span><span class="token function">substr</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> pos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 将报头信息转化成字符串</span>
+    <span class="token keyword">int</span> text_len <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">stoi</span><span class="token punctuation">(</span>text_len_string<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 提取有效载荷</span>
+    <span class="token operator">*</span>text <span class="token operator">=</span> package<span class="token punctuation">.</span><span class="token function">substr</span><span class="token punctuation">(</span>pos <span class="token operator">+</span> LINE_SEP_LINE<span class="token punctuation">,</span> text_len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// 请求</span>
+<span class="token keyword">class</span> <span class="token class-name">Request</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token function">Request</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token operator">:</span> <span class="token function">x_</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">y_</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">op_</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">}</span>
+    <span class="token function">Request</span><span class="token punctuation">(</span><span class="token keyword">int</span> x<span class="token punctuation">,</span> <span class="token keyword">int</span> y<span class="token punctuation">,</span> <span class="token keyword">char</span> op<span class="token punctuation">)</span>
+        <span class="token operator">:</span> <span class="token function">x_</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">y_</span><span class="token punctuation">(</span>y<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">op_</span><span class="token punctuation">(</span>op<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 序列化</span>
+    <span class="token keyword">bool</span> <span class="token function">serialize</span><span class="token punctuation">(</span>std<span class="token operator">::</span>string <span class="token operator">*</span>out<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">MYSELF        </span></span>
+        <span class="token comment">// 将结构化数据转化成--&gt;"x op y"</span>
+
+        out<span class="token operator">-&gt;</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        std<span class="token operator">::</span>string x_string <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">to_string</span><span class="token punctuation">(</span>x_<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        std<span class="token operator">::</span>string y_string <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">to_string</span><span class="token punctuation">(</span>y_<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token operator">*</span>out <span class="token operator">=</span> x_string<span class="token punctuation">;</span>
+        <span class="token operator">*</span>out <span class="token operator">+=</span> SEP<span class="token punctuation">;</span>
+        <span class="token operator">*</span>out <span class="token operator">+=</span> op_<span class="token punctuation">;</span>
+        <span class="token operator">*</span>out <span class="token operator">+=</span> SEP<span class="token punctuation">;</span>
+        <span class="token operator">*</span>out <span class="token operator">+=</span> y_string<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+        Json<span class="token operator">::</span>Value root<span class="token punctuation">;</span><span class="token comment">//定义一个万能对象</span>
+        root<span class="token punctuation">[</span><span class="token string">"first"</span><span class="token punctuation">]</span><span class="token operator">=</span>x_<span class="token punctuation">;</span>
+        root<span class="token punctuation">[</span><span class="token string">"second"</span><span class="token punctuation">]</span><span class="token operator">=</span>y_<span class="token punctuation">;</span>
+        root<span class="token punctuation">[</span><span class="token string">"oper"</span><span class="token punctuation">]</span><span class="token operator">=</span>op_<span class="token punctuation">;</span>
+
+        Json<span class="token operator">::</span>FastWriter writer<span class="token punctuation">;</span>
+        <span class="token operator">*</span>out<span class="token operator">=</span>writer<span class="token punctuation">.</span><span class="token function">write</span><span class="token punctuation">(</span>root<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span>        </span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// 反序列化</span>
+    <span class="token keyword">bool</span> <span class="token function">deserialize</span><span class="token punctuation">(</span><span class="token keyword">const</span> std<span class="token operator">::</span>string <span class="token operator">&amp;</span>in<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+ <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">MYSELF         </span></span>
+        <span class="token comment">//"x op yyy";</span>
+        <span class="token keyword">auto</span> left <span class="token operator">=</span> in<span class="token punctuation">.</span><span class="token function">find</span><span class="token punctuation">(</span>SEP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">auto</span> right <span class="token operator">=</span> in<span class="token punctuation">.</span><span class="token function">rfind</span><span class="token punctuation">(</span>SEP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>left <span class="token operator">==</span> std<span class="token operator">::</span>string<span class="token operator">::</span>npos <span class="token operator">||</span> right <span class="token operator">==</span> std<span class="token operator">::</span>string<span class="token operator">::</span>npos<span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>left <span class="token operator">==</span> right<span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 截取子串</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>right <span class="token operator">-</span> <span class="token punctuation">(</span>left <span class="token operator">+</span> SEP_LEN<span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token number">1</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+        std<span class="token operator">::</span>string x_string <span class="token operator">=</span> in<span class="token punctuation">.</span><span class="token function">substr</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> left<span class="token punctuation">)</span><span class="token punctuation">;</span>         <span class="token comment">// 定位到x</span>
+        std<span class="token operator">::</span>string y_string <span class="token operator">=</span> in<span class="token punctuation">.</span><span class="token function">substr</span><span class="token punctuation">(</span>right <span class="token operator">+</span> SEP_LEN<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 定位到yyyy</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>x_string<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>y_string<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+        x_ <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">stoi</span><span class="token punctuation">(</span>x_string<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        y_ <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">stoi</span><span class="token punctuation">(</span>y_string<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        op_ <span class="token operator">=</span> in<span class="token punctuation">[</span>left <span class="token operator">+</span> SEP_LEN<span class="token punctuation">]</span><span class="token punctuation">;</span> <span class="token comment">// 截取op</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+        Json<span class="token operator">::</span>Value root<span class="token punctuation">;</span>
+        Json<span class="token operator">::</span>Reader reader<span class="token punctuation">;</span>
+        reader<span class="token punctuation">.</span><span class="token function">parse</span><span class="token punctuation">(</span>in<span class="token punctuation">,</span>root<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//将解析出来的值放进root里面</span>
+        x_<span class="token operator">=</span>root<span class="token punctuation">[</span><span class="token string">"first"</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">asInt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//将val转化成整数</span>
+        y_<span class="token operator">=</span>root<span class="token punctuation">[</span><span class="token string">"second"</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">asInt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        op_<span class="token operator">=</span>root<span class="token punctuation">[</span><span class="token string">"oper"</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">asInt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token keyword">int</span> x_<span class="token punctuation">;</span>
+    <span class="token keyword">int</span> y_<span class="token punctuation">;</span>
+    <span class="token keyword">char</span> op_<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 响应</span>
+<span class="token keyword">class</span> <span class="token class-name">Response</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token function">Response</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token operator">:</span> <span class="token function">exitcode_</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">result_</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">}</span>
+    <span class="token function">Response</span><span class="token punctuation">(</span><span class="token keyword">int</span> exitcode<span class="token punctuation">,</span> <span class="token keyword">int</span> result<span class="token punctuation">)</span>
+        <span class="token operator">:</span> <span class="token function">exitcode_</span><span class="token punctuation">(</span>exitcode<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">result_</span><span class="token punctuation">(</span>result<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// 序列化</span>
+    <span class="token keyword">bool</span> <span class="token function">serialize</span><span class="token punctuation">(</span>std<span class="token operator">::</span>string <span class="token operator">*</span>out<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">MYSELF</span></span>
+        <span class="token comment">// 清空字符串</span>
+        out<span class="token operator">-&gt;</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 将退出码和结果转换成字符串</span>
+        string ec_string <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">to_string</span><span class="token punctuation">(</span>exitcode_<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        string res_string <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">to_string</span><span class="token punctuation">(</span>result_<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 合并字符</span>
+        <span class="token operator">*</span>out <span class="token operator">=</span> ec_string<span class="token punctuation">;</span>
+        <span class="token operator">*</span>out <span class="token operator">+=</span> SEP<span class="token punctuation">;</span>
+        <span class="token operator">*</span>out <span class="token operator">+=</span> res_string<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+        Json<span class="token operator">::</span>Value root<span class="token punctuation">;</span>
+        root<span class="token punctuation">[</span><span class="token string">"exitcode"</span><span class="token punctuation">]</span><span class="token operator">=</span>exitcode_<span class="token punctuation">;</span>
+        root<span class="token punctuation">[</span><span class="token string">"result"</span><span class="token punctuation">]</span><span class="token operator">=</span>result_<span class="token punctuation">;</span>
+        Json<span class="token operator">::</span>FastWriter writer<span class="token punctuation">;</span>
+        <span class="token operator">*</span>out<span class="token operator">=</span>writer<span class="token punctuation">.</span><span class="token function">write</span><span class="token punctuation">(</span>root<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">// 反序列化</span>
+    <span class="token keyword">bool</span> <span class="token function">deserialize</span><span class="token punctuation">(</span><span class="token keyword">const</span> std<span class="token operator">::</span>string <span class="token operator">&amp;</span>in<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">MYSELF        </span></span>
+        <span class="token comment">//"exitcode result"</span>
+        <span class="token keyword">auto</span> mid <span class="token operator">=</span> in<span class="token punctuation">.</span><span class="token function">find</span><span class="token punctuation">(</span>SEP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>mid <span class="token operator">==</span> std<span class="token operator">::</span>string<span class="token operator">::</span>npos<span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token comment">// 截取字符串</span>
+        string ec_string <span class="token operator">=</span> in<span class="token punctuation">.</span><span class="token function">substr</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> mid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        string res_string <span class="token operator">=</span> in<span class="token punctuation">.</span><span class="token function">substr</span><span class="token punctuation">(</span>mid <span class="token operator">+</span> SEP_LEN<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ec_string<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">||</span> res_string<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 写入退出码和结果</span>
+        exitcode_ <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">stoi</span><span class="token punctuation">(</span>ec_string<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        result_ <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">stoi</span><span class="token punctuation">(</span>res_string<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">else</span></span>
+        Json<span class="token operator">::</span>Reader reader<span class="token punctuation">;</span>
+        Json<span class="token operator">::</span>Value root<span class="token punctuation">;</span>
+        reader<span class="token punctuation">.</span><span class="token function">parse</span><span class="token punctuation">(</span>in<span class="token punctuation">,</span>root<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        exitcode_<span class="token operator">=</span>root<span class="token punctuation">[</span><span class="token string">"exitcode"</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">asInt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        result_<span class="token operator">=</span>root<span class="token punctuation">[</span><span class="token string">"result"</span><span class="token punctuation">]</span><span class="token punctuation">.</span><span class="token function">asInt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token keyword">public</span><span class="token operator">:</span>
+    <span class="token keyword">int</span> exitcode_<span class="token punctuation">;</span> <span class="token comment">// 0成功,!0错误</span>
+    <span class="token keyword">int</span> result_<span class="token punctuation">;</span>   <span class="token comment">// 计算结果</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 读取一个完整的请求放入text里面</span>
+<span class="token comment">//"content_len"rn"x op y"rn"content_len"rn"x op y"rn</span>
+<span class="token keyword">bool</span> <span class="token function">recvRequest</span><span class="token punctuation">(</span><span class="token keyword">int</span> sock<span class="token punctuation">,</span> std<span class="token operator">::</span>string <span class="token operator">&amp;</span>inbuffer<span class="token punctuation">,</span> string <span class="token operator">*</span>text<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">char</span> buffer<span class="token punctuation">[</span><span class="token number">1024</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        ssize_t n <span class="token operator">=</span> <span class="token function">recv</span><span class="token punctuation">(</span>sock<span class="token punctuation">,</span> buffer<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>buffer<span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            buffer<span class="token punctuation">[</span>n<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+            inbuffer <span class="token operator">+=</span> buffer<span class="token punctuation">;</span>
+
+            <span class="token comment">// 边读边处理</span>
+            <span class="token keyword">auto</span> pos <span class="token operator">=</span> inbuffer<span class="token punctuation">.</span><span class="token function">find</span><span class="token punctuation">(</span>LINE_SEP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 如果没有读到rn，接着去读</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>pos <span class="token operator">==</span> string<span class="token operator">::</span>npos<span class="token punctuation">)</span>
+                <span class="token keyword">continue</span><span class="token punctuation">;</span>
+            <span class="token comment">// 走到这已经读到了content_len，知道了有效载荷长度</span>
+
+            string text_len_string <span class="token operator">=</span> inbuffer<span class="token punctuation">.</span><span class="token function">substr</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> pos<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 报头</span>
+            <span class="token keyword">int</span> text_len <span class="token operator">=</span> std<span class="token operator">::</span><span class="token function">stoi</span><span class="token punctuation">(</span>text_len_string<span class="token punctuation">)</span><span class="token punctuation">;</span>        <span class="token comment">// 正文长度</span>
+            <span class="token keyword">int</span> total_len <span class="token operator">=</span> text_len_string<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">2</span> <span class="token operator">*</span> LINE_SEP_LINE <span class="token operator">+</span> text_len<span class="token punctuation">;</span>
+            std<span class="token operator">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"处理前#inbuffer: n"</span>
+                      <span class="token operator">&lt;&lt;</span> inbuffer <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>inbuffer<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> total_len<span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                std<span class="token operator">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"你输入的消息，没有严格遵守我们的协议，正在等待后续的内容, continue"</span> <span class="token operator">&lt;&lt;</span> std<span class="token operator">::</span>endl<span class="token punctuation">;</span>
+                <span class="token keyword">continue</span><span class="token punctuation">;</span> <span class="token comment">// 没有读到一个完整的报文</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 至少有一个报文</span>
+            <span class="token operator">*</span>text <span class="token operator">=</span> inbuffer<span class="token punctuation">.</span><span class="token function">substr</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> total_len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            inbuffer<span class="token punctuation">.</span><span class="token function">erase</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> total_len<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            std<span class="token operator">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"处理后#inbuffer: n"</span>
+                      <span class="token operator">&lt;&lt;</span> inbuffer <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+
+            <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">else</span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>服务端响应流程</strong></p> 
+<pre><code class="prism language-cpp"><span class="token keyword">void</span> <span class="token function">handlerEnter</span><span class="token punctuation">(</span><span class="token keyword">int</span> sock<span class="token punctuation">,</span> func_t func<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        string inuffer<span class="token punctuation">;</span><span class="token comment">//将所有信息写入到inbuffer</span>
+        <span class="token keyword">while</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 1.读取："content_len"rn"x op y"rn</span>
+            <span class="token comment">// 1.1 保证读到的消息是【一个完整】的请求</span>
+            std<span class="token operator">::</span>string req_text<span class="token punctuation">;</span> <span class="token comment">// 输出型参数，整个报文</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">recvRequest</span><span class="token punctuation">(</span>sock<span class="token punctuation">,</span> inuffer<span class="token punctuation">,</span><span class="token operator">&amp;</span>req_text<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            std<span class="token operator">::</span>cout<span class="token operator">&lt;&lt;</span><span class="token string">"带报头的请求：n"</span><span class="token operator">&lt;&lt;</span>req_text<span class="token operator">&lt;&lt;</span>endl<span class="token punctuation">;</span>    
+            <span class="token comment">// 1.2 去报头，只要正文</span>
+            std<span class="token operator">::</span>string req_str<span class="token punctuation">;</span> <span class="token comment">// 正文部分</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">delength</span><span class="token punctuation">(</span>req_text<span class="token punctuation">,</span> <span class="token operator">&amp;</span>req_str<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            std<span class="token operator">::</span>cout<span class="token operator">&lt;&lt;</span><span class="token string">"去掉报头后的正文：n"</span><span class="token operator">&lt;&lt;</span>req_str<span class="token operator">&lt;&lt;</span>endl<span class="token punctuation">;</span> 
+
+            <span class="token comment">// 2.反序列化</span>
+            <span class="token comment">// 2.1 得到一个结构化对象，对象中的成员已经被填充</span>
+            Request req<span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>req<span class="token punctuation">.</span><span class="token function">deserialize</span><span class="token punctuation">(</span>req_str<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+
+            <span class="token comment">// 3.处理数据---------业务逻辑</span>
+            <span class="token comment">// 3.1 得到一个结构化的响应,resp成员已被填充</span>
+            Response resp<span class="token punctuation">;</span>
+            <span class="token function">func</span><span class="token punctuation">(</span>req<span class="token punctuation">,</span> resp<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 回调</span>
+
+            <span class="token comment">// 4.对响应Response,序列化</span>
+            <span class="token comment">// 4.1 得到一个字符串</span>
+            std<span class="token operator">::</span>string resp_str<span class="token punctuation">;</span>
+            resp<span class="token punctuation">.</span><span class="token function">serialize</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>resp_str<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 输出型参数，将序列化结果写入resp_str</span>
+            std<span class="token operator">::</span>cout<span class="token operator">&lt;&lt;</span><span class="token string">"计算完成，序列化响应: "</span><span class="token operator">&lt;&lt;</span>resp_str<span class="token operator">&lt;&lt;</span>endl<span class="token punctuation">;</span>
+
+            <span class="token comment">// 5.然后发送响应</span>
+            <span class="token comment">// 5.1添加协议报头，构建成一个完整的报文</span>
+            std<span class="token operator">::</span>string send_string <span class="token operator">=</span> <span class="token function">enlength</span><span class="token punctuation">(</span>resp_str<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            std<span class="token operator">::</span>cout<span class="token operator">&lt;&lt;</span><span class="token string">"构建带报头的响应正文: n"</span><span class="token operator">&lt;&lt;</span>send_string<span class="token operator">&lt;&lt;</span>endl<span class="token punctuation">;</span>
+
+            <span class="token comment">// 发送</span>
+            <span class="token function">send</span><span class="token punctuation">(</span>sock<span class="token punctuation">,</span> send_string<span class="token punctuation">.</span><span class="token function">c_str</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> send_string<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 有问题</span>
+            std<span class="token operator">::</span>cout<span class="token operator">&lt;&lt;</span><span class="token string">"发送响应报文成功: n"</span><span class="token operator">&lt;&lt;</span>endl<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>客户端请求流程</strong></p> 
+<pre><code class="prism language-cpp">		<span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">struct</span> <span class="token class-name">sockaddr_in</span> server<span class="token punctuation">;</span>
+            <span class="token function">memset</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>server<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>server<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            server<span class="token punctuation">.</span>sin_family <span class="token operator">=</span> AF_INET<span class="token punctuation">;</span>
+            server<span class="token punctuation">.</span>sin_port <span class="token operator">=</span> <span class="token function">htons</span><span class="token punctuation">(</span>clientport_<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            server<span class="token punctuation">.</span>sin_addr<span class="token punctuation">.</span>s_addr <span class="token operator">=</span> <span class="token function">inet_addr</span><span class="token punctuation">(</span>clientip_<span class="token punctuation">.</span><span class="token function">c_str</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token comment">// 发起链接</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">connect</span><span class="token punctuation">(</span>sockfd_<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">sockaddr</span> <span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>server<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span>server<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                std<span class="token operator">::</span>cerr <span class="token operator">&lt;&lt;</span> <span class="token string">"connect create error"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">else</span>
+            <span class="token punctuation">{<!-- --></span>
+                string msg<span class="token punctuation">;</span>
+                string inbuffer<span class="token punctuation">;</span>
+                <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"mycal&gt;&gt;&gt; "</span><span class="token punctuation">;</span>
+                    std<span class="token operator">::</span><span class="token function">getline</span><span class="token punctuation">(</span>std<span class="token operator">::</span>cin<span class="token punctuation">,</span> msg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    Request req <span class="token operator">=</span> <span class="token function">ParseLine</span><span class="token punctuation">(</span>msg<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 从键盘提取字符串</span>
+
+                    string content<span class="token punctuation">;</span>
+                    <span class="token comment">// 序列化结构数据</span>
+                    req<span class="token punctuation">.</span><span class="token function">serialize</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>content<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// 添加报头</span>
+                    string send_string <span class="token operator">=</span> <span class="token function">enlength</span><span class="token punctuation">(</span>content<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">// 发送数据</span>
+                    <span class="token function">send</span><span class="token punctuation">(</span>sockfd_<span class="token punctuation">,</span> send_string<span class="token punctuation">.</span><span class="token function">c_str</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> send_string<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    
+
+                    <span class="token comment">// 接收响应报文</span>
+                    
+                    string package<span class="token punctuation">,</span> text<span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">recvRequest</span><span class="token punctuation">(</span>sockfd_<span class="token punctuation">,</span>inbuffer<span class="token punctuation">,</span><span class="token operator">&amp;</span>package<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                        <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                    
+                    <span class="token comment">//去掉报头，获取正文放在text里面   </span>
+                    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">delength</span><span class="token punctuation">(</span>package<span class="token punctuation">,</span><span class="token operator">&amp;</span>text<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                    
+
+                    <span class="token comment">//将收到的响应正文反序列化</span>
+                    Response resp<span class="token punctuation">;</span>
+                    resp<span class="token punctuation">.</span><span class="token function">deserialize</span><span class="token punctuation">(</span>text<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    std<span class="token operator">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"exitCode: "</span> <span class="token operator">&lt;&lt;</span> resp<span class="token punctuation">.</span>exitcode_ <span class="token operator">&lt;&lt;</span> std<span class="token operator">::</span>endl<span class="token punctuation">;</span>
+                    std<span class="token operator">::</span>cout <span class="token operator">&lt;&lt;</span> <span class="token string">"result: "</span> <span class="token operator">&lt;&lt;</span> resp<span class="token punctuation">.</span>result_ <span class="token operator">&lt;&lt;</span> std<span class="token operator">::</span>endl<span class="token punctuation">;</span>     
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+</code></pre> 
+<p>正常输入输出显示如下图<br> <img src="https://images2.imgbox.com/07/04/pBQt6jrQ_o.png" alt="在这里插入图片描述"></p> 
+<p>以上只是提供了几个核心的代码块，完整版代码可以去我的<a href="https://gitee.com/aho-z/mylinux/tree/master/ll20/tcpServer2.0">Gitee</a>，代码注释详细，希望对你有所帮助</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

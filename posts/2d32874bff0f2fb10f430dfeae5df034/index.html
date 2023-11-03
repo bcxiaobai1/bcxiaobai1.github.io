@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【Redis】原理篇：Redis过期删除与内存淘汰 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Redis】原理篇：Redis过期删除与内存淘汰</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h1>
+<a id="RedisRedis_0"></a>【Redis】原理篇：Redis过期删除与内存淘汰</h1> 
+<p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul>
+<li><a href="#RedisRedis_0">【Redis】原理篇：Redis过期删除与内存淘汰</a></li>
+<li>
+<ul>
+<li><a href="#1__18">1. 过期删除策略</a></li>
+<li>
+<ul>
+<li><a href="#11__22">1.1 如何设置过期时间？</a></li>
+<li><a href="#12___key__53">1.2 如何判定 key 过期了？</a></li>
+<li><a href="#13__80">1.3 过期策略有哪些？</a></li>
+<li>
+<ul>
+<li><a href="#131__82">1.3.1 定时删除</a></li>
+<li><a href="#132__91">1.3.2 惰性删除</a></li>
+<li><a href="#133__98">1.3.3 定期删除</a></li>
+</ul>
+    </li>
+<li><a href="#14_Redis__109">1.4 Redis 过期策略是什么？</a></li>
+<li>
+<ul>
+<li><a href="#141_Redis__115">1.4.1 Redis 是怎么实现惰性删除的？</a></li>
+<li><a href="#142_Redis__124">1.4.2 Redis 是怎么实现定期删除的？</a></li>
+</ul>
+   </li>
+</ul>
+   </li>
+<li><a href="#2__148">2 内存淘汰策略</a></li>
+<li>
+<ul>
+<li><a href="#21_Redis_152">2.1 Redis内存淘汰策略有哪些？</a></li>
+<li><a href="#22_LRU__LFU__196">2.2 LRU 算法和 LFU 算法有什么区别？</a></li>
+<li>
+<ul>
+<li><a href="#221_LRU__198">2.2.1 LRU 算法</a></li>
+<li><a href="#222_LFU_224">2.2.2 LFU算法</a></li>
+</ul>
+   </li>
+</ul>
+   </li>
+<li><a href="#3_RediskeyJava_275">3 Redis监听过期key（Java实现）</a></li>
+<li>
+<ul>
+<li><a href="#31__277">3.1 适用场景</a></li>
+<li><a href="#32__281">3.2 配置环境</a></li>
+<li><a href="#33__328">3.3 代码</a></li>
+</ul>
+  </li>
+</ul>
+ </li>
+</ul>
+</div>
+<p></p> 
+<p>这周老板给我安排一个任务是在规定时间内发送一个邮件给对方，业务流程：</p> 
+<ol>
+<li>在redis中存储一个有存活时间的key</li>
+<li>redis监听过期的key</li>
+<li>当监听到该key过期了，就发一个邮件给对方</li>
+</ol> 
+<p>然后我去学习了一下redis是如何监听过期key的，查了博客后发现越来越深入，所以又想了解它的原理是如何实现的，这篇文章就来记录一下关于<strong>redis过期删除与内存淘汰机制</strong>。</p> 
+<p><img src="https://images2.imgbox.com/2b/a5/Zeq9GQha_o.png" alt="image-20221103124019125"></p> 
+<p>Redis之所以性能强，最主要的原因就是基于内存存储。然而单节点的Redis其内存大小不宜过大，会影响持久化或主从同步性能。</p> 
+<p>当内存使用达到上限时，就无法存储更多数据了。为了解决这个问题，Redis提供了一些策略实现内存回收：</p> 
+<h2>
+<a id="1__18"></a>1. 过期删除策略</h2> 
+<p>我们知道Redis是可以对 key 设置过期时间的，因此当过期时间一到，Redis就会使用某种策略将过期的key 删除，从而起到内存回收的目的。</p> 
+<h3>
+<a id="11__22"></a>1.1 如何设置过期时间？</h3> 
+<p>这里我们举例了一些常用的设置过期时间的命令：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 设置键值对的同时指定过期时间 EX单位是秒</span>
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> <span class="token builtin class-name">set</span> name zhangshan EX <span class="token number">10</span>
+OK
+<span class="token comment"># 查看key过期时间还剩多少</span>
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> ttl name
+<span class="token punctuation">(</span>integer<span class="token punctuation">)</span> <span class="token number">5</span>
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> ttl name
+<span class="token punctuation">(</span>integer<span class="token punctuation">)</span> -2
+<span class="token comment"># 设置过期时间，单位是秒</span>
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> setex name <span class="token number">10</span> lisi
+OK
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> ttl name
+<span class="token punctuation">(</span>integer<span class="token punctuation">)</span> <span class="token number">6</span>
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> ttl name
+<span class="token punctuation">(</span>integer<span class="token punctuation">)</span> -2
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> <span class="token builtin class-name">set</span> name wangwu
+OK
+<span class="token comment"># 给已经有的key设置过期时间，单位是秒</span>
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> expire name <span class="token number">10</span>
+<span class="token punctuation">(</span>integer<span class="token punctuation">)</span> <span class="token number">1</span>
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> ttl name
+<span class="token punctuation">(</span>integer<span class="token punctuation">)</span> <span class="token number">5</span>
+<span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> ttl name
+<span class="token punctuation">(</span>integer<span class="token punctuation">)</span> -2
+</code></pre> 
+<h3>
+<a id="12___key__53"></a>1.2 如何判定 key 过期了？</h3> 
+<p>我们先来看设置过期时间的key是怎么存储的：</p> 
+<p>Redis本身是一个典型的<strong>key-value</strong>内存存储数据库，因此所有的key、value都保存在Dict结构中。不过在其database结构体中，有两个Dict：一个用来记录key-value；另一个用来记录key-TTL。</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">redisDb</span> <span class="token punctuation">{<!-- --></span>
+    dict <span class="token operator">*</span>dict<span class="token punctuation">;</span>    <span class="token comment">/* 数据库键空间，存放着所有的键值对 */</span>
+    dict <span class="token operator">*</span>expires<span class="token punctuation">;</span> <span class="token comment">/* 存放着每一个key及其对应的TTL存活时间，只包含了设置TTL的key */</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span> redisDb<span class="token punctuation">;</span>
+</code></pre> 
+<p>也就是说当我们每对一个 key 设置了过期时间时，Redis会把该键值对存入<code>dict</code>的同时，存储到<code>expire</code> 中。</p> 
+<p><img src="https://images2.imgbox.com/38/4c/YLcJR56u_o.png" alt="image-20221102211528824"></p> 
+<p>字典实际上是哈希表，哈希表的最大好处就是可以用<code>O(1)</code>的复杂度去查询某个key。当我们执行<code>get key</code>这条指令后，Redis搜先检查该key是否存在于字典中：</p> 
+<ul>
+<li>如果在<code>expire</code>中找不到的话，就直接从<code>dict</code>中获取</li>
+<li>如果在<code>expire</code>中找到该key，则会获取该 key 的过期时间，然后与当前系统时间进行比对： 
+  <ul>
+<li>如果比系统时间大，说明还未过期</li>
+<li>否则已过期</li>
+</ul> </li>
+</ul> 
+<p><img src="https://images2.imgbox.com/46/04/iHTI42RO_o.png" alt="image-20221102212922000"></p> 
+<h3>
+<a id="13__80"></a>1.3 过期策略有哪些？</h3> 
+<h4>
+<a id="131__82"></a>1.3.1 定时删除</h4> 
+<p>定时删除的策略是，<strong>在设置 key 的过期时间时，同时创建一个定时时间，当时间到达时，由时间处理器自动执行 key 的删除操作。</strong></p> 
+<p>跟定时炸弹?一样，到点就炸。</p> 
+<ul>
+<li>
+<strong>优点</strong>：可以保证过期 key 会被尽快删除掉，也就是说内存可以被尽快地释放。因此，定时删除<strong>对内存时最友好</strong>的。</li>
+<li>
+<strong>缺点</strong>：在过期 key 比较多的情况下，删除过期 key 可能会占用相当一部分 CPU 时间，在内存不紧张但 CPU 时间紧张的情况下，将 CPU 时间用于删除和当前任务无关的过期键上，无疑会对服务器的相应时间和吞吐量造成影响。所以，定时删除<strong>对CPU不友好</strong>。</li>
+</ul> 
+<h4>
+<a id="132__91"></a>1.3.2 惰性删除</h4> 
+<p>惰性删除策略：<strong>不主动删除过期键，每次从数据库访问 key 时，都检测 key 是否过期，如果过期则删除该 key。</strong></p> 
+<ul>
+<li>
+<strong>优点</strong>：因此每次访问时，才会检查 key 是否过期，所以此策略只会使用很少的系统资源，因此，该策略<strong>对 CPU 很友好</strong>。</li>
+<li>
+<strong>缺点</strong>：如果一个 key 已经过期，而这个 key 又仍然保留在数据库中，那么只要这个过期 key 一致没有被访问，它所占用的内存就不会释放，造成了一定的内存空间浪费。所以，惰性删除<strong>对内存不友好</strong>。</li>
+</ul> 
+<h4>
+<a id="133__98"></a>1.3.3 定期删除</h4> 
+<p>定期删除策略：<strong>每个一段时间 随机 从数据库中取出一定数量的 key 进场检查，并删除其中的过期 key。</strong></p> 
+<p>这个策略就属于综合上面两个策略了，对 CPU 友好一些，对 内存也友好一些。</p> 
+<ul>
+<li>
+<strong>优点</strong>：通过限制删除操作执行的时长和频率，来减少删除操作对 CPU 的影响，同时也能删除一部分过期的数据减少了过期键对空间的无效占用。</li>
+<li>
+<strong>缺点</strong>： 
+  <ol>
+<li>内存清理方面没有定时删除效果好，同时没有惰性删除使用的系统资源少。</li>
+<li>难以缺点删除操作执行的市场和频率。如果执行的太频繁，定期删除策略变得和定时删除策略一样，对CPU不友好。如果执行的太少，那又和惰性删除一样了，过期 key 占用的内存不会及时得到释放。</li>
+</ol> </li>
+</ul> 
+<h3>
+<a id="14_Redis__109"></a>1.4 Redis 过期策略是什么？</h3> 
+<p>前面介绍了三种过期删除策略，每一种都有优缺点，仅使用某一个策略都不能满足实际需求。</p> 
+<p>所以， <strong>Redis 选择 惰性删除+定期删除 这两种策略配和使用</strong>，以求在合理使用 CPU 时间和避免内存浪费之间取得平衡。</p> 
+<h4>
+<a id="141_Redis__115"></a>1.4.1 Redis 是怎么实现惰性删除的？</h4> 
+<p><img src="https://images2.imgbox.com/71/c2/hsmIhOX4_o.png" alt="image-20221103112254611"></p> 
+<p>Redis 在对 key 进行度或写操作之前，都会调用 <code>expireIfNeeded</code> 函数对其进行检查，检查 key 是否过期：</p> 
+<ul>
+<li>如果过期，则删除该 key，返回 null 给客户端</li>
+<li>如果没有过期，不做任何操作，返回正常的键值对给客户端。</li>
+</ul> 
+<h4>
+<a id="142_Redis__124"></a>1.4.2 Redis 是怎么实现定期删除的？</h4> 
+<p>定期删除策略：<strong>每个一段时间 随机 从数据库中取出一定数量的 key 进场检查，并删除其中的过期 key。</strong></p> 
+<p><strong>检查间隔时长</strong></p> 
+<p>在 Redis 中，默认每秒进行 10 次过期检查一次数据库，此配置可通过 Redis 的配置文件 redis.conf 进行配置，配置键为 hz 它的默认值是 hz 10。</p> 
+<p>特别强调下，每次检查数据库并不是遍历过期字典中的所有 key，而是从数据库中随机抽取一定数量的 key 进行过期检查。</p> 
+<p><strong>抽查数量</strong></p> 
+<p>Redis 的定期删除的流程：</p> 
+<ol>
+<li>从过期字典中随机抽取 20 个 key；</li>
+<li>检查这 20 个 key 是否过期，并删除已过期的 key；</li>
+<li>如果本轮检查的已过期 key 的数量，超过 5 个（20/4），也就是「已过期 key 的数量」占比「随机抽取 key 的数量」大于 25%，则继续重复步骤 1；如果已过期的 key 比例小于 25%，则停止继续删除过期 key，然后等待下一轮再检查。</li>
+</ol> 
+<p>可以看到，定期删除是一个循环的流程。</p> 
+<p>那 Redis 为了保证定期删除不会出现循环过度，导致线程卡死现象，为此增加了定期删除循环流程的时间上限，默认不会超过 25ms。</p> 
+<hr> 
+<h2>
+<a id="2__148"></a>2 内存淘汰策略</h2> 
+<p>前面说的过期删除策略，是删除已过期的 key，而当 Redis 的运行内存已经超过 Redis 设置的最大内存之后，则会使用内存淘汰策略删除符合条件的 key，以此来保障 Redis 高效的运行。</p> 
+<h3>
+<a id="21_Redis_152"></a>2.1 Redis内存淘汰策略有哪些？</h3> 
+<p>Redis 内存淘汰策略共有八种，这八种策略大体分为<strong>不进行数据淘汰</strong>和<strong>进行数据淘汰</strong>两类策略。</p> 
+<p><strong>不进行数据淘汰的策略</strong>：</p> 
+<p><strong>noeviction</strong>（Redis3.0之后，默认的内存淘汰策略） ：它表示当运行内存超过最大设置内存时，不淘汰任何数据，这时如果有新的数据写入，则会触发内存溢出，但是如果没用数据写入的话，只是单纯的查询或者删除操作的话，还是可以正常工作。</p> 
+<p><strong>进行数据淘汰的策略</strong></p> 
+<p>针对这一策略，又可以分为两类：</p> 
+<p><strong>在设置了过期时间的数据中进行淘汰</strong></p> 
+<ul>
+<li>
+<strong>volatile-random</strong>：随机淘汰设置了过期时间的任意键值；</li>
+<li>
+<strong>volatile-ttl</strong>：优先淘汰更早过期的键值。</li>
+<li>
+<strong>volatile-lru</strong>（Redis3.0 之前，默认的内存淘汰策略）：淘汰所有设置了过期时间的键值中，最久未使用的键值；</li>
+<li>
+<strong>volatile-lfu</strong>（Redis 4.0 后新增的内存淘汰策略）：淘汰所有设置了过期时间的键值中，最少使用的键值；</li>
+</ul> 
+<p><strong>在所有数据范围内进行淘汰</strong>：</p> 
+<ul>
+<li>
+<strong>allkeys-random</strong>：随机淘汰任意键值;</li>
+<li>
+<strong>allkeys-lru</strong>：淘汰整个键值中最久未使用的键值；</li>
+<li>
+<strong>allkeys-lfu</strong>（Redis 4.0 后新增的内存淘汰策略）：淘汰整个键值中最少使用的键值。</li>
+</ul> 
+<p><strong>如何查看当前 Redis 使用的内存淘汰策略？</strong></p> 
+<p>可以使用 <code>config get maxmemory-policy</code> 命令，来查看当前 Redis 的内存淘汰策略，命令如下：</p> 
+<pre><code class="prism language-bash"><span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> config get maxmemory-policy
+<span class="token number">1</span><span class="token punctuation">)</span> <span class="token string">"maxmemory-policy"</span>
+<span class="token number">2</span><span class="token punctuation">)</span> <span class="token string">"noeviction"</span>
+</code></pre> 
+<p>可以看出，当前 Redis 使用的是 <code>noeviction</code> 类型的内存淘汰策略，它是 Redis 3.0 之后默认使用的内存淘汰策略，表示当运行内存超过最大设置内存时，不淘汰任何数据，但新增操作会报错。</p> 
+<p><strong>如何修改 Redis 内存淘汰策略？</strong></p> 
+<p>设置内存淘汰策略有两种方法：</p> 
+<ul>
+<li>方式一：通过“<code>config set maxmemory-policy &lt;策略&gt;</code>”命令设置。它的优点是设置之后立即生效，不需要重启 Redis 服务，缺点是重启 Redis 之后，设置就会失效。</li>
+<li>方式二：通过修改 Redis 配置文件修改，设置“<code>maxmemory-policy &lt;策略&gt;</code>”，它的优点是重启 Redis 服务后配置不会丢失，缺点是必须重启 Redis 服务，设置才能生效。</li>
+</ul> 
+<h3>
+<a id="22_LRU__LFU__196"></a>2.2 LRU 算法和 LFU 算法有什么区别？</h3> 
+<h4>
+<a id="221_LRU__198"></a>2.2.1 LRU 算法</h4> 
+<p><strong>LRU</strong> 全称是 Least Recently Used 翻译为<strong>最近最少使用</strong>，会选择淘汰最近最少使用的数据。</p> 
+<p>传统 LRU 算法的实现是基于<strong>链表</strong>结构，链表中的元素按照操作顺序从前往后排，最新操作的键会被移动到表头，当需要内存淘汰是，只需要删除链表尾部的元素即可，因为链表尾部的元素就代表最久未被使用的元素。</p> 
+<p>但Redis并没有使用这样的方式实现LRU算法，一五年传统的LRU算法存在两个问题：</p> 
+<ul>
+<li>需要用链表管理所有的缓存数据，这会带来额外的空间开销</li>
+<li>当有数据被访问是，需要在链表上把该数据移动到表头，如果有大量数据被访问，就会带来很多链表移动操作，会很耗时，进而会降低 Redis 缓存性能。</li>
+</ul> 
+<p><strong>Redis 是如何实现LRU算法的？</strong></p> 
+<p>Redis 实现的是一种 <strong>近似LRU算法</strong>，目的是为了更好的节约内存，它的实现方式是在Redis 的对象结构体中添加一个 额外的字段，用于记录此数据的最后依次访问时间。</p> 
+<p>当 Redis 进行内存淘汰，会使用随机采样的方式来淘汰数据，它是随机取5个值（此值可配置），然后<strong>淘汰最久没有使用的那个</strong>。</p> 
+<p>Redis 实现的 LRU 算法的优点：</p> 
+<ul>
+<li>不用为所有的数据维护一个大链表，节省了空间占用；</li>
+<li>不用在每次数据访问时都移动链表项，提升了缓存的性能；</li>
+</ul> 
+<p>但是 LRU 算法有一个问题，<strong>无法解决缓存污染问题</strong>，比如应用一次读取了大量的数据，而这些数据只会被读取这一次，那么这些数据会留存在 Redis 缓存中很长一段时间，造成缓存污染。</p> 
+<p>为了解决这一问题，Redis引入了LFU算法来解决这个问题。</p> 
+<h4>
+<a id="222_LFU_224"></a>2.2.2 LFU算法</h4> 
+<p>LFU 全称是 Least Frequently Used 翻译为<strong>最近最不常用的，<strong>LFU 算法是根据</strong>数据访问次数</strong>来淘汰数据的，它的核心思想是“如果数据过去被访问多次，那么将来被访问的频率也更高”。</p> 
+<p>所以， LFU 算法会记录每个数据的访问次数。当一个数据被再次访问时，就会增加该数据的访问次数。这样就解决了偶尔被访问一次之后，数据留存在缓存中很长一段时间的问题，相比于 LRU 算法也更合理一些。</p> 
+<p><strong>Redis是如何实现LFU算法的？</strong></p> 
+<p>LFU算法比LRU算法的实现，多记录了<strong>数据的访问频次</strong>的信息。</p> 
+<p>Redis对象的结构如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">redisObject</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+        <span class="token comment">// 24 bits，用于记录对象的访问信息</span>
+        <span class="token keyword">unsigned</span> lru<span class="token operator">:</span><span class="token number">24</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span> robj<span class="token punctuation">;</span>
+</code></pre> 
+<p>Redis 对象头中的 lru 字段，在 LRU 算法下和 LFU 算法下使用方式并不相同。</p> 
+<p><strong>在 LRU 算法中</strong>，Redis 对象头的 24 bits 的 lru 字段是用来记录 key 的访问时间戳，因此在 LRU 模式下，Redis可以根据对象头中的 lru 字段记录的值，来比较最后一次 key 的访问时间长，从而淘汰最久未被使用的 key。</p> 
+<p><strong>在 LFU 算法中</strong>，Redis对象头的 24 bits 的 lru 字段被分成两段来存储，高 16bit 存储 访问时间戳，低 8bit 存储 访问频次。</p> 
+<p><img src="https://images2.imgbox.com/76/68/6FxsHOSe_o.png" alt="image-20221103122155062"></p> 
+<ul>
+<li>ldt 是用来记录 key 的访问时间戳；</li>
+<li>logc 是用来记录 key 的访问频次，它的值越小表示使用频率越低，越容易淘汰，每个新加入的 key 的logc 初始值为 5。</li>
+</ul> 
+<p>logc 并不是单纯的访问次数，而是访问频次（访问频率），因为 <strong>logc 会随时间推移而衰减的</strong>。</p> 
+<p>在每次 key 被访问时，会先对 logc 做一个衰减操作，衰减的值跟前后访问时间的差距有关系，如果上一次访问的时间与这一次访问的时间差距很大，那么衰减的值就越大，这样实现的 LFU 算法是根据<strong>访问频率</strong>来淘汰数据的，而不只是访问次数。访问频率需要考虑 key 的访问是多长时间段内发生的。key 的先前访问距离当前时间越长，那么这个 key 的访问频率相应地也就会降低，这样被淘汰的概率也会更大。</p> 
+<p>对 logc 做完衰减操作后，就开始对 logc 进行增加操作，增加操作并不是单纯的 + 1，而是根据概率增加，<strong>如果 logc 越大的 key，它的 logc 就越难再增加</strong>。</p> 
+<p>存储访问频率的位数有限，所以不可能特别大，要进行一定的策略来保证相对大小。</p> 
+<p>所以，Redis 在访问 key 时，对于 logc 是这样变化的：</p> 
+<ol>
+<li>先按照上次访问距离当前的时长，来对 logc 进行衰减；</li>
+<li>然后，再按照一定概率增加 logc 的值</li>
+</ol> 
+<p>redis.conf 提供了两个配置项，用于调整 LFU 算法从而控制 logc 的增长和衰减：</p> 
+<ul>
+<li>
+<code>lfu-decay-time</code> 用于调整 logc 的衰减速度，它是一个以分钟为单位的数值，默认值为1，lfu-decay-time 值越大，衰减越慢；</li>
+<li>
+<code>lfu-log-factor</code> 用于调整 logc 的增长速度，lfu-log-factor 值越大，logc 增长越慢。</li>
+</ul> 
+<h2>
+<a id="3_RediskeyJava_275"></a>3 Redis监听过期key（Java实现）</h2> 
+<h3>
+<a id="31__277"></a>3.1 适用场景</h3> 
+<p>比如预约成功半小时后提醒；比如当超时15分通知；比如间隔5分钟处理一次等等</p> 
+<h3>
+<a id="32__281"></a>3.2 配置环境</h3> 
+<p><strong>Redis环境配置</strong></p> 
+<ul><li>登录进入<code>redis-cli</code>客户端，执行：</li></ul> 
+<pre><code class="prism language-arduino">config set notify-keyspace-events Ex
+</code></pre> 
+<ul><li>或者在redis.conf 添加配置:</li></ul> 
+<pre><code class="prism language-arduino">notify-keyspace-events "Ex" //过期时间监听生效
+</code></pre> 
+<p><strong>idea环境配置</strong></p> 
+<p><code>pom.xml</code>加上redis的依赖</p> 
+<pre><code class="prism language-xml"><span class="token comment">&lt;!--redis依赖--&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>org.springframework.boot<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>spring-boot-starter-data-redis<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p><code>application.yml</code>环境中加上Redis配置</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">spring</span><span class="token punctuation">:</span>
+  <span class="token key atrule">redis</span><span class="token punctuation">:</span>
+    <span class="token key atrule">host</span><span class="token punctuation">:</span> 121.41.xxx.xxx
+    <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">6379</span>
+    <span class="token key atrule">password</span><span class="token punctuation">:</span> <span class="token number">123456</span>
+    <span class="token key atrule">lettuce</span><span class="token punctuation">:</span>
+      <span class="token key atrule">pool</span><span class="token punctuation">:</span>
+        <span class="token key atrule">max-active</span><span class="token punctuation">:</span> <span class="token number">8</span>
+        <span class="token key atrule">max-idle</span><span class="token punctuation">:</span> <span class="token number">8</span>
+        <span class="token key atrule">min-idle</span><span class="token punctuation">:</span> <span class="token number">0</span>
+        <span class="token key atrule">max-wait</span><span class="token punctuation">:</span> 100ms
+
+<span class="token key atrule">server</span><span class="token punctuation">:</span>
+  <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">8088</span>
+</code></pre> 
+<h3>
+<a id="33__328"></a>3.3 代码</h3> 
+<p><strong>配置类</strong></p> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>context<span class="token punctuation">.</span>annotation<span class="token punctuation">.</span></span><span class="token class-name">Bean</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>context<span class="token punctuation">.</span>annotation<span class="token punctuation">.</span></span><span class="token class-name">Configuration</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>data<span class="token punctuation">.</span>redis<span class="token punctuation">.</span>connection<span class="token punctuation">.</span></span><span class="token class-name">RedisConnectionFactory</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>data<span class="token punctuation">.</span>redis<span class="token punctuation">.</span>listener<span class="token punctuation">.</span></span><span class="token class-name">RedisMessageListenerContainer</span><span class="token punctuation">;</span>
+
+<span class="token annotation punctuation">@Configuration</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">RedisListenerConfig</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token annotation punctuation">@Bean</span>
+    <span class="token class-name">RedisMessageListenerContainer</span> <span class="token function">container</span><span class="token punctuation">(</span><span class="token class-name">RedisConnectionFactory</span> connectionFactory<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">RedisMessageListenerContainer</span> container <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">RedisMessageListenerContainer</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        container<span class="token punctuation">.</span><span class="token function">setConnectionFactory</span><span class="token punctuation">(</span>connectionFactory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> container<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>实现类</strong></p> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>data<span class="token punctuation">.</span>redis<span class="token punctuation">.</span>connection<span class="token punctuation">.</span></span><span class="token class-name">Message</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>data<span class="token punctuation">.</span>redis<span class="token punctuation">.</span>listener<span class="token punctuation">.</span></span><span class="token class-name">KeyExpirationEventMessageListener</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>data<span class="token punctuation">.</span>redis<span class="token punctuation">.</span>listener<span class="token punctuation">.</span></span><span class="token class-name">RedisMessageListenerContainer</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>stereotype<span class="token punctuation">.</span></span><span class="token class-name">Component</span><span class="token punctuation">;</span>
+
+<span class="token annotation punctuation">@Component</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">RedisKeyExpirationListener</span> <span class="token keyword">extends</span> <span class="token class-name">KeyExpirationEventMessageListener</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">public</span> <span class="token class-name">RedisKeyExpirationListener</span><span class="token punctuation">(</span><span class="token class-name">RedisMessageListenerContainer</span> listenerContainer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span>listenerContainer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * 针对Redis数据失效时间，进行数据处理
+     *
+     * @param message
+     * @param pattern
+     */</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onMessage</span><span class="token punctuation">(</span><span class="token class-name">Message</span> message<span class="token punctuation">,</span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> pattern<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 获取失效的key</span>
+        <span class="token class-name">String</span> expireKey <span class="token operator">=</span> message<span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 业务处理</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span>expireKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>测试</strong></p> 
+<pre><code class="prism language-bash"><span class="token number">127.0</span>.0.1:637<span class="token operator"><span class="token file-descriptor important">9</span>&gt;</span> setex name <span class="token number">10</span> zhangsan
+</code></pre> 
+<p>10秒过后idea控制台打印输出<code>name</code></p> 
+<p>成功了，哦吼！</p> 
+<p><strong>笔记参考</strong>：</p> 
+<ul>
+<li><a href="https://xiaolincoding.com/redis/module/strategy.html#redis-%E8%BF%87%E6%9C%9F%E5%88%A0%E9%99%A4%E7%AD%96%E7%95%A5%E5%92%8C%E5%86%85%E5%AD%98%E6%B7%98%E6%B1%B0%E7%AD%96%E7%95%A5%E6%9C%89%E4%BB%80%E4%B9%88%E5%8C%BA%E5%88%AB">Redis 过期删除策略和内存淘汰策略有什么区别？</a></li>
+<li><a href="https://www.bilibili.com/video/BV1cr4y1671t?p=175">黑马程序员Redis入门到实战教程</a></li>
+<li><a href="https://juejin.cn/post/7128306323703693342">Redis 监听过期key - 掘金 (juejin.cn)</a></li>
+</ul> 
+<p>感谢大佬支持！！</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Nacos注册表结构和海量服务注册与并发读写原理 源码分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Nacos注册表结构和海量服务注册与并发读写原理 源码分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p></p> 
+<div class="toc"> 
+ <h3>文章目录</h3> 
+ <ul><li>
+<ul>
+<li><a href="#1_3">1、注册表结构</a></li>
+<li><a href="#2_43">2、数十万服务注册压力与并发写冲突的解决</a></li>
+<li><a href="#3_241">3、并发读写原理</a></li>
+</ul> 
+ </li></ul> 
+</div> 
+<br> nacos作为功能强大且流行的服务注册框架，具有服务动态发现、服务配置、服务管理及流量控制等功能。今天，我们一起来了解下其服务注册原理以及如何解决高并发读写问题。 
+<p></p> 
+<h2>
+<a id="1_3"></a>1、注册表结构</h2> 
+<p>首先我们回想一下Nacos的服务模型，如下图所示。从上到下分别是：命令空间-&gt;服务分组-&gt;服务-&gt;集群-&gt;实例。各个部分对应有什么作用呢。</p> 
+<p><img src="https://images2.imgbox.com/ff/59/aEEXX3wf_o.png" alt="在这里插入图片描述"><br> 1、命名空间起到环境隔离的作用，比如隔离生产环境和测试环境；<br> 2、服务分组，当服务太多可对服务进行高一层的分组，默认DEFAULT_GROUP<br> 3、服务，比如订单服务，用户服务<br> 4、集群，服务可以在全国各地部署几百个实例，可把杭州或上海的实例放到各自的杭州集群或上海集群中<br> 5、实例就是真正一个部署的实例</p> 
+<p>好了，那么如果用Java数据结构来表示上面的注册关系表呢，没错，可以用嵌套的Map集合，各服务模型和Map的对应关系如下</p> 
+<p><img src="https://images2.imgbox.com/04/07/Y8b6zVd2_o.png" alt="在这里插入图片描述"></p> 
+<p>Nacos采用数据的分级存储模型，对应到Java代码用多层Map表示。最外层ServiceMap以命名空间为key,value也是一个内层Map。内层Map以group拼接serviceName作为key,value是一个服务对象。服务对象内部也是一个ClusterMap,以集群名字作为key,value是一个集群对象。集群对象内部是一个实例集合,分为持久和临时实例集合。源码中的命名如下</p> 
+<pre><code class="prism language-java">    <span class="token comment">/**
+     * ServiceManager服务管理器内部
+     * Map(namespace, Map(group::serviceName, Service)).
+     */</span>
+    <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">Map</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">Service</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> serviceMap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<pre><code class="prism language-java">	<span class="token comment">// service对象持有集群map</span>
+    <span class="token comment">// Map&lt;inerfaceName,Cluster&gt;</span>
+    <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">Cluster</span><span class="token punctuation">&gt;</span></span> clusterMap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<pre><code class="prism language-java">	<span class="token comment">// 集群对象 永久实例集合</span>
+    <span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> persistentInstances <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 临时实例集合</span>
+    <span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> ephemeralInstances <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h2>
+<a id="2_43"></a>2、数十万服务注册压力与并发写冲突的解决</h2> 
+<p>核心思想：<br> Nacos内部接收到服务注册请求后，不是同步写数据，而是把请求包装成任务放入<strong>阻塞队列中</strong>，然后由<strong>单线程的线程池</strong>死循环从队列中取任务，<strong>异步</strong>完成实例更新，从而提高了并发写能力。<br> 并发写冲突通过对相同的service服务加锁解决，同时由单线程的线程池处理实例更新任务也避免了并发写问题。</p> 
+<p>接下来，我们用核心源码来验证。</p> 
+<p>首先，根据命令空间id和服务名称得到对应的service对象，对service加锁，解决添加实例的时候并发写问题。接着，调用addIpAddresses方法获取最新的实例列表（包含旧和新的），再调用consistencyService的put方法（重点）真正添加实例。</p> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">addInstance</span><span class="token punctuation">(</span><span class="token class-name">String</span> namespaceId<span class="token punctuation">,</span> <span class="token class-name">String</span> serviceName<span class="token punctuation">,</span> <span class="token keyword">boolean</span> ephemeral<span class="token punctuation">,</span> <span class="token class-name">Instance</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> ips<span class="token punctuation">)</span>
+            <span class="token keyword">throws</span> <span class="token class-name">NacosException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 创建实例列表唯一Id，即服务唯一Id</span>
+        <span class="token class-name">String</span> key <span class="token operator">=</span> <span class="token class-name">KeyBuilder</span><span class="token punctuation">.</span><span class="token function">buildInstanceListKey</span><span class="token punctuation">(</span>namespaceId<span class="token punctuation">,</span> serviceName<span class="token punctuation">,</span> ephemeral<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 获取实例对应的服务</span>
+        <span class="token class-name">Service</span> service <span class="token operator">=</span> <span class="token function">getService</span><span class="token punctuation">(</span>namespaceId<span class="token punctuation">,</span> serviceName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 添加实例到服务时，对当前服务加锁，解决添加实例并发写问题</span>
+        <span class="token keyword">synchronized</span> <span class="token punctuation">(</span>service<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 更新并返回最新的服务列表，采用复制的方式避免了并发读写问题</span>
+            <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> instanceList <span class="token operator">=</span> <span class="token function">addIpAddresses</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> ephemeral<span class="token punctuation">,</span> ips<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 写时复制技术：创建新的实例列表，再替换旧的实例列表</span>
+            <span class="token class-name">Instances</span> instances <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Instances</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            instances<span class="token punctuation">.</span><span class="token function">setInstanceList</span><span class="token punctuation">(</span>instanceList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 新的实例列表同步到nacos集群中</span>
+            consistencyService<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> instances<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>addIpAddresses方法调用updateIpAddresses方法，得到最新的实例列表（包含旧实例），当新实例的集群不存在时，还会顺便新建集群并添加到service服务中。如果新实例和旧实例相同，会拷贝旧的实例的id，并覆盖旧实例。</p> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> <span class="token function">updateIpAddresses</span><span class="token punctuation">(</span><span class="token class-name">Service</span> service<span class="token punctuation">,</span> <span class="token class-name">String</span> action<span class="token punctuation">,</span> <span class="token keyword">boolean</span> ephemeral<span class="token punctuation">,</span> <span class="token class-name">Instance</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> ips<span class="token punctuation">)</span>
+            <span class="token keyword">throws</span> <span class="token class-name">NacosException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 获取旧的实例Map</span>
+        <span class="token class-name">Datum</span> datum <span class="token operator">=</span> consistencyService
+                <span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">KeyBuilder</span><span class="token punctuation">.</span><span class="token function">buildInstanceListKey</span><span class="token punctuation">(</span>service<span class="token punctuation">.</span><span class="token function">getNamespaceId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> service<span class="token punctuation">.</span><span class="token function">getName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> ephemeral<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 当前老服务对应的实例</span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> currentIPs <span class="token operator">=</span> service<span class="token punctuation">.</span><span class="token function">allIPs</span><span class="token punctuation">(</span>ephemeral<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 写时复制，创建新的Map对象</span>
+        <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> currentInstances <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>currentIPs<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> currentInstanceIds <span class="token operator">=</span> <span class="token class-name">Sets</span><span class="token punctuation">.</span><span class="token function">newHashSet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Instance</span> instance <span class="token operator">:</span> currentIPs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// 旧的实例列表复制新容器中</span>
+            currentInstances<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">toIpAddr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> instance<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            currentInstanceIds<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">getInstanceId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> instanceMap<span class="token punctuation">;</span> <span class="token comment">// 拷贝旧的实例Map</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>datum <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">&amp;&amp;</span> <span class="token keyword">null</span> <span class="token operator">!=</span> datum<span class="token punctuation">.</span>value<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 拷贝旧的有效实例列表</span>
+            instanceMap <span class="token operator">=</span> <span class="token function">setValid</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">Instances</span><span class="token punctuation">)</span> datum<span class="token punctuation">.</span>value<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getInstanceList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> currentInstances<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            instanceMap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>ips<span class="token punctuation">.</span>length<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">// 把新实例和旧实例都放到服务中，如果旧实例存在以旧实例信息为准。整个过程都是新建再替换，避免了并发读写问题</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Instance</span> instance <span class="token operator">:</span> ips<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>service<span class="token punctuation">.</span><span class="token function">getClusterMap</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">getClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">Cluster</span> cluster <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Cluster</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">getClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> service<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 当前集群不存在则新建,并添加到旧集群列表中</span>
+                cluster<span class="token punctuation">.</span><span class="token function">init</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                service<span class="token punctuation">.</span><span class="token function">getClusterMap</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">getClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> cluster<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token class-name">Loggers</span><span class="token punctuation">.</span>SRV_LOG
+                        <span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"cluster: {} not found, ip: {}, will create new cluster with default configuration."</span><span class="token punctuation">,</span>
+                                instance<span class="token punctuation">.</span><span class="token function">getClusterName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> instance<span class="token punctuation">.</span><span class="token function">toJson</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">UtilsAndCommons</span><span class="token punctuation">.</span>UPDATE_INSTANCE_ACTION_REMOVE<span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>action<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                instanceMap<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">getDatumKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// action=remove则删除实例</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">Instance</span> oldInstance <span class="token operator">=</span> instanceMap<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">getDatumKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>oldInstance <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// 旧实例存在，把旧实例的id复制给新实例</span>
+                    instance<span class="token punctuation">.</span><span class="token function">setInstanceId</span><span class="token punctuation">(</span>oldInstance<span class="token punctuation">.</span><span class="token function">getInstanceId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                    instance<span class="token punctuation">.</span><span class="token function">setInstanceId</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">generateInstanceId</span><span class="token punctuation">(</span>currentInstanceIds<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                instanceMap<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>instance<span class="token punctuation">.</span><span class="token function">getDatumKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> instance<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 新实例再替换老的实例</span>
+            <span class="token punctuation">}</span>
+
+        <span class="token punctuation">}</span>
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>instanceMap<span class="token punctuation">.</span><span class="token function">values</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>consistencyService.put方法跳转到实现类DistroConsistencyServiceImpl（处理临时实例的一致性协议ditro）进行执行。<br> <img src="https://images2.imgbox.com/19/1a/5TPKQlff_o.png" alt="在这里插入图片描述"></p> 
+<p>put方法分两步，本地更新和远程更新。</p> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">put</span><span class="token punctuation">(</span><span class="token class-name">String</span> key<span class="token punctuation">,</span> <span class="token class-name">Record</span> value<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">NacosException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 利用阻塞队列本地更新</span>
+        <span class="token function">onPut</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> value<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 同样采用异步的方式进行集群同步</span>
+        distroProtocol<span class="token punctuation">.</span><span class="token function">sync</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">DistroKey</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> <span class="token class-name">KeyBuilder</span><span class="token punctuation">.</span>INSTANCE_LIST_KEY_PREFIX<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token class-name">DataOperation</span><span class="token punctuation">.</span>CHANGE<span class="token punctuation">,</span>
+                globalConfig<span class="token punctuation">.</span><span class="token function">getTaskDispatchPeriod</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>我们进去onPut方法，再用notifier对象调用addTask方法添加任务，那么Notifier是什么。</p> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onPut</span><span class="token punctuation">(</span><span class="token class-name">String</span> key<span class="token punctuation">,</span> <span class="token class-name">Record</span> value<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">KeyBuilder</span><span class="token punctuation">.</span><span class="token function">matchEphemeralInstanceListKey</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Datum</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instances</span><span class="token punctuation">&gt;</span></span> datum <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Datum</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            datum<span class="token punctuation">.</span>value <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">Instances</span><span class="token punctuation">)</span> value<span class="token punctuation">;</span>
+            datum<span class="token punctuation">.</span>key <span class="token operator">=</span> key<span class="token punctuation">;</span>
+            datum<span class="token punctuation">.</span>timestamp<span class="token punctuation">.</span><span class="token function">incrementAndGet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            dataStore<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> datum<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 只是存到Map中，由其他线程异步获取</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>listeners<span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        notifier<span class="token punctuation">.</span><span class="token function">addTask</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> <span class="token class-name">DataOperation</span><span class="token punctuation">.</span>CHANGE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>Notifier原来是一个runnable对象，内部有一个阻塞队列tasks，调用addTask就是往阻塞队列添加任务。再看一下它的run方法，死循环从队列中获取任务并调用handle方法，异步更新实例列表。handle方法采用写时复制，把实例更新到clusterMap中，留到后面再说。那么Notifier线程什么时候开始提交执行的呢。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Notifier</span> <span class="token keyword">implements</span> <span class="token class-name">Runnable</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">private</span> <span class="token class-name">ConcurrentHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> services <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token number">10</span> <span class="token operator">*</span> <span class="token number">1024</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">private</span> <span class="token class-name">BlockingQueue</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Pair</span><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">DataOperation</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> tasks <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayBlockingQueue</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token number">1024</span> <span class="token operator">*</span> <span class="token number">1024</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">addTask</span><span class="token punctuation">(</span><span class="token class-name">String</span> datumKey<span class="token punctuation">,</span> <span class="token class-name">DataOperation</span> action<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>services<span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span>datumKey<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> action <span class="token operator">==</span> <span class="token class-name">DataOperation</span><span class="token punctuation">.</span>CHANGE<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>action <span class="token operator">==</span> <span class="token class-name">DataOperation</span><span class="token punctuation">.</span>CHANGE<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                services<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>datumKey<span class="token punctuation">,</span> <span class="token class-name">StringUtils</span><span class="token punctuation">.</span>EMPTY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 往阻塞队列中添加任务</span>
+            tasks<span class="token punctuation">.</span><span class="token function">offer</span><span class="token punctuation">(</span><span class="token class-name">Pair</span><span class="token punctuation">.</span><span class="token keyword">with</span><span class="token punctuation">(</span>datumKey<span class="token punctuation">,</span> action<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token annotation punctuation">@Override</span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Loggers</span><span class="token punctuation">.</span>DISTRO<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"distro notifier started"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> <span class="token punctuation">;</span> <span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">Pair</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">DataOperation</span><span class="token punctuation">&gt;</span></span> pair <span class="token operator">=</span> tasks<span class="token punctuation">.</span><span class="token function">take</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token function">handle</span><span class="token punctuation">(</span>pair<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">Loggers</span><span class="token punctuation">.</span>DISTRO<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"[NACOS-DISTRO] Error while handling notifying task"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>在DistroConsistencyServiceImpl看到如下init方法，被PostConstruct修饰，说明在依赖注入完成后就会调用，本质是提交给一个<strong>单线程的线程池</strong>执行，即Executors.newScheduledThreadPool(1)，单线程也避免了并发写问题。</p> 
+<pre><code class="prism language-java">    <span class="token annotation punctuation">@PostConstruct</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">init</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">GlobalExecutor</span><span class="token punctuation">.</span><span class="token function">submitDistroNotifyTask</span><span class="token punctuation">(</span>notifier<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>下面distroProtocol.sync是集群数据同步的逻辑了，找到集群所有的结点，把任务放到一个ConcurrentHashMap中，然后线程池取任务再进行同步。基于Distro模式的同步是异步进行的，并且失败时会将任务重新入队并重试，因此不保证同步结果的强一致性，属于AP模式的一致性策略。</p> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">sync</span><span class="token punctuation">(</span><span class="token class-name">DistroKey</span> distroKey<span class="token punctuation">,</span> <span class="token class-name">DataOperation</span> action<span class="token punctuation">,</span> <span class="token keyword">long</span> delay<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Member</span> each <span class="token operator">:</span> memberManager<span class="token punctuation">.</span><span class="token function">allMembersWithoutSelf</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">DistroKey</span> distroKeyWithTarget <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">DistroKey</span><span class="token punctuation">(</span>distroKey<span class="token punctuation">.</span><span class="token function">getResourceKey</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> distroKey<span class="token punctuation">.</span><span class="token function">getResourceType</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    each<span class="token punctuation">.</span><span class="token function">getAddress</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">DistroDelayTask</span> distroDelayTask <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">DistroDelayTask</span><span class="token punctuation">(</span>distroKeyWithTarget<span class="token punctuation">,</span> action<span class="token punctuation">,</span> delay<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            distroTaskEngineHolder<span class="token punctuation">.</span><span class="token function">getDelayTaskExecuteEngine</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">addTask</span><span class="token punctuation">(</span>distroKeyWithTarget<span class="token punctuation">,</span> distroDelayTask<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">processTasks</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Collection</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Object</span><span class="token punctuation">&gt;</span></span> keys <span class="token operator">=</span> <span class="token function">getAllTaskKeys</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Object</span> taskKey <span class="token operator">:</span> keys<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">AbstractDelayTask</span> task <span class="token operator">=</span> <span class="token function">removeTask</span><span class="token punctuation">(</span>taskKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> task<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">continue</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token class-name">NacosTaskProcessor</span> processor <span class="token operator">=</span> <span class="token function">getProcessor</span><span class="token punctuation">(</span>taskKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> processor<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token function">getEngineLog</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"processor not found for task, so discarded. "</span> <span class="token operator">+</span> task<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">continue</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// ReAdd task if process failed 失败重试</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>processor<span class="token punctuation">.</span><span class="token function">process</span><span class="token punctuation">(</span>task<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">retryFailedTask</span><span class="token punctuation">(</span>taskKey<span class="token punctuation">,</span> task<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token function">getEngineLog</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"Nacos task execute error : "</span> <span class="token operator">+</span> e<span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token function">retryFailedTask</span><span class="token punctuation">(</span>taskKey<span class="token punctuation">,</span> task<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="3_241"></a>3、并发读写原理</h2> 
+<p>nacos在更新实例列表的时候，采用CopyOnWrite技术，先拷贝旧的实例列表，然后更新拷贝的实例列表，最后再用拷贝的列表替换旧的实例列表，就避免了并发读写问题。<br> 我们用核心源码来验证一下。</p> 
+<p>发现更新实例列表的时候，直接把引用指向一个新new的对象，而不是在原来的实例列表进行增删改，这就解决了脏读问题。更新过程中的旧实例列表不受影响，用户依然依然可以读取。</p> 
+<pre><code class="prism language-java">    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">updateIps</span><span class="token punctuation">(</span><span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> ips<span class="token punctuation">,</span> <span class="token keyword">boolean</span> ephemeral<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+        <span class="token comment">// 上面都是日志功能，没有实际的功能</span>
+        <span class="token comment">// 将实例列表应用指向新的实例列表</span>
+        toUpdateInstances <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>ips<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>ephemeral<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            ephemeralInstances <span class="token operator">=</span> toUpdateInstances<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            persistentInstances <span class="token operator">=</span> toUpdateInstances<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>参考：某马</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

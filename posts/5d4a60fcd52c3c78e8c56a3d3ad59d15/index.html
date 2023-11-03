@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Springboot&#43;redis实现token的登录认证 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Springboot&#43;redis实现token的登录认证</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>1.在用户登录后，如果要访问其他路径下的资源的话，我们是否还需要再验证一遍呢？而且我们登陆上系统长时间不操作的话还需不需要再次验证？所以这种情况下就很需要token来实现登录功能。并通过redis（redis是一个key-value存储系统，它支持存储的value类型相对更多，包括string(字符串)、list(链表)、set(集合)、zset(sorted set --有序集合)和hash（哈希类型））来存储token信息。</p> 
+<blockquote> 
+ <p>功能描述：用户登录成功后，后台返回一个token给调用者，同时自定义一个@AuthToken注解，被该注解标注的API请求都需要进行token效验，效验通过才可以正常访问，实现接口级的鉴权控制。同时token具有生命周期，在用户持续一段时间不进行操作的话，token则会过期，用户一直操作的话，则不会过期。</p> 
+</blockquote> 
+<p> 2.流程分析</p> 
+<p>（1）客户端登录，输入用户名和密码，在后端数据库进行验证，如果验证失败则返回登陆失败的提示。如果成功了则生成token，并将token和用户名双向绑定，然后存入redis，同时使用token+username作为key把当前的时间戳存入redis。并设置他们的过期时间。</p> 
+<p>（2）然后设置拦截器，每一个被<code>@AuthToken</code>注解标注的接口，都要首先检查客户端传过来的<code>Authorization</code>字段，获取token。由于token与username双向绑定，可以通过获取的token来尝试从redis中获取username，如果可以获取则说明token正确，登陆成功；反之，则说明失败。</p> 
+<p>（3）token可以根据用户的使用时间来动态的调整自己的过期时间。在生成 token 的同时也往 redis 里面存入了创建 token 时的时间戳，每次请求被拦截器拦截 token 验证成功之后，将当前时间与存在 redis 里面的 token 生成时刻的时间戳进行比较，如果当前时间距离创建时间快要到达设置的redis过期时间的话，就重新设置token过期时间，将过期时间延长。如果用户在设置的 redis 过期时间的时间长度内没有进行任何操作（没有发请求），则token会在redis中过期。token过期后则会登陆失败，重新输入用户名和密码。</p> 
+<p>3.代码实现：</p> 
+<p>项目具体结构如下：</p> 
+<p style="text-align:center"><img alt="" src="https://images2.imgbox.com/a4/13/pRqSVaKl_o.png"> </p> 
+<p>首先，先导入依赖：</p> 
+<pre><code class="language-java">&lt;dependency&gt;
+			&lt;groupId&gt;redis.clients&lt;/groupId&gt;
+			&lt;artifactId&gt;jedis&lt;/artifactId&gt;
+			&lt;version&gt;3.0.0&lt;/version&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-boot-starter-web&lt;/artifactId&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.mybatis.spring.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;mybatis-spring-boot-starter&lt;/artifactId&gt;
+			&lt;version&gt;1.3.2&lt;/version&gt;
+		&lt;/dependency&gt;
+
+		&lt;dependency&gt;
+			&lt;groupId&gt;mysql&lt;/groupId&gt;
+			&lt;artifactId&gt;mysql-connector-java&lt;/artifactId&gt;
+			&lt;scope&gt;runtime&lt;/scope&gt;
+		&lt;/dependency&gt;
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+			&lt;artifactId&gt;spring-boot-starter-test&lt;/artifactId&gt;
+			&lt;scope&gt;test&lt;/scope&gt;
+		&lt;/dependency&gt;
+
+		&lt;dependency&gt;
+			&lt;groupId&gt;org.projectlombok&lt;/groupId&gt;
+			&lt;artifactId&gt;lombok&lt;/artifactId&gt;
+			&lt;version&gt;1.16.22&lt;/version&gt;
+		&lt;/dependency&gt;
+&lt;dependency&gt;
+			&lt;groupId&gt;com.alibaba&lt;/groupId&gt;
+			&lt;artifactId&gt;fastjson&lt;/artifactId&gt;
+			&lt;version&gt;1.2.54&lt;/version&gt;
+		&lt;/dependency&gt;</code></pre> 
+<p>自定义注解的实现：@Target 说明了Annotation所修饰的对象范围，表示注解作用在方法和变量上，{ElementType.METHOD, ElementType.TYPE}表示注解作用在方法、类、接口上。</p> 
+<pre><code class="language-java">@Target({ElementType.METHOD, ElementType.TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+public @interface AuthToken {
+
+}</code></pre> 
+<p>然后设置拦截器：</p> 
+<pre><code class="language-java">/**
+ * @author 旺旺米雪饼
+ */
+@Slf4j
+public class AuthorizationInterceptor implements HandlerInterceptor {
+
+    //存放鉴权信息的Header名称，默认是Authorization
+    private String httpHeaderName = "Authorization";
+
+    //鉴权失败后返回的错误信息，默认为401 unauthorized
+    private String unauthorizedErrorMessage = "401 unauthorized";
+
+    //鉴权失败后返回的HTTP错误码，默认为401
+    private int unauthorizedErrorCode = HttpServletResponse.SC_UNAUTHORIZED;
+
+    /**
+     * 存放登录用户模型Key的Request Key
+     */
+    public static final String REQUEST_CURRENT_KEY = "REQUEST_CURRENT_KEY";
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+        if (!(handler instanceof HandlerMethod)) {
+            return true;
+        }
+        HandlerMethod handlerMethod = (HandlerMethod) handler;
+        Method method = handlerMethod.getMethod();
+
+        // 如果打上了AuthToken注解则需要验证token
+        if (method.getAnnotation(AuthToken.class) != null || handlerMethod.getBeanType().getAnnotation(AuthToken.class) != null) {
+
+//            String token = request.getHeader(httpHeaderName);
+            String token = request.getParameter(httpHeaderName);
+            log.info("Get token from request is {} ", token);
+            String username = "";
+            Jedis jedis = new Jedis();
+            if (token != null &amp;&amp; token.length() != 0) {
+                username = jedis.get(token);
+                log.info("Get username from Redis is {}", username);
+            }
+            if (username != null &amp;&amp; !username.trim().equals("")) {
+                //log.info("token birth time is: {}",jedis.get(username+token));
+                Long tokeBirthTime = Long.valueOf(jedis.get(token + username));
+                log.info("token Birth time is: {}", tokeBirthTime);
+                Long diff = System.currentTimeMillis() - tokeBirthTime;
+                log.info("token is exist : {} ms", diff);
+                //重新设置Redis中的token过期时间
+                if (diff &gt; ConstantKit.TOKEN_RESET_TIME) {
+                    jedis.expire(username, ConstantKit.TOKEN_EXPIRE_TIME);
+                    jedis.expire(token, ConstantKit.TOKEN_EXPIRE_TIME);
+                    log.info("Reset expire time success!");
+                    Long newBirthTime = System.currentTimeMillis();
+                    jedis.set(token + username, newBirthTime.toString());
+                }
+
+                //用完关闭
+                jedis.close();
+                request.setAttribute(REQUEST_CURRENT_KEY, username);
+                return true;
+            } else {
+                JSONObject jsonObject = new JSONObject();
+
+                PrintWriter out = null;
+                try {
+                    response.setStatus(unauthorizedErrorCode);
+                    response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+
+                    jsonObject.put("code", ((HttpServletResponse) response).getStatus());
+                    jsonObject.put("message", HttpStatus.UNAUTHORIZED);
+                    out = response.getWriter();
+                    out.println(jsonObject);
+
+                    return false;
+                } catch (Exception e) {
+                    e.printStackTrace();
+                } finally {
+                    if (null != out) {
+                        out.flush();
+                        out.close();
+                    }
+                }
+
+            }
+
+        }
+
+        request.setAttribute(REQUEST_CURRENT_KEY, null);
+
+        return true;
+    }
+
+    @Override
+    public void postHandle(HttpServletRequest request, HttpServletResponse response, Object handler, ModelAndView modelAndView) throws Exception {
+
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+
+    }
+}</code></pre> 
+<p>在工具类中设置token过期时间等信息：</p> 
+<pre><code class="language-java">/**
+ * @author 旺旺米雪饼
+ */
+public class ConstantKit {
+    /**
+     * 设置删除标志为真
+     */
+    public static final Integer DEL_FLAG_TRUE = 1;
+
+    /**
+     * 设置删除标志为假
+     */
+    public static final Integer DEL_FLAG_FALSE = 0;
+
+    /**
+     * redis存储token设置的过期时间，10分钟
+     */
+    public static final Integer TOKEN_EXPIRE_TIME = 60 * 10;
+
+    /**
+     * 设置可以重置token过期时间的时间界限
+     */
+    public static final Integer TOKEN_RESET_TIME = 1000 * 100;
+
+
+}</code></pre> 
+<p>并且设计Md5加密后的token值：</p> 
+<pre><code class="language-java">/**
+ * @author 旺旺米雪饼
+ */
+@Component
+public class Md5TokenGenerator {
+
+    public String generate(String... strings) {
+        long timestamp = System.currentTimeMillis();
+        String tokenMeta = "";
+        for (String s : strings) {
+            tokenMeta = tokenMeta + s;
+        }
+        tokenMeta = tokenMeta + timestamp;
+        String token = DigestUtils.md5DigestAsHex(tokenMeta.getBytes());
+        return token;
+    }
+}</code></pre> 
+<p>别忘了在WebConfig中添加拦截器。</p> 
+<p>最后在controller层中进行验证：</p> 
+<pre><code class="language-java">@RestController
+public class Welcome {
+
+    Logger logger = LoggerFactory.getLogger(Welcome.class);
+
+    @Autowired
+    Md5TokenGenerator tokenGenerator;
+
+    @Autowired
+    UserMapper userMapper;
+
+    @GetMapping("/welcome")
+    public String welcome(){
+
+        return "welcome token authentication";
+    }
+
+
+    @RequestMapping(value = "/login", method = RequestMethod.GET)
+    public ResponseTemplate login(String username, String password) {
+
+        logger.info("username:"+username+"      password:"+password);
+
+        User user = userMapper.getUser(username,password);
+
+        logger.info("user:"+user);
+
+        JSONObject result = new JSONObject();
+        if (user != null) {
+
+            Jedis jedis = new Jedis();
+            String token = tokenGenerator.generate(username, password);
+            jedis.set(username, token);
+            //设置key生存时间，当key过期时，它会被自动删除，时间是秒
+            jedis.expire(username, ConstantKit.TOKEN_EXPIRE_TIME);
+            jedis.set(token, username);
+            jedis.expire(token, ConstantKit.TOKEN_EXPIRE_TIME);
+            Long currentTime = System.currentTimeMillis();
+            jedis.set(token + username, currentTime.toString());
+
+            //用完关闭
+            jedis.close();
+
+            result.put("status", "登录成功");
+            result.put("token", token);
+        } else {
+            result.put("status", "登录失败");
+        }
+
+        return ResponseTemplate.builder()
+                .code(200)
+                .message("登录成功")
+                .data(result)
+                .build();
+
+    }
+
+    @RequestMapping(value = "test", method = RequestMethod.GET)
+    @AuthToken
+    public ResponseTemplate test() {
+
+        logger.info("已进入test路径");
+
+        return ResponseTemplate.builder()
+                .code(200)
+                .message("Success")
+                .data("test url")
+                .build();
+    }
+
+}</code></pre> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

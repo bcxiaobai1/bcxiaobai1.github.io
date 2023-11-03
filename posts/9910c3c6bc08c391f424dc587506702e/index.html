@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>基于 ACK Fluid 的混合云优化数据访问（五）：自动化跨区域中心数据分发 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于 ACK Fluid 的混合云优化数据访问（五）：自动化跨区域中心数据分发</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p>作者：车漾</p> 
+<p><strong>前文回顾：</strong></p> 
+<p>本系列将介绍如何基于 ACK Fluid 支持和优化混合云的数据访问场景，相关文章请参考：</p> 
+<p><a href="http://mp.weixin.qq.com/s?__biz=MzUzNzYxNjAzMg==&amp;mid=2247557060&amp;idx=2&amp;sn=87bb8bd589255fcb3b7b320c0da5911e&amp;chksm=fae6140bcd919d1dcac07c664e89376de0745fb5360680597b32222f9bcd9bd3b5bbd92ec1f7&amp;scene=21#wechat_redirect">-基于 ACK Fluid 的混合云优化数据访问（一）：场景与架构</a></p> 
+<p><a href="http://mp.weixin.qq.com/s?__biz=MzUzNzYxNjAzMg==&amp;mid=2247557197&amp;idx=2&amp;sn=54308c9256f471957091c383747f7238&amp;chksm=fae7eb82cd906294f0b8e147e773816ec69b132bb87b74bf504cf14a4a4b7edf2ede4bac6988&amp;scene=21#wechat_redirect">-基于 ACK Fluid 的混合云优化数据访问（二）：搭建弹性计算实例与第三方存储的桥梁</a></p> 
+<p><a href="http://mp.weixin.qq.com/s?__biz=MzUzNzYxNjAzMg==&amp;mid=2247557271&amp;idx=1&amp;sn=57a1202a339f544ce145372bfd138f4c&amp;chksm=fae7eb58cd90624e0671773f39b720e95e00cd92cca2873c03aa07a17ddff1733ab36c671ced&amp;scene=21#wechat_redirect">-基于 ACK Fluid 的混合云优化数据访问（三）：加速第三方存储的读访问，降本增效并行</a></p> 
+<p><a href="http://mp.weixin.qq.com/s?__biz=MzUzNzYxNjAzMg==&amp;mid=2247557320&amp;idx=2&amp;sn=cac0634041abd51025fded2d34309631&amp;chksm=fae7eb07cd906211cc5f41814da65746b0e1cdea2967f66b5ce390a354391865d7dd1048cbc2&amp;scene=21#wechat_redirect">-基于 ACK Fluid 的混合云优化数据访问（四）：将第三方存储目录挂载到 Kubernetes，提升效率和标准化</a></p> 
+<p>在之前的文章中，我们讨论了混合云场景下 Kubernetes 与数据相结合的 Day 1：解决数据接入的问题，实现云上计算和线下存储的连接。在此基础上，ACK Fluid 进一步解决了数据访问的成本和性能问题。而进入 Day 2，当用户真的在生产环境使用该方案时，最主要的挑战就是运维側如何处理多区域集群的数据同步。</p> 
+<p><img src="https://images2.imgbox.com/d4/7b/Yq7o9TRt_o.png" alt="图片"></p> 
+<h3>
+<a id="_18"></a>概述</h3> 
+<p>许多企业出于性能、安全、稳定性和资源隔离的目的，会在不同区域建立多个计算集群。而这些计算集群需要远程访问唯一中心化的数据存储。比如随着大语言模型的逐渐成熟，基于其的多区域推理服务也逐渐成为各个企业需要支持的能力，就是这个场景的具体实例，它有不小的挑战：</p> 
+<ul>
+<li>多计算集群跨数据中心手动操作数据同步，非常耗时</li>
+<li>以大语言模型为例，参数多文件大，数量多，管理复杂：不同业务选择不同的基础模型和业务数据，因此最终模型存在差异。</li>
+<li>模型数据会根据业务输入不断做更新迭代，模型数据更新频繁</li>
+<li>模型推理服务启动慢，拉取文件时间长：大型语言模型的参数规模相当巨大，体积通常很大甚至达到几百 GB，导致拉取到 GPU 显存的耗时巨大，启动时间非常慢。</li>
+<li>模型更新需要所有区域同步更新，而在过载的存储集群上进行复制作业严重影响现有负载的性能。</li>
+</ul> 
+<p>ACK Fluid 除了提供通用存储客户端的加速能力，还提供了定时和触发式数据迁移和预热能力，简化数据分发的复杂度。</p> 
+<ul>
+<li>
+<strong>节省网络和计算成本：</strong> 跨区流量成本大幅降低，计算时间明显缩短，少量增加计算集群成本；并且可以通过弹性进一步优化。</li>
+<li>
+<strong>应用数据更新大幅加速：</strong> 由于计算的数据访问在同一个数据中心或者可用区内完成通信，延时降低，且缓存吞吐并发能力可线性扩展。</li>
+<li>
+<strong>减少复杂的数据同步操作：</strong> 通过自定义策略控制数据同步操作，降低数据访问争抢，同时通过自动化的方式降低运维复杂度。</li>
+</ul> 
+<h3>
+<a id="_34"></a>演示</h3> 
+<p>本演示介绍如何通过 ACK Fluid 的定时预热机制更新用户不同区域的计算集群可以访问的数据。</p> 
+<h4>
+<a id="_38"></a>前提条件</h4> 
+<ul>
+<li>已创建 ACK Pro 版集群，且集群版本为 1.18 及以上。具体操作，请参见创建 ACK Pro 版集群 <strong>[</strong> <strong>1]</strong> 。</li>
+<li>已安装云原生 AI 套件并部署 ack-fluid 组件。重要：若您已安装开源 Fluid，请卸载后再部署 ack-fluid 组件。</li>
+</ul> 
+ 
+<ul>
+<li>未安装云原生 AI 套件：安装时开启 <strong>Fluid 数据加速</strong>。具体操作，请参见安装云原生 AI 套件 <strong>[</strong> <strong>2]</strong> 。</li>
+<li>已安装云原生 AI 套件：在容器服务管理控制台 <strong>[</strong> <strong>3]</strong> 的<strong>云原生 AI 套件</strong>页面部署 <strong>ack-fluid</strong>。</li>
+</ul> 
+ 
+<ul><li>已通过 kubectl 连接 Kubernetes 集群。具体操作，请参见通过 kubectl 工具连接集群 <strong>[</strong> <strong>4]</strong> 。</li></ul> 
+<h4>
+<a id="_52"></a>背景信息</h4> 
+<p>准备好 K8s 和 OSS 环境的条件，您只需要耗费 10 分钟左右即可完成 JindoRuntime 环境的部署。</p> 
+<h4>
+<a id="_OSS_Bucket__56"></a>步骤一：准备 OSS Bucket 的数据</h4> 
+<ol><li>执行以下命令，下载一份测试数据。</li></ol> 
+<pre><code>$ wget https://archive.apache.org/dist/hbase/2.5.2/RELEASENOTES.md
+</code></pre> 
+<ol start="2"><li>将下载的测试数据上传到阿里云 OSS 对应的 Bucket 上，上传方法可以借助 OSS 提供的客户端工具 ossutil。具体操作，请参见安装 ossutil <strong>[</strong> <strong>5]</strong> 。</li></ol> 
+<pre><code>$ ossutil cp RELEASENOTES.md oss://&lt;bucket&gt;/&lt;path&gt;/RELEASENOTES.md
+</code></pre> 
+<h4>
+<a id="DatasetJindoRuntime_71"></a>步骤二：创建Dataset和JindoRuntime</h4> 
+<ol><li>在创建 Dataset 之前，您可以创建一个 mySecret.yaml 文件来保存 OSS 的 accessKeyId 和 accessKeySecret。</li></ol> 
+<p>创建 mySecret.yaml 文件的 YAML 样例如下：</p> 
+<pre><code>apiVersion: v1
+kind: Secret
+metadata:
+  name: mysecret
+stringData:
+  fs.oss.accessKeyId: xxx
+  fs.oss.accessKeySecret: xxx
+</code></pre> 
+<ol start="2"><li>执行以下命令，生成 Secret。</li></ol> 
+<pre><code>$ kubectl create -f mySecret.yaml
+</code></pre> 
+<ol start="3"><li>使用以下 YAML 文件样例创建一个名为 dataset.yaml 的文件，且里面包含两部分：</li></ol> 
+<ul>
+<li>创建一个 Dataset，描述远端存储数据集和 UFS 的信息。</li>
+<li>创建一个 JindoRuntime，启动一个 JindoFS 的集群来提供缓存服务。</li>
+</ul> 
+<pre><code>apiVersion: data.fluid.io/v1alpha1
+kind: Dataset
+metadata:
+  name: demo
+spec:
+  mounts:
+    - mountPoint: oss://&lt;bucket-name&gt;/&lt;path&gt;
+      options:
+        fs.oss.endpoint: &lt;oss-endpoint&gt;
+      name: hbase
+      path: "/"
+      encryptOptions:
+        - name: fs.oss.accessKeyId
+          valueFrom:
+            secretKeyRef:
+              name: mysecret
+              key: fs.oss.accessKeyId
+        - name: fs.oss.accessKeySecret
+          valueFrom:
+            secretKeyRef:
+              name: mysecret
+              key: fs.oss.accessKeySecret
+  accessModes:
+    - ReadOnlyMany
+---
+apiVersion: data.fluid.io/v1alpha1
+kind: JindoRuntime
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  tieredstore:
+    levels:
+      - mediumtype: MEM
+        path: /dev/shm
+        quota: 2Gi
+        high: "0.99"
+        low: "0.8"
+  fuse:
+   args:
+    - -okernel_cache
+    - -oro
+    - -oattr_timeout=60
+    - -oentry_timeout=60
+    - -onegative_timeout=60
+</code></pre> 
+<p>相关参数解释如下表所示：</p> 
+<table>
+<thead><tr>
+<th align="left"><strong>参数</strong></th>
+<th align="left"><strong>说明</strong></th>
+</tr></thead>
+<tbody>
+<tr>
+<td align="left">mountPoint</td>
+<td align="left">oss://&lt;oss_bucket&gt;/ 
+    
+      表示挂载UFS的路径，路径中不需要包含endpoint信息。 
+    
+</td>
+</tr>
+<tr>
+<td align="left">fs.oss.endpoint</td>
+<td align="left">OSS Bucket的endpoint信息，公网或私网地址皆可。</td>
+</tr>
+<tr>
+<td align="left">accessModes</td>
+<td align="left">表示Dataset的访问模式。</td>
+</tr>
+<tr>
+<td align="left">replicas</td>
+<td align="left">表示创建JindoFS集群的Worker数量。</td>
+</tr>
+<tr>
+<td align="left">mediumtype</td>
+<td align="left">表示缓存类型。定义创建JindoRuntime模板样例时，JindoFS暂时支持HDD/SSD/MEM中的其中一种缓存类型。</td>
+</tr>
+<tr>
+<td align="left">path</td>
+<td align="left">表示存储路径，暂时只支持单个路径。当选择MEM做缓存时，需指定一个本地路径来存储Log等文件。</td>
+</tr>
+<tr>
+<td align="left">quota</td>
+<td align="left">表示缓存最大容量，单位GB。缓存容量可以根据UFS数据大小自行配置。</td>
+</tr>
+<tr>
+<td align="left">high</td>
+<td align="left">表示存储容量上限大小。</td>
+</tr>
+<tr>
+<td align="left">low</td>
+<td align="left">表示存储容量下限大小。</td>
+</tr>
+<tr>
+<td align="left">fuse.args</td>
+<td align="left">表示可选的fuse客户端挂载参数。通常与Dataset的访问模式搭配使用。当Dataset访问模式为ReadOnlyMany时，我们开启kernel_cache以利用内核缓存优化读性能。此时我们可以设置attr_timeout（文件属性缓存保留时间）、entry_timeout（文件名读取缓存保留时间）超时时间、negative_timeout（文件名读取失败缓存保留时间），默认均为7200s。当Dataset访问模式为ReadWriteMany时，我们建议使用默认配置。此时参数如下：- -oauto_cache- -oattr_timeout=0- -oentry_timeout=0- -onegative_timeout=0使用auto_cache以确保如果文件大小或修改时间发生变化，缓存就会失效。同时将超时时间都设置为0。</td>
+</tr>
+</tbody>
+</table> 
+<ol start="4"><li>执行以下命令，创建 JindoRuntime 和 Dataset。</li></ol> 
+<pre><code>$ kubectl create -f dataset.yaml
+</code></pre> 
+<ol start="5"><li>执行以下命令，查看 Dataset 的部署情况。</li></ol> 
+<pre><code>$ kubectl get dataset
+</code></pre> 
+<p>预期输出：</p> 
+<pre><code>NAME    UFS TOTAL SIZE   CACHED      CACHE CAPACITY   CACHED PERCENTAGE   PHASE   AGE
+demo    588.90KiB        0.00B       10.00GiB         0.0%                Bound   2m7s
+</code></pre> 
+<h4>
+<a id="_Dataload_180"></a>步骤三：创建支持定时运行的 Dataload</h4> 
+<ol><li>使用以下 YAML 文件样例创建一个名为 dataload.yaml 的文件。</li></ol> 
+<pre><code>apiVersion: data.fluid.io/v1alpha1
+kind: DataLoad
+metadata:
+  name: cron-dataload
+spec:
+  dataset:
+    name: demo
+    namespace: default
+  policy: Cron
+  schedule: "*/2 * * * *" # Run every 2 min
+</code></pre> 
+<p>相关参数解释如下表所示：</p> 
+<table>
+<thead><tr>
+<th align="left"><strong>参数</strong></th>
+<th align="left"><strong>说明</strong></th>
+</tr></thead>
+<tbody>
+<tr>
+<td align="left">dataset</td>
+<td align="left">表示执行dataload的数据集name和namespace。</td>
+</tr>
+<tr>
+<td align="left">policy</td>
+<td align="left">表示执行策略，目前支持Once和Cron。这里创建定时dataload任务。</td>
+</tr>
+<tr>
+<td align="left">shcedule</td>
+<td align="left">表示触发dataload的策略。</td>
+</tr>
+</tbody>
+</table> 
+<p>scheule 使用以下 cron 格式：</p> 
+<pre><code># ┌───────────── 分钟 (0 - 59)
+# │ ┌───────────── 小时 (0 - 23)
+# │ │ ┌───────────── 月的某天 (1 - 31)
+# │ │ │ ┌───────────── 月份 (1 - 12)
+# │ │ │ │ ┌───────────── 周的某天 (0 - 6)（周日到周一；在某些系统上，7 也是星期日）
+# │ │ │ │ │                          或者是 sun，mon，tue，web，thu，fri，sat
+# │ │ │ │ │
+# │ │ │ │ │
+# * * * * *
+</code></pre> 
+<p>同时，cron 支持下列运算符：</p> 
+<ul>
+<li>逗号（,）表示列举，例如：1,3,4,7 * * * * 表示在每小时的 1、3、4、7 分时执行Dataload。</li>
+<li>连词符（-）表示范围，例如：1-6 * * * * 表示每小时的 1 到 6 分钟内，每分钟都执行一次。</li>
+<li>星号（*）代表任何可能的值。例如：在“小时域”里的星号等于是“每一个小时”。</li>
+<li>百分号(%) 表示“每"。例如：*%10 * * * * 表示每 10 分钟执行一次。</li>
+<li>斜杠 (/) 用于描述范围的增量。例如：*/2 * * * *表示每 2 分钟执行一次。</li>
+</ul> 
+<p>您也可以在这里查看更多信息。</p> 
+<p>Dataload 相关高级配置请参考如下配置文件：</p> 
+<pre><code>apiVersion: data.fluid.io/v1alpha1
+kind: DataLoad
+metadata:
+  name: cron-dataload
+spec:
+  dataset:
+    name: demo
+    namespace: default
+  policy: Cron # including Once, Cron
+  schedule: * * * * * # only set when policy is cron
+  loadMetadata: true
+  target:
+    - path: &lt;path1&gt;
+      replicas: 1
+    - path: &lt;path2&gt;
+      replicas: 2
+</code></pre> 
+<p>相关参数解释如下表所示：</p> 
+<table>
+<thead><tr>
+<th align="left"><strong>参数</strong></th>
+<th align="left"><strong>说明</strong></th>
+</tr></thead>
+<tbody>
+<tr>
+<td align="left">policy</td>
+<td align="left">表示dataload执行策略，包括[Once, Cron]。</td>
+</tr>
+<tr>
+<td align="left">schedule</td>
+<td align="left">表示cron使用的计划，只有policy为Cron时有效。</td>
+</tr>
+<tr>
+<td align="left">loadMetadata</td>
+<td align="left">表示在dataload前是否同步元数据。</td>
+</tr>
+<tr>
+<td align="left">target</td>
+<td align="left">表示dataload的目标，支持指定多个目标。</td>
+</tr>
+<tr>
+<td align="left">path</td>
+<td align="left">表示执行dataload的路径。</td>
+</tr>
+<tr>
+<td align="left">replicas</td>
+<td align="left">表示缓存的副本数。</td>
+</tr>
+</tbody>
+</table> 
+<ol start="6"><li>执行以下命令创建 Dataload。</li></ol> 
+<pre><code>$ kubectl apply -f dataload.yaml
+</code></pre> 
+<ol start="7"><li>执行以下命令查看 Dataload 状态。</li></ol> 
+<pre><code>$ kubectl get dataload
+</code></pre> 
+<p>预期输出：</p> 
+<pre><code>NAME             DATASET   PHASE      AGE     DURATION
+cron-dataload    demo      Complete   3m51s   2m12s
+</code></pre> 
+<ol start="8"><li>等待 Dataload 状态为 Complete 后，执行以下命令查看当前 dataset 状态。</li></ol> 
+<pre><code>$ kubectl get dataset
+</code></pre> 
+<p>预期输出：</p> 
+<pre><code>NAME    UFS TOTAL SIZE   CACHED      CACHE CAPACITY   CACHED PERCENTAGE   PHASE   AGE
+demo    588.90KiB        588.90KiB   10.00GiB         100.0%              Bound   5m50s
+</code></pre> 
+<p>可以看出 oss 中文件已经全部加载到缓存。</p> 
+<h4>
+<a id="_OSS__295"></a>步骤四：创建应用容器访问 OSS 中的数据</h4> 
+<p>本文以创建一个应用容器访问上述文件以查看定时 Dataload 效果。</p> 
+<ol><li>使用以下 YAML 文件样例，创建名为 app.yaml 的文件。</li></ol> 
+<pre><code>apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+    - name: nginx
+      image: nginx
+      volumeMounts:
+        - mountPath: /data
+          name: demo-vol
+  volumes:
+    - name: demo-vol
+      persistentVolumeClaim:
+        claimName: demo
+</code></pre> 
+<ol start="2"><li>执行以下命令创建应用容器。</li></ol> 
+<pre><code>$ kubectl create -f app.yaml
+</code></pre> 
+<ol start="3"><li>等待应用容器就绪，执行以下命令查看 OSS 中的数据：</li></ol> 
+<pre><code>$ kubectl exec -it nginx -- ls -lh /data
+</code></pre> 
+<p>预期输出：</p> 
+<pre><code>total 589K
+-rwxrwxr-x 1 root root 589K Jul 31 04:20 RELEASENOTES.md
+</code></pre> 
+<ol start="4"><li>为了验证 dataload 定时更新底层文件效果，我们在定时 dataload 触发前修改 RELEASENOTES.md 内容并重新上传。</li></ol> 
+<pre><code>$ echo "hello, crondataload." &gt;&gt; RELEASENOTES.md
+</code></pre> 
+<p>重新上传该文件到 oss。</p> 
+<pre><code>$ ossutil cp RELEASENOTES.md oss://&lt;bucket-name&gt;/&lt;path&gt;/RELEASENOTES.md
+</code></pre> 
+<ol start="5"><li>等待 dataload 任务触发。Dataload 任务完成时，执行以下命令查看 Dataload 作业运行情况：</li></ol> 
+<pre><code>$ kubectl describe dataload cron-dataload
+</code></pre> 
+<p>预期输出：</p> 
+<pre><code>...
+Status:
+  Conditions:
+    Last Probe Time:       2023-07-31T04:30:07Z
+    Last Transition Time:  2023-07-31T04:30:07Z
+    Status:                True
+    Type:                  Complete
+  Duration:                5m54s
+  Last Schedule Time:      2023-07-31T04:30:00Z
+  Last Successful Time:    2023-07-31T04:30:07Z
+  Phase:                   Complete
+...
+</code></pre> 
+<p>其中，Status 中 Last Schedule Time 为上一次 dataload 作业的调度时间，Last Successful Time 为上一次 dataload 作业的完成时间。</p> 
+<p>此时，可以执行以下命令查看当前 Dataset 状态：</p> 
+<pre><code>$ kubectl get dataset
+</code></pre> 
+<p>预期输出：</p> 
+<pre><code>NAME    UFS TOTAL SIZE   CACHED      CACHE CAPACITY   CACHED PERCENTAGE   PHASE   AGE
+demo    588.90KiB        1.15MiB     10.00GiB         100.0%              Bound   10m
+</code></pre> 
+<p>可以看出更新后的文件也已经加载到了缓存。</p> 
+<ol start="6"><li>执行以下命令在应用容器中查看更新后的文件：</li></ol> 
+<pre><code>$ kubectl exec -it nginx -- tail /data/RELEASENOTES.md
+</code></pre> 
+<p>预期输出：</p> 
+<pre><code>  &lt;name&gt;hbase.config.read.zookeeper.config&lt;/name&gt;
+  &lt;value&gt;true&lt;/value&gt;
+  &lt;description&gt;
+        Set to true to allow HBaseConfiguration to read the
+        zoo.cfg file for ZooKeeper properties. Switching this to true
+        is not recommended, since the functionality of reading ZK
+        properties from a zoo.cfg file has been deprecated.
+  &lt;/description&gt;
+&lt;/property&gt;
+hello, crondataload.
+</code></pre> 
+<p>从最后一行可以看出，应用容器已经可以访问更新后的文件。</p> 
+<h4>
+<a id="_413"></a>环境清理</h4> 
+<p>当您不再使用该数据加速功能时，需要清理环境。</p> 
+<p>执行以下命令，删除 JindoRuntime 和应用容器。</p> 
+<pre><code>$ kubectl delete -f app.yaml
+
+$ kubectl delete -f dataset.yaml
+</code></pre> 
+<h3>
+<a id="_425"></a>总结</h3> 
+<p>关于基于 ACK Fluid 的混合云优化数据访问的讨论先到这里告一段落，阿里云容器服务团队会和用户在这个场景下持续的迭代和优化，随着实践不断深入，这个系列也会持续更新。</p> 
+<p><strong>相关链接：</strong></p> 
+<p>[1] 创建 ACK Pro 版集群<br> https://help.aliyun.com/document_detail/176833.html#task-skz-qwk-qfb</p> 
+<p>[2] 安装云原生 AI 套件</p> 
+<p>https://help.aliyun.com/zh/ack/cloud-native-ai-suite/user-guide/deploy-the-cloud-native-ai-suite#task-2038811</p> 
+<p>[3] 容器服务管理控制台</p> 
+<p>https://account.aliyun.com/login/login.htm?oauth_callback=https%3A%2F%2Fcs.console.aliyun.com%2F</p> 
+<p>[4] 通过 kubectl 工具连接集群</p> 
+<p>https://help.aliyun.com/zh/ack/ack-managed-and-ack-dedicated/user-guide/obtain-the-kubeconfig-file-of-a-cluster-and-use-kubectl-to-connect-to-the-cluster#task-ubf-lhg-vdb</p> 
+<p>[5] 安装 ossutil</p> 
+<p>https://help.aliyun.com/zh/oss/developer-reference/install-ossutil#concept-303829</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

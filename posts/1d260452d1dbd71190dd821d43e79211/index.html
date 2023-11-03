@@ -1,0 +1,2089 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>k8s1.23.15版本二进制部署/扩容及高可用架构详解 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">k8s1.23.15版本二进制部署/扩容及高可用架构详解</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h3>
+<a id="_0"></a>前言</h3> 
+<p>    众所周知，kubernetes在2020年的1.20版本时就提出要移除docker。<a href="https://kubernetes.io/zh-cn/blog/2022/02/17/dockershim-faq/">这次官方消息表明在1.24版本中彻底移除了dockershim</a>，即移除docker。但是在1.24之前的版本中还是可以正常使用docker的。考虑到可能并不是所有项目环境都紧跟新版换掉了docker，本次就再最后体验一下可支持docker的最新k8s版本1.23.15，后续可能就研究怎么使用其他CRI，例如containerd了。</p> 
+<h2>
+<a id="_2"></a>一、部署介绍及规划：</h2> 
+<h4>
+<a id="_3"></a>本次部署各组件版本：</h4> 
+<blockquote> 
+ <p>顺便简单过一下组件作用</p> 
+</blockquote> 
+<ul>
+<li>
+<strong>etcd：</strong> <code>3.5.6</code>        负责存储集群的持久化数据</li>
+<li>
+<strong>k8s-server：</strong> <code>1.23.15</code>（所有基础组件版本）</li>
+<li> 
+  <ul><li>kube-apiserver：核心枢纽，提供了资源操作的唯一入口，并提供认证、授权、访问控制、API注册和发现等机制；</li></ul> </li>
+<li> 
+  <ul><li>kube-controller-manager：集群的管理控制中心，负责维护集群状态</li></ul> </li>
+<li> 
+  <ul><li>kube-scheduler：调度中心，负责节点资源管理，调度创建pod等</li></ul> </li>
+<li> 
+  <ul><li>kube-proxy：网络代理，负责为Service提供cluster内部的服务发现和负载均衡</li></ul> </li>
+<li> 
+  <ul><li>kubelet：负责维护pod生命周期</li></ul> </li>
+<li> 
+  <ul><li>kubctl：管理集群命令</li></ul> </li>
+<li> 
+  <ul><li>……</li></ul> </li>
+</ul> 
+<h4>
+<a id="_16"></a>明确目标：</h4> 
+<p><strong>部署：</strong> 快速部署三节点单master集群；<br> <strong>扩容：</strong> 新增一个节点，扩为双master集群，部署keepalived+nginx实现apiserver高可用，有条件的可以扩为三master集群</p> 
+<h4>
+<a id="_19"></a>本次测试节点信息：</h4> 
+<table>
+<thead><tr>
+<th>主机名（角色）</th>
+<th>IP地址</th>
+<th>节点规划</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>k8s-master1</td>
+<td>192.168.100.101</td>
+<td>etcd、kube-apiserver、kube-controller-manager、kube-proxy、kubelet、nginx、keepalived</td>
+</tr>
+<tr>
+<td>k8s-node1</td>
+<td>192.168.100.102</td>
+<td>etcd、kube-proxy、kubelet</td>
+</tr>
+<tr>
+<td>k8s-node2</td>
+<td>192.168.100.103</td>
+<td>etcd、kube-proxy、kubelet</td>
+</tr>
+<tr>
+<td>k8s-master2（待扩容机器）</td>
+<td>192.168.100.104</td>
+<td>kube-apiserver、kube-controller-manager、kube-proxy、kubelet、nginx、keepalived</td>
+</tr>
+<tr>
+<td>VIP（负载均衡器）</td>
+<td>192.168.100.105</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p><strong>服务器版本：</strong></p> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 ~]</span><span class="token comment"># cat /etc/centos-release</span>
+CentOS Linux release 7<span class="token punctuation">.</span>8<span class="token punctuation">.</span>2003 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>
+<span class="token namespace">[root@k8s-master1 ~]</span><span class="token comment"># uname -a</span>
+Linux k8s-master1 3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64 <span class="token comment">#1 SMP Tue Mar 31 23:36:51 UTC 2020 x86_64 x86_64 x86_64 GNU/Linux</span>
+</code></pre> 
+<h2>
+<a id="_38"></a>二、部署前准备</h2> 
+<blockquote> 
+ <p>（所有节点均操作）<br> <a id="catalog_ctt"></a></p> 
+</blockquote> 
+<h3>
+<a id="span_idclick_me_jump2span_42"></a>系统初始化<span id="click_me_jump2"></span>
+</h3> 
+<p>为了方便二次执行，直接全部复制，改了IP执行就可</p> 
+<pre><code class="prism language-powershell"><span class="token comment"># 1、关闭防火墙和selinux</span>
+sed <span class="token operator">-</span>i  <span class="token string">"s/SELINUX=enforcing/SELINUX=disabled/g"</span> <span class="token operator">/</span>etc/selinux/config
+setenforce 0
+systemctl stop firewalld
+systemctl disable firewalld
+
+<span class="token comment"># 2、配置hosts解析</span>
+<span class="token function">cat</span> &gt;&gt; <span class="token operator">/</span>etc/hosts &lt;&lt; EOF
+192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101  k8s-master1
+192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102  k8s-node1
+192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103  k8s-node2
+192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104  k8s-master2
+EOF
+
+<span class="token comment"># 3、关闭swap分区（避免有性能等其他问题）</span>
+swapoff <span class="token operator">-</span>a  <span class="token comment">#临时关闭</span>
+sed <span class="token operator">-</span>i <span class="token string">"s/^.*swap*/#&amp;/"</span> <span class="token operator">/</span>etc/fstab   <span class="token comment">#永久关闭</span>
+<span class="token function">mount</span> <span class="token operator">-</span>a
+
+<span class="token comment"># 4、将桥接的IPV4流量传递到iptables的链</span>
+<span class="token function">cat</span> &gt; <span class="token operator">/</span>etc/sysctl<span class="token punctuation">.</span>d/k8s<span class="token punctuation">.</span>conf &lt;&lt; EOF 
+net<span class="token punctuation">.</span>bridge<span class="token punctuation">.</span>bridge-nf-call-ip6tables = 1 
+net<span class="token punctuation">.</span>bridge<span class="token punctuation">.</span>bridge-nf-call-iptables = 1 
+EOF
+modprobe br_netfilter   <span class="token comment">#载入模块</span>
+sysctl <span class="token operator">-</span>p <span class="token operator">/</span>etc/sysctl<span class="token punctuation">.</span>d/k8s<span class="token punctuation">.</span>conf  <span class="token comment">#生效</span>
+
+<span class="token comment"># 5、配置ntp</span>
+yum <span class="token operator">-</span>y install ntp vim wget
+sed <span class="token operator">-</span>i <span class="token string">"s/^[^#].*iburst*/#&amp;/g"</span> <span class="token operator">/</span>etc/ntp<span class="token punctuation">.</span>conf   <span class="token comment">#注释原有server配置</span>
+sed <span class="token operator">-</span>i <span class="token string">"/server 3/aserver ntp.aliyun.com"</span> <span class="token operator">/</span>etc/ntp<span class="token punctuation">.</span>conf   <span class="token comment">#添加阿里云ntpserver</span>
+systemctl restart ntpd
+systemctl enable ntpd
+ntpq <span class="token operator">-</span>p
+</code></pre> 
+<h3>
+<a id="click_me_jump1_81"></a>拓展内容<a href="#click_me_jump1"><strong>（可忽略，直接跳到第三步）</strong></a>
+</h3> 
+<h4>
+<a id="1netbridgebridgenfcallip6tables_83"></a>1、上边初始化时net.bridge.bridge-nf-call-ip6tables参数说明</h4> 
+<p>为什么要开启 net.bridge.bridge-nf-call-ip6tables 配置（启用iptables过滤bridge网桥流量）<br> <strong>简述：</strong><br> 网桥是处于二层，iptables工作于三层</p> 
+<ul>
+<li>1、集群内一pod访问其他的service ip，会经过三层iptables的DNAT转发到pod_ip:port</li>
+<li>2、当不开启此配置，当被访pod回复请求时，如果发现目标是在同一个节点，即同一网桥时，会直接走网桥到源pod，这样虽然能到源pod，但是由于没有原路返回，客户端与服务端的通信就不在一个 “频道” 上，不认为处在同一个连接，也就无法正常通信。</li>
+</ul> 
+<p>常见的问题现象就是偶现DNS解析失败，当 coredns 所在节点上的 pod 解析 dns 时，dns 请求落到当前节点的 coredns pod 上时，就可能发生这个问题。<br> <strong>感兴趣可以看详细说明：</strong><a href="https://cloud.tencent.com/developer/article/1828060">为什么 kubernetes 环境要求开启 bridge-nf-call-iptables ? - 腾讯云开发者社区-腾讯云 (tencent.com)</a><br> <strong>官方解读看这里：</strong><a href="https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/#network-plugin-requirements">Network Plugins | Kubernetes</a></p> 
+<h4>
+<a id="2TLS_94"></a>2、简单了解下TLS证书</h4> 
+<p>    因为k8s集群需要PKI证书来基于TLS/SSL来做认证，组件之间的通信都是通过证书来完成，可以理解为“口令”，组件通信时验证证书无误后，才会建立联系，交互信息，所以证书在部署及环境使用过程中也是比较重要的一项。</p> 
+<h5>
+<a id="_97"></a>基础概念</h5> 
+<ul>
+<li>CA(Certification Authority)：认证机构：负责颁发证书的权威机构（发送与接收组件双方之间的信任纽带）</li>
+<li>CSR(Certificate Signing Request)：它是向CA机构申请数字签名证书时使用的请求文件</li>
+</ul> 
+<p>请求中会附上公钥信息以及国家，城市，域名，Email等信息，准备好CSR文件后就可以提交给CA机构，等待他们给我们签名，签好名后我们会收到crt文件，即证书。</p> 
+<h5>
+<a id="_103"></a>证书：</h5> 
+<p>CA机构对申请者的身份验证成功后，用CA的根证书对申请人的一些基本信息以及申请人的公钥进行签名（相当于加盖发证书机 构的公章）后形成的一个数字文件。实际上，数字证书就是经过CA认证过的公钥，除了公钥，还有其他的信息，比如Email，国家，城市，域名等。</p> 
+<h5>
+<a id="_107"></a>证书的编码格式：</h5> 
+<ul>
+<li>PEM(Privacy Enhanced Mail)：通常用于数字证书认证机构CA，扩展名为.pem, .crt, .cer, 和.key。内容为Base64编码的ASCII码文件，有类似"-----BEGIN CERTIFICATE-----" 和 "-----END CERTIFICATE-----"的头尾标记</li>
+<li>DER(Distinguished Encoding Rules)：与PEM不同之处在于其使用二进制而不是Base64编码的ASCII。扩展名为.der或者.cer</li>
+</ul> 
+<h5>
+<a id="_112"></a>公钥私钥：</h5> 
+<ul>
+<li>每个人都有一个公钥与私钥</li>
+<li>私钥用来进行解密和签名，是给自己用的。</li>
+<li>公钥由本人公开，用于加密和验证签名，是给别人用的。</li>
+<li>当该用户发送文件时，用私钥签名，别人用他给的公钥解密，可以保证该信息是由他发送的。即数字签名。</li>
+<li>当该用户接受文件时，别人用他的公钥加密，他用私钥解密，可以保证该信息只能由他看到。即安全传输。</li>
+</ul> 
+<h5>
+<a id="CA_119"></a>简述CA原理</h5> 
+<p>CA的产生，是因为多个组件之间通信时，需要加一第三方来判断数据来源是否合规，保证通信的安全性。<br> 引入一个看到的比较好的例子，用介绍信来介绍原理</p> 
+<p><strong>普通的介绍信</strong></p> 
+<p>假设 A 公司的张三先生要到 B 公司去拜访，但是 B 公司的所有人都不认识他，常用的办法是带公司开的一张介绍信，在信中说：兹有张三先生前往贵公司办理业务，请给予接洽…云云。然后在信上敲上A公司的公章。</p> 
+<p>张三先生到了 B 公司后，把介绍信递给 B 公司的前台李四小姐。李小姐一看介绍信上有 A 公司的公章，而且 A 公司是经常和 B 公司有业务往来的，这位李小姐就相信张先生不是歹人了。</p> 
+<p>这里，A公司就是CA机构，介绍信及颁发给张三的证书</p> 
+<p><strong>引入中介权威机构的介绍信</strong></p> 
+<p>如果和 B 公司有业务往来的公司很多，每个公司的公章都不同，那前台就要懂得分辨各种公章，非常麻烦。<br> 所以，有C公司专门开设了一项“代理公章”的业务。<br> 　今后，A 公司的业务员去 B 公司，需要带2个介绍信：<br> 　　<strong>介绍信1</strong><br> 　　含有 C 公司的公章及 A 公司的公章。并且特地注明：C 公司信任 A 公司。<br> 　　<strong>介绍信2</strong><br> 　　仅含有 A 公司的公章，然后写上：兹有张三先生前往贵公司办理业务，请给予接洽…云云。<br> <strong><code>主要的好处在于：</code></strong> 对于B公司而言，就不需要记住各个公司的公章分别是什么；他只需要记住中介公司 C 的公章即可。当他拿到两份介绍信之后，先对介绍信1的 C 公章，验明正身；确认无误之后，再比对介绍信1和介绍信2的两个 A 公章是否一致。如果是一样的，那就可以证明介绍信2，即A公司是可以信任的了。</p> 
+<p>最后直白一点，其实我们的身份证一定程度上也相当于是颁发给我们的证书~</p> 
+<blockquote> 
+ <p>本次集群内部署使用的为自签的CA证书</p> 
+</blockquote> 
+<p><span id="click_me_jump1"></span></p> 
+<h2>
+<a id="_147"></a>三、开始部署</h2> 
+<h3>
+<a id="1etcd_148"></a>1、etcd集群部署</h3> 
+<p>      Etcd 是 CoreOS 推出的高可用的分布式键值存储系统，内部采用 raft 协议作为一致性算法，主要用于k8s集群的服务发现及存储集群的状态和配置等，所以先部署ETCD数据库。<br>       本次使用三台组建集群（集群模式最少三节点），与k8s集群复用三台节点（k8s-master1、k8s-node1、k8s-node2），也可以放在集群之外，网络互通即可。</p> 
+<blockquote> 
+ <p>三节点，可容忍一个节点故障；<br> 五节点，可容忍两个节点故障</p> 
+</blockquote> 
+<h4>
+<a id="11cfssl__155"></a>1.1、使用cfssl工具配置证书 <strong><code>（重点）</code></strong>
+</h4> 
+<p>CFSSL是CloudFlare开源的一款PKI/TLS工具。 CFSSL 包含一个命令行工具 和一个用于 签名，验证并且捆绑TLS证书的 HTTP API 服务。 使用Go语言编写。<br> 是一个开源的证书管理工具，使用json文件生成证书，相比openssl更方便使用。<br> 详细的不多说，直接开始（master1节点操作）</p> 
+<blockquote> 
+ <p>如果下载不下来，<a href="https://download.csdn.net/download/weixin_43860781/87383020">可以点这里下载，为本次文章使用的所有软件包，官方拉取纯净版</a></p> 
+</blockquote> 
+<pre><code class="prism language-powershell"><span class="token comment"># 下载工具包</span>
+mkdir <span class="token operator">/</span>opt/software &amp;&amp; cd <span class="token operator">/</span>opt/software
+wget https:<span class="token operator">/</span><span class="token operator">/</span>github<span class="token punctuation">.</span>com/cloudflare/cfssl/releases/download/v1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0/cfssl_1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0_linux_amd64
+wget https:<span class="token operator">/</span><span class="token operator">/</span>github<span class="token punctuation">.</span>com/cloudflare/cfssl/releases/download/v1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0/cfssljson_1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0_linux_amd64
+wget https:<span class="token operator">/</span><span class="token operator">/</span>github<span class="token punctuation">.</span>com/cloudflare/cfssl/releases/download/v1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0/cfssl-certinfo_1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0_linux_amd64
+<span class="token comment"># 复制到/usr/local/bin目录，并赋予执行权限</span>
+<span class="token function">cp</span> cfssl_1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0_linux_amd64 <span class="token operator">/</span>usr/local/bin/cfssl
+<span class="token function">cp</span> cfssljson_1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0_linux_amd64 <span class="token operator">/</span>usr/local/bin/cfssljson
+<span class="token function">cp</span> cfssl-certinfo_1<span class="token punctuation">.</span>6<span class="token punctuation">.</span>0_linux_amd64 <span class="token operator">/</span>usr/local/bin/cfssl-certinfo
+chmod <span class="token operator">+</span>x <span class="token operator">/</span>usr/local/bin/cfssl*
+</code></pre> 
+<h4>
+<a id="12etcdCA_175"></a>1.2、创建给etcd使用的自签证书颁发机构（CA）</h4> 
+<h5>
+<a id="121_176"></a>1.2.1、创建工作目录</h5> 
+<pre><code class="prism language-powershell">mkdir <span class="token operator">-</span>p ~<span class="token operator">/</span>TLS/<span class="token punctuation">{<!-- --></span>etcd<span class="token punctuation">,</span>k8s<span class="token punctuation">}</span> &amp;&amp; cd ~<span class="token operator">/</span>TLS/etcd
+</code></pre> 
+<h5>
+<a id="122CA_182"></a>1.2.2、配置证书生成策略，让CA软件知道颁发有什么功能的证书</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; ca-config<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"signing"</span>: <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"default"</span>: <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"expiry"</span>: <span class="token string">"87600h"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"profiles"</span>: <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"etcd"</span>: <span class="token punctuation">{<!-- --></span>
+         <span class="token string">"expiry"</span>: <span class="token string">"87600h"</span><span class="token punctuation">,</span>
+         <span class="token string">"usages"</span>: <span class="token punctuation">[</span>
+            <span class="token string">"signing"</span><span class="token punctuation">,</span>
+            <span class="token string">"key encipherment"</span><span class="token punctuation">,</span>
+            <span class="token string">"server auth"</span><span class="token punctuation">,</span>
+            <span class="token string">"client auth"</span>
+        <span class="token punctuation">]</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+EOF
+</code></pre> 
+<p><strong>可用参数介绍：</strong><br> 这个策略，有一个default默认的配置，和一个profiles，profiles可以设置多个profile，这里的profile是etcd。</p> 
+<ul>
+<li>default：默认策略，指定了证书的默认有效期是一年(8760h)</li>
+<li>etcd：表示该配置(profile)的用途是为etcd生成证书及相关的校验工作</li>
+<li> 
+  <ul><li>expiry：也表示过期时间，如果不写以default中的为准</li></ul> </li>
+<li> 
+  <ul><li>signing：表示该证书可用于签名其它证书；生成的 ca.pem 证书中 CA=TRUE</li></ul> </li>
+<li> 
+  <ul><li>key encipherment：密钥加密</li></ul> </li>
+<li> 
+  <ul><li>server auth：表示可以该CA 对 server 提供的证书进行验证</li></ul> </li>
+<li> 
+  <ul><li>client auth：表示可以用该 CA 对 client 提供的证书进行验证</li></ul> </li>
+</ul> 
+<h5>
+<a id="123_CA_CSR_JSON__216"></a>1.2.3、创建用来生成 CA 证书签名请求（CSR）的 JSON 配置文件</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; ca-csr<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+    <span class="token string">"CN"</span>: <span class="token string">"etcd CA"</span><span class="token punctuation">,</span>
+    <span class="token string">"key"</span>: <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"algo"</span>: <span class="token string">"rsa"</span><span class="token punctuation">,</span>
+        <span class="token string">"size"</span>: 2048
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"names"</span>: <span class="token punctuation">[</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"C"</span>: <span class="token string">"CN"</span><span class="token punctuation">,</span>
+            <span class="token string">"L"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+            <span class="token string">"ST"</span>: <span class="token string">"ShangHai"</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+EOF
+</code></pre> 
+<p><strong>可用参数介绍：</strong></p> 
+<ul>
+<li>CN：Common Name，CA名字</li>
+<li>key：生成证书的算法</li>
+<li>hosts：表示哪些主机名(域名)或者IP可以使用此csr申请证书，为空或者""表示所有的都可以使用</li>
+<li>names：一些其它的属性</li>
+<li> 
+  <ul><li>C：Country， 国家</li></ul> </li>
+<li> 
+  <ul><li>ST：State，州或者是省份</li></ul> </li>
+<li> 
+  <ul><li>L：Locality Name，地区，城市</li></ul> </li>
+<li> 
+  <ul><li>O：Organization Name，组织名称，公司名称(在k8s中常用于指定Group，进行RBAC绑定)</li></ul> </li>
+<li> 
+  <ul><li>OU：Organization Unit Name，组织单位名称，公司部门</li></ul> </li>
+</ul> 
+<h5>
+<a id="124CA_248"></a>1.2.4、生成自签CA证书</h5> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 etcd]</span><span class="token comment"># cfssl gencert -initca ca-csr.json | cfssljson -bare ca -</span>
+2022/11/29 01:42:38 <span class="token namespace">[INFO]</span> generating a new CA key and certificate <span class="token keyword">from</span> CSR
+2022/11/29 01:42:38 <span class="token namespace">[INFO]</span> generate received request
+2022/11/29 01:42:38 <span class="token namespace">[INFO]</span> received CSR
+2022/11/29 01:42:38 <span class="token namespace">[INFO]</span> generating key: rsa-2048
+2022/11/29 01:42:38 <span class="token namespace">[INFO]</span> encoded CSR
+2022/11/29 01:42:38 <span class="token namespace">[INFO]</span> signed certificate with serial number 679003178885428426540893262351942198069353062273
+
+<span class="token comment"># 当前目录下会生成 ca.pem和ca-key.pem文件</span>
+<span class="token namespace">[root@k8s-master1 etcd]</span><span class="token comment"># ls</span>
+ca-config<span class="token punctuation">.</span>json  ca<span class="token punctuation">.</span>csr  ca-csr<span class="token punctuation">.</span>json  ca-key<span class="token punctuation">.</span>pem  ca<span class="token punctuation">.</span>pem
+</code></pre> 
+<h4>
+<a id="13CAetcd_263"></a>1.3、使用自签CA签发etcd证书</h4> 
+<h5>
+<a id="131etcd_264"></a>1.3.1、配置etcd请求证书申请文件</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; server-csr<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+    <span class="token string">"CN"</span>: <span class="token string">"etcd"</span><span class="token punctuation">,</span>
+    <span class="token string">"hosts"</span>: <span class="token punctuation">[</span>
+    <span class="token string">"192.168.100.101"</span><span class="token punctuation">,</span>
+    <span class="token string">"192.168.100.102"</span><span class="token punctuation">,</span>
+    <span class="token string">"192.168.100.103"</span>
+
+    <span class="token punctuation">]</span><span class="token punctuation">,</span>
+    <span class="token string">"key"</span>: <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"algo"</span>: <span class="token string">"rsa"</span><span class="token punctuation">,</span>
+        <span class="token string">"size"</span>: 2048
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"names"</span>: <span class="token punctuation">[</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"C"</span>: <span class="token string">"CN"</span><span class="token punctuation">,</span>
+            <span class="token string">"L"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+            <span class="token string">"ST"</span>: <span class="token string">"ShangHai"</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+EOF
+</code></pre> 
+<blockquote> 
+ <p>注：hosts项中ip为etcd集群内部通信的ip，如果后续etcd集群有扩容需求，那么在hosts项里可以预留几个IP</p> 
+</blockquote> 
+<h5>
+<a id="132_293"></a>1.3.2、生成证书</h5> 
+<pre><code class="prism language-powershell">cfssl gencert <span class="token operator">-</span>ca=ca<span class="token punctuation">.</span>pem <span class="token operator">-</span>ca-key=ca-key<span class="token punctuation">.</span>pem <span class="token operator">-</span>config=ca-config<span class="token punctuation">.</span>json <span class="token operator">-</span>profile=etcd server-csr<span class="token punctuation">.</span>json <span class="token punctuation">|</span> cfssljson <span class="token operator">-</span>bare server
+<span class="token comment"># 查看</span>
+<span class="token namespace">[root@k8s-master1 etcd]</span><span class="token comment"># ls</span>
+ca-config<span class="token punctuation">.</span>json  ca<span class="token punctuation">.</span>csr  ca-csr<span class="token punctuation">.</span>json  ca-key<span class="token punctuation">.</span>pem  ca<span class="token punctuation">.</span>pem  server<span class="token punctuation">.</span>csr  server-csr<span class="token punctuation">.</span>json  server-key<span class="token punctuation">.</span>pem  server<span class="token punctuation">.</span>pem
+</code></pre> 
+<h4>
+<a id="14etcd_302"></a>1.4、部署etcd</h4> 
+<p>先在master1节点操作，后边把配置拷贝到另外两个节点修改启动etcd即可</p> 
+<pre><code class="prism language-powershell"><span class="token comment"># 下载二进制包</span>
+cd <span class="token operator">/</span>opt/software
+wget https:<span class="token operator">/</span><span class="token operator">/</span>github<span class="token punctuation">.</span>com/etcd-io/etcd/releases/download/v3<span class="token punctuation">.</span>5<span class="token punctuation">.</span>6/etcd-v3<span class="token punctuation">.</span>5<span class="token punctuation">.</span>6-linux-amd64<span class="token punctuation">.</span>tar<span class="token punctuation">.</span>gz
+
+<span class="token comment"># 创建工作目录</span>
+mkdir <span class="token operator">-</span>p <span class="token operator">/</span>opt/etcd/<span class="token punctuation">{<!-- --></span>bin<span class="token punctuation">,</span>cfg<span class="token punctuation">,</span>ssl<span class="token punctuation">}</span>
+tar <span class="token operator">-</span>zxvf etcd-v3<span class="token punctuation">.</span>5<span class="token punctuation">.</span>6-linux-amd64<span class="token punctuation">.</span>tar<span class="token punctuation">.</span>gz
+<span class="token function">cp</span> etcd-v3<span class="token punctuation">.</span>5<span class="token punctuation">.</span>6-linux-amd64/<span class="token punctuation">{<!-- --></span>etcd<span class="token punctuation">,</span>etcdctl<span class="token punctuation">}</span> <span class="token operator">/</span>opt/etcd/bin/
+
+<span class="token comment"># 拷贝证书至工作目录</span>
+<span class="token function">cp</span> ~<span class="token operator">/</span>TLS/etcd/<span class="token operator">*</span><span class="token punctuation">.</span>pem <span class="token operator">/</span>opt/etcd/ssl/
+
+<span class="token comment"># 添加etcd配置</span>
+<span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/etcd/cfg/etcd<span class="token punctuation">.</span>conf &lt;&lt; EOF
+<span class="token comment">#[Member]</span>
+ETCD_NAME=<span class="token string">"etcd-1"</span>
+ETCD_DATA_DIR=<span class="token string">"/home/data/"</span>
+ETCD_LISTEN_PEER_URLS=<span class="token string">"https://192.168.100.101:2380"</span>
+ETCD_LISTEN_CLIENT_URLS=<span class="token string">"https://192.168.100.101:2379"</span>
+ 
+<span class="token comment">#[Clustering]</span>
+ETCD_INITIAL_ADVERTISE_PEER_URLS=<span class="token string">"https://192.168.100.101:2380"</span>
+ETCD_ADVERTISE_CLIENT_URLS=<span class="token string">"https://192.168.100.101:2379"</span>
+ETCD_INITIAL_CLUSTER=<span class="token string">"etcd-1=https://192.168.100.101:2380,etcd-2=https://192.168.100.102:2380,etcd-3=https://192.168.100.103:2380"</span>
+ETCD_INITIAL_CLUSTER_TOKEN=<span class="token string">"etcd-cluster"</span>
+ETCD_INITIAL_CLUSTER_STATE=<span class="token string">"new"</span>
+EOF
+</code></pre> 
+<p><strong>配置介绍：</strong></p> 
+<ul>
+<li>ETCD_NAME： 节点名称,集群中唯一</li>
+<li>ETCD_DATA_DIR：数据存放目录</li>
+<li>ETCD_LISTEN_PEER_URLS：集群通讯监听地址</li>
+<li>ETCD_LISTEN_CLIENT_URLS：客户端访问监听地址</li>
+<li>ETCD_INITIAL_CLUSTER：集群节点地址</li>
+<li>ETCD_INITIALCLUSTER_TOKEN：集群Token</li>
+<li>ETCD_INITIALCLUSTER_STATE：加入集群的状态：new是新集群，existing表示加入已有集群</li>
+</ul> 
+<h5>
+<a id="141systemdetcd_344"></a>1.4.1、使用systemd管理etcd</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>usr/lib/systemd/system/etcd<span class="token punctuation">.</span>service &lt;&lt; EOF
+<span class="token namespace">[Unit]</span>
+Description=Etcd Server
+After=network<span class="token punctuation">.</span>target
+After=network-online<span class="token punctuation">.</span>target
+Wants=network-online<span class="token punctuation">.</span>target
+ 
+<span class="token namespace">[Service]</span>
+<span class="token function">Type</span>=notify
+EnvironmentFile=<span class="token operator">/</span>opt/etcd/cfg/etcd<span class="token punctuation">.</span>conf
+ExecStart=<span class="token operator">/</span>opt/etcd/bin/etcd 
+<span class="token operator">--</span>cert-file=<span class="token operator">/</span>opt/etcd/ssl/server<span class="token punctuation">.</span>pem 
+<span class="token operator">--</span>key-file=<span class="token operator">/</span>opt/etcd/ssl/server-key<span class="token punctuation">.</span>pem 
+<span class="token operator">--</span>peer-cert-file=<span class="token operator">/</span>opt/etcd/ssl/server<span class="token punctuation">.</span>pem 
+<span class="token operator">--</span>peer-key-file=<span class="token operator">/</span>opt/etcd/ssl/server-key<span class="token punctuation">.</span>pem 
+<span class="token operator">--</span>trusted-ca-file=<span class="token operator">/</span>opt/etcd/ssl/ca<span class="token punctuation">.</span>pem 
+<span class="token operator">--</span>peer-trusted-ca-file=<span class="token operator">/</span>opt/etcd/ssl/ca<span class="token punctuation">.</span>pem 
+<span class="token operator">--</span>logger=zap
+Restart=on-failure
+LimitNOFILE=65536
+ 
+<span class="token namespace">[Install]</span>
+WantedBy=multi-user<span class="token punctuation">.</span>target
+EOF
+</code></pre> 
+<h5>
+<a id="142_373"></a>1.4.2、拷贝配置到另外两个节点</h5> 
+<pre><code class="prism language-powershell">scp <span class="token operator">-</span>r <span class="token operator">/</span>opt/etcd/ 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102:<span class="token operator">/</span>opt/
+scp <span class="token operator">-</span>r <span class="token operator">/</span>opt/etcd/ 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103:<span class="token operator">/</span>opt/
+scp <span class="token operator">/</span>usr/lib/systemd/system/etcd<span class="token punctuation">.</span>service 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102:<span class="token operator">/</span>usr/lib/systemd/system/
+scp <span class="token operator">/</span>usr/lib/systemd/system/etcd<span class="token punctuation">.</span>service 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103:<span class="token operator">/</span>usr/lib/systemd/system/
+</code></pre> 
+<h5>
+<a id="143etcd_382"></a>1.4.3、修改另外两个节点中的etcd配置</h5> 
+<pre><code class="prism language-powershell"><span class="token comment">#[Member]</span>
+ETCD_NAME=<span class="token string">"etcd-1"</span>    <span class="token comment"># 节点名称，可改为etcd-2和etcd-3</span>
+ETCD_DATA_DIR=<span class="token string">"/home/data/"</span>   <span class="token comment"># 自定义数据目录</span>
+ETCD_LISTEN_PEER_URLS=<span class="token string">"https://192.168.100.101:2380"</span>    <span class="token comment">#改为当前节点IP</span>
+ETCD_LISTEN_CLIENT_URLS=<span class="token string">"https://192.168.100.101:2379"</span>    <span class="token comment">#改为当前节点IP</span>
+
+<span class="token comment">#[Clustering]</span>
+ETCD_INITIAL_ADVERTISE_PEER_URLS=<span class="token string">"https://192.168.100.101:2380"</span>    <span class="token comment">#改为当前节点IP</span>
+ETCD_ADVERTISE_CLIENT_URLS=<span class="token string">"https://192.168.100.101:2379"</span>    <span class="token comment">#改为当前节点IP</span>
+ETCD_INITIAL_CLUSTER=<span class="token string">"etcd-1=https://192.168.100.101:2380,etcd-2=https://192.168.100.102:2380,etcd-3=https://192.168.100.103:2380"</span>
+ETCD_INITIAL_CLUSTER_TOKEN=<span class="token string">"etcd-cluster"</span>
+ETCD_INITIAL_CLUSTER_STATE=<span class="token string">"new"</span>
+</code></pre> 
+<h5>
+<a id="144etcd_399"></a>1.4.4、启动etcd</h5> 
+<p>需要注意的是三台节点的etcd服务需要同时启动，就三台机器，命令行工具多窗口执行即可</p> 
+<pre><code class="prism language-powershell">systemctl daemon-reload
+systemctl <span class="token function">start</span> etcd
+systemctl enable etcd
+systemctl status etcd
+
+
+<span class="token comment"># 查看集群节点状态如下即正常（记得修改命令中endpoint的IP为自己的IP）</span>
+<span class="token namespace">[root@k8s-master1 software]</span><span class="token comment"># ETCDCTL_API=3 /opt/etcd/bin/etcdctl --cacert=/opt/etcd/ssl/ca.pem --cert=/opt/etcd/ssl/server.pem --key=/opt/etcd/ssl/server-key.pem --endpoints="https://192.168.100.101:2379,https://192.168.100.102:2379,https://192.168.100.103:2379" endpoint health --write-out=table</span>
+<span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span><span class="token operator">+</span>
+<span class="token punctuation">|</span>           ENDPOINT           <span class="token punctuation">|</span> HEALTH <span class="token punctuation">|</span>    TOOK     <span class="token punctuation">|</span> ERROR <span class="token punctuation">|</span>
+<span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span><span class="token operator">+</span>
+<span class="token punctuation">|</span> https:<span class="token operator">/</span><span class="token operator">/</span>192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101:2379 <span class="token punctuation">|</span>   true <span class="token punctuation">|</span> 24<span class="token punctuation">.</span>422088ms <span class="token punctuation">|</span>       <span class="token punctuation">|</span>
+<span class="token punctuation">|</span> https:<span class="token operator">/</span><span class="token operator">/</span>192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102:2379 <span class="token punctuation">|</span>   true <span class="token punctuation">|</span> 23<span class="token punctuation">.</span>776321ms <span class="token punctuation">|</span>       <span class="token punctuation">|</span>
+<span class="token punctuation">|</span> https:<span class="token operator">/</span><span class="token operator">/</span>192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103:2379 <span class="token punctuation">|</span>   true <span class="token punctuation">|</span> 24<span class="token punctuation">.</span>170148ms <span class="token punctuation">|</span>       <span class="token punctuation">|</span>
+<span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span><span class="token operator">+</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span><span class="token operator">+</span>
+</code></pre> 
+<h3>
+<a id="2dockerspan_idclick_me_jump3span_419"></a>2、安装docker<span id="click_me_jump3"></span>
+</h3> 
+<p>所有节点都操作</p> 
+<pre><code class="prism language-powershell"><span class="token comment"># 安装</span>
+yum install <span class="token operator">-</span>y yum-utils
+yum-config-manager <span class="token operator">--</span><span class="token function">add-repo</span> https:<span class="token operator">/</span><span class="token operator">/</span>download<span class="token punctuation">.</span>docker<span class="token punctuation">.</span>com/linux/centos/docker-ce<span class="token punctuation">.</span>repo
+yum install <span class="token operator">-</span>y docker-ce-20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+
+<span class="token comment"># 启动</span>
+systemctl <span class="token function">start</span> docker
+systemctl enable docker
+
+<span class="token comment"># 修改docker数据目录（可选操作）</span>
+<span class="token function">cat</span> &gt; <span class="token operator">/</span>etc/docker/daemon<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+   <span class="token string">"data-root"</span>: <span class="token string">"/home/docker"</span>
+<span class="token punctuation">}</span>
+EOF
+
+<span class="token comment"># 重启</span>
+systemctl restart docker
+</code></pre> 
+<h3>
+<a id="3master_443"></a>3、部署master节点</h3> 
+<h4>
+<a id="31kubeapiver_444"></a>3.1、部署kube-apiver</h4> 
+<h5>
+<a id="311kubeapiserver_445"></a>3.1.1、生成kube-apiserver证书</h5> 
+<p>自签CA证书（这个和上边那个etcd的CA区分开，单独给k8s使用的CA）</p> 
+<pre><code class="prism language-powershell">cd ~<span class="token operator">/</span>TLS/k8s
+
+<span class="token comment"># 添加CA配置</span>
+<span class="token function">cat</span> &gt; ca-config<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"signing"</span>: <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"default"</span>: <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"expiry"</span>: <span class="token string">"87600h"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"profiles"</span>: <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"kubernetes"</span>: <span class="token punctuation">{<!-- --></span>
+         <span class="token string">"expiry"</span>: <span class="token string">"87600h"</span><span class="token punctuation">,</span>
+         <span class="token string">"usages"</span>: <span class="token punctuation">[</span>
+            <span class="token string">"signing"</span><span class="token punctuation">,</span>
+            <span class="token string">"key encipherment"</span><span class="token punctuation">,</span>
+            <span class="token string">"server auth"</span><span class="token punctuation">,</span>
+            <span class="token string">"client auth"</span>
+        <span class="token punctuation">]</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+EOF
+<span class="token function">cat</span> &gt; ca-csr<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+    <span class="token string">"CN"</span>: <span class="token string">"kubernetes"</span><span class="token punctuation">,</span>
+    <span class="token string">"key"</span>: <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"algo"</span>: <span class="token string">"rsa"</span><span class="token punctuation">,</span>
+        <span class="token string">"size"</span>: 2048
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"names"</span>: <span class="token punctuation">[</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"C"</span>: <span class="token string">"CN"</span><span class="token punctuation">,</span>
+            <span class="token string">"L"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+            <span class="token string">"ST"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+            <span class="token string">"O"</span>: <span class="token string">"k8s"</span><span class="token punctuation">,</span>
+            <span class="token string">"OU"</span>: <span class="token string">"System"</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+EOF
+<span class="token comment"># 生成证书</span>
+cfssl gencert <span class="token operator">-</span>initca ca-csr<span class="token punctuation">.</span>json <span class="token punctuation">|</span> cfssljson <span class="token operator">-</span>bare ca <span class="token operator">-</span>
+</code></pre> 
+<p><strong>使用自签CA签发kube-apiserver的证书</strong></p> 
+<blockquote> 
+ <p>hosts里要写入集群内的所有节点IP，包括后续要用的负载均衡VIP的IP,如果有扩容需求，可以预留几个IP</p> 
+</blockquote> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; apiserver-csr<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+    <span class="token string">"CN"</span>: <span class="token string">"kubernetes"</span><span class="token punctuation">,</span>
+    <span class="token string">"hosts"</span>: <span class="token punctuation">[</span>
+      <span class="token string">"10.0.0.1"</span><span class="token punctuation">,</span>
+      <span class="token string">"127.0.0.1"</span><span class="token punctuation">,</span>
+      <span class="token string">"192.168.100.101"</span><span class="token punctuation">,</span>
+      <span class="token string">"192.168.100.102"</span><span class="token punctuation">,</span>
+      <span class="token string">"192.168.100.103"</span><span class="token punctuation">,</span>
+      <span class="token string">"192.168.100.104"</span><span class="token punctuation">,</span>
+      <span class="token string">"192.168.100.105"</span><span class="token punctuation">,</span>
+      <span class="token string">"kubernetes"</span><span class="token punctuation">,</span>
+      <span class="token string">"kubernetes.default"</span><span class="token punctuation">,</span>
+      <span class="token string">"kubernetes.default.svc"</span><span class="token punctuation">,</span>
+      <span class="token string">"kubernetes.default.svc.cluster"</span><span class="token punctuation">,</span>
+      <span class="token string">"kubernetes.default.svc.cluster.local"</span>
+    <span class="token punctuation">]</span><span class="token punctuation">,</span>
+    <span class="token string">"key"</span>: <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"algo"</span>: <span class="token string">"rsa"</span><span class="token punctuation">,</span>
+        <span class="token string">"size"</span>: 2048
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"names"</span>: <span class="token punctuation">[</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"C"</span>: <span class="token string">"CN"</span><span class="token punctuation">,</span>
+            <span class="token string">"L"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+            <span class="token string">"ST"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+            <span class="token string">"O"</span>: <span class="token string">"k8s"</span><span class="token punctuation">,</span>
+            <span class="token string">"OU"</span>: <span class="token string">"System"</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+EOF
+<span class="token comment"># 生成证书</span>
+cfssl gencert <span class="token operator">-</span>ca=ca<span class="token punctuation">.</span>pem <span class="token operator">-</span>ca-key=ca-key<span class="token punctuation">.</span>pem <span class="token operator">-</span>config=ca-config<span class="token punctuation">.</span>json <span class="token operator">-</span>profile=kubernetes apiserver-csr<span class="token punctuation">.</span>json <span class="token punctuation">|</span> cfssljson <span class="token operator">-</span>bare apiserver
+</code></pre> 
+<h5>
+<a id="312_535"></a>3.1.2、下载二进制包，调整配置</h5> 
+<p>官方地址：<a href="https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.23.md#downloads-for-v12315">https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.23.md#downloads-for-v12315</a></p> 
+<blockquote> 
+ <p>如果下载不下来，<a href="https://download.csdn.net/download/weixin_43860781/87383020">可以点这里下载，为本次文章使用的所有软件包，官方拉取纯净版</a></p> 
+</blockquote> 
+<pre><code class="prism language-powershell"><span class="token comment"># 下载/配置</span>
+cd <span class="token operator">/</span>opt/software
+wget https:<span class="token operator">/</span><span class="token operator">/</span>dl<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15/kubernetes-server-linux-amd64<span class="token punctuation">.</span>tar<span class="token punctuation">.</span>gz
+tar zxvf kubernetes-server-linux-amd64<span class="token punctuation">.</span>tar<span class="token punctuation">.</span>gz
+mkdir <span class="token operator">-</span>p <span class="token operator">/</span>opt/kubernetes/<span class="token punctuation">{<!-- --></span>bin<span class="token punctuation">,</span>cfg<span class="token punctuation">,</span>ssl<span class="token punctuation">,</span>logs<span class="token punctuation">}</span> 
+cd kubernetes/server/bin
+<span class="token function">cp</span> kube-apiserver kube-scheduler kube-controller-manager kubectl kubelet kube-proxy <span class="token operator">/</span>opt/kubernetes/bin
+<span class="token function">cp</span> kubectl <span class="token operator">/</span>usr/bin
+</code></pre> 
+<p><strong>创建配置文件</strong></p> 
+<p>两个必须要啊。第一个是转义符，使用转义符是为了使用EOF保留换行符；第二个是换行符，不然就跑一行去了<br> 好像不加换行符服务启动识别有点问题</p> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/kubernetes/cfg/kube-apiserver<span class="token punctuation">.</span>conf &lt;&lt; EOF
+KUBE_APISERVER_OPTS=<span class="token string">"--logtostderr=false \
+--v=2 \
+--log-dir=/opt/kubernetes/logs \
+--etcd-servers=https://192.168.100.101:2379,https://192.168.100.102:2379,https://192.168.100.103:2379 \
+--bind-address=192.168.100.101 \
+--secure-port=6443 \
+--advertise-address=192.168.100.101 \
+--allow-privileged=true \
+--service-cluster-ip-range=10.0.0.0/16 \
+--enable-admission-plugins=NamespaceLifecycle,LimitRanger,ServiceAccount,ResourceQuota,NodeRestriction \
+--authorization-mode=RBAC,Node \
+--enable-bootstrap-token-auth=true \
+--token-auth-file=/opt/kubernetes/cfg/token.csv \
+--service-node-port-range=30000-32767 \
+--kubelet-client-certificate=/opt/kubernetes/ssl/apiserver.pem \
+--kubelet-client-key=/opt/kubernetes/ssl/apiserver-key.pem \
+--tls-cert-file=/opt/kubernetes/ssl/apiserver.pem  \
+--tls-private-key-file=/opt/kubernetes/ssl/apiserver-key.pem \
+--client-ca-file=/opt/kubernetes/ssl/ca.pem \
+--service-account-key-file=/opt/kubernetes/ssl/ca-key.pem \
+--service-account-issuer=https://kubernetes.default.svc.cluster.local \
+--service-account-signing-key-file=/opt/kubernetes/ssl/ca-key.pem \
+--etcd-cafile=/opt/etcd/ssl/ca.pem \
+--etcd-certfile=/opt/etcd/ssl/server.pem \
+--etcd-keyfile=/opt/etcd/ssl/server-key.pem \
+--requestheader-client-ca-file=/opt/kubernetes/ssl/ca.pem \
+--proxy-client-cert-file=/opt/kubernetes/ssl/apiserver.pem \
+--proxy-client-key-file=/opt/kubernetes/ssl/apiserver-key.pem \
+--requestheader-allowed-names=kubernetes \
+--requestheader-extra-headers-prefix=X-Remote-Extra- \
+--requestheader-group-headers=X-Remote-Group \
+--requestheader-username-headers=X-Remote-User \
+--enable-aggregator-routing=true \
+--audit-log-maxage=30 \
+--audit-log-maxbackup=3 \
+--audit-log-maxsize=100 \
+--audit-log-path=/opt/kubernetes/logs/k8s-audit.log"</span>
+EOF
+</code></pre> 
+<p><strong>配置介绍：</strong></p> 
+<ul>
+<li>–logtostderr ：启用日志（true为输出到标准输出，false为输出到日志文件里）</li>
+<li>–v ：日志等级</li>
+<li>–log-dir ：日志目录</li>
+<li>–etcd-servers ：etcd集群地址</li>
+<li>–bind-address ：监听地址</li>
+<li>–secure-port ：https安全端口</li>
+<li>–advertise-address ：集群通告地址</li>
+<li>–allow-privileged ：启动授权</li>
+<li>–service-cluster-ip-range ：Service虚拟IP地址段，这里掩码给16位，可以创建(2的16次方-2)=65534个地址</li>
+<li>–enable-admission-plugins ： 准入控制模块</li>
+<li>–authorization-mode ：认证授权,启用RBAC授权和节点自管理</li>
+<li>–enable-bootstrap-token-auth ：启用TLS bootstrap机制</li>
+<li>–token-auth-file ：bootstrap token文件</li>
+<li>–service-node-port-range ：Service nodeport类型默认分配端口范围</li>
+<li>–kubelet-client-xxx ：apiserver访问kubelet客户端证书</li>
+<li>–tls-xxx-file ：apiserver https证书</li>
+<li>–service-account-issuer：此参数可作为服务账号令牌发放者的身份标识（Identifier）详细可参考<a href="https://kubernetes.io/zh-cn/docs/tasks/configure-pod-container/configure-service-account/#service-account-token-volume-projection">官方解析</a>和<a href="https://help.aliyun.com/document_detail/160384.html">阿里云解析</a>
+</li>
+<li>–service-account-signing-key-file：指向包含当前服务账号令牌发放者的私钥的文件路径</li>
+<li>–etcd-xxxfile ：连接etcd集群证书</li>
+<li>–requestheader-client-ca-file,–proxy-client-cert-file,–proxy-client-key-file,–requestheader-allowed-names,–requestheader-extra-headers-prefix,–requestheader-group-headers,–requestheader-username-headers,–enable-aggregator-routing：启动聚合层网关配置</li>
+<li>–audit-log-xxx ：审计日志</li>
+</ul> 
+<blockquote> 
+ <p>更多参数可查看<a href="https://kubernetes.io/zh-cn/docs/reference/command-line-tools-reference/kube-apiserver/">官方介绍</a></p> 
+</blockquote> 
+<p>拷贝生成证书到工作目录</p> 
+<pre><code class="prism language-powershell"><span class="token function">cp</span> ~<span class="token operator">/</span>TLS/k8s/<span class="token operator">*</span><span class="token punctuation">.</span>pem <span class="token operator">/</span>opt/kubernetes/ssl/
+</code></pre> 
+<h5>
+<a id="313TLS_bootstrapping_629"></a>3.1.3、启用TLS bootstrapping机制</h5> 
+<p>当集群开启了 TLS 认证后，每个节点的 kubelet 组件都要使用由 apiserver 使用的 CA 签发的有效证书才能与 apiserver 通讯，此时如果节点多起来，为每个节点单独签署证书将是一件非常繁琐的事情；TLS bootstrapping 功能就是让 kubelet 先使用一个预定的低权限用户连接到 apiserver，然后向 apiserver 申请证书，kubelet 的证书由 apiserver 动态签署<br> 详细内容见官方说明<br> 工作流程：</p> 
+<img src="https://images2.imgbox.com/ae/55/C9kPI1Wb_o.png" width="80%"> 
+<p>创建令牌认证文件</p> 
+<pre><code class="prism language-powershell"><span class="token comment"># 生成随机数</span>
+<span class="token namespace">[root@k8s-master1 cfg]</span><span class="token comment"># head -c 16 /dev/urandom | od -An -t x | tr -d ' '</span>
+a2dfd3748230d54213367c6dcb63efde
+
+<span class="token comment"># 将生成的数创建token文件（将上边生成的数替换第一个值）</span>
+<span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/kubernetes/cfg/token<span class="token punctuation">.</span>csv &lt;&lt; EOF
+a2dfd3748230d54213367c6dcb63efde<span class="token punctuation">,</span>kubelet-bootstrap<span class="token punctuation">,</span>10001<span class="token punctuation">,</span><span class="token string">"system:node-bootstrapper"</span>
+EOF
+</code></pre> 
+<h5>
+<a id="314systemd_649"></a>3.1.4、配置systemd管理服务</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>usr/lib/systemd/system/kube-apiserver<span class="token punctuation">.</span>service &lt;&lt; EOF
+<span class="token namespace">[Unit]</span>
+Description=Kubernetes API Server
+Documentation=https:<span class="token operator">/</span><span class="token operator">/</span>github<span class="token punctuation">.</span>com/kubernetes/kubernetes
+ 
+<span class="token namespace">[Service]</span>
+EnvironmentFile=<span class="token operator">/</span>opt/kubernetes/cfg/kube-apiserver<span class="token punctuation">.</span>conf
+ExecStart=<span class="token operator">/</span>opt/kubernetes/bin/kube-apiserver <span class="token variable">$KUBE_APISERVER_OPTS</span>
+Restart=on-failure
+ 
+<span class="token namespace">[Install]</span>
+WantedBy=multi-user<span class="token punctuation">.</span>target
+EOF
+</code></pre> 
+<p>启动服务</p> 
+<pre><code class="prism language-powershell">systemctl daemon-reload
+systemctl <span class="token function">start</span> kube-apiserver 
+systemctl enable kube-apiserver
+systemctl status kube-apiserver
+</code></pre> 
+<p><strong><code>小提示：</code></strong><br> 启动会报下边这俩错，忽略就行，这个是说这俩参数准备弃用了，但是现在还能用（就跟前几年说移除docker一样）</p> 
+<blockquote> 
+ <p>FlagFlag --logtostderr has been deprecated, will be removed in a future release, see https://github.com/kubernetes/enhancements/tree/master/keps/sig-instrumentation/2845-deprecate-klog-specific-flags-in-k8s-components<br> Flag --log-dir has been deprecated, will be removed in a future release, see https://github.com/kubernetes/enhancements/tree/master/keps/sig-instrumentation/2845-deprecate-klog-specific-flags-in-k8s-components</p> 
+</blockquote> 
+<h4>
+<a id="32kubecontrollermanager_685"></a>3.2、部署kube-controller-manager</h4> 
+<h5>
+<a id="321_686"></a>3.2.1、生成证书</h5> 
+<pre><code class="prism language-powershell">cd ~<span class="token operator">/</span>TLS/k8s
+<span class="token comment"># 创建证书请求文件</span>
+<span class="token function">cat</span> &gt; kube-controller-manager-csr<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"CN"</span>: <span class="token string">"system:kube-controller-manager"</span><span class="token punctuation">,</span>
+  <span class="token string">"hosts"</span>: <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string">"key"</span>: <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"algo"</span>: <span class="token string">"rsa"</span><span class="token punctuation">,</span>
+    <span class="token string">"size"</span>: 2048
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"names"</span>: <span class="token punctuation">[</span>
+    <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"C"</span>: <span class="token string">"CN"</span><span class="token punctuation">,</span>
+      <span class="token string">"L"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span> 
+      <span class="token string">"ST"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+      <span class="token string">"O"</span>: <span class="token string">"system:masters"</span><span class="token punctuation">,</span>
+      <span class="token string">"OU"</span>: <span class="token string">"System"</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+EOF
+ 
+<span class="token comment"># 生成证书</span>
+cfssl gencert <span class="token operator">-</span>ca=ca<span class="token punctuation">.</span>pem <span class="token operator">-</span>ca-key=ca-key<span class="token punctuation">.</span>pem <span class="token operator">-</span>config=ca-config<span class="token punctuation">.</span>json <span class="token operator">-</span>profile=kubernetes kube-controller-manager-csr<span class="token punctuation">.</span>json <span class="token punctuation">|</span> cfssljson <span class="token operator">-</span>bare kube-controller-manager
+</code></pre> 
+<h5>
+<a id="322kubeconfig__715"></a>3.2.2、生成kubeconfig文件 <strong><code>（重点）</code></strong>
+</h5> 
+<p>该文件存放一些集群组件之间交互的认证信息，用于集群组件访问apiserver，操作分为四步<br> 前三步都会往配置文件里写入一些内容，可以每歩执行前后对照着内容看看<br> <strong><code>A.生成kubeconfig文件，设置集群参数</code></strong></p> 
+<pre><code class="prism language-powershell"><span class="token comment"># 配置个临时变量</span>
+KUBE_CONFIG=<span class="token string">"/opt/kubernetes/cfg/kube-controller-manager.kubeconfig"</span>
+KUBE_APISERVER=<span class="token string">"https://192.168.100.101:6443"</span>
+ 
+kubectl config <span class="token function">set-cluster</span> kubernetes 
+  <span class="token operator">--</span>certificate-authority=<span class="token operator">/</span>opt/kubernetes/ssl/ca<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>server=$<span class="token punctuation">{<!-- --></span>KUBE_APISERVER<span class="token punctuation">}</span> 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+</code></pre> 
+<p>配置介绍：</p> 
+<ul>
+<li>set-cluster：设置集群的名字（这里设置为kubernetes）</li>
+<li>–certificate-authority：集群的CA证书</li>
+<li>–embed-certs：将ca.pem证书内容嵌入到生成的 kubectl.kubeconfig 文件中(不加时，写入的是证书文件路径)。</li>
+<li>–server：apiserver地址</li>
+<li>–kubeconfig：文件名称，这里给controller-manager用，就叫做kube-controller-manager.kubeconfig</li>
+</ul> 
+<p>该命令执行完会在指定目录下生成一个我们命名的那个叫kube-controller-manager.kubeconfig的文件，文件里只有集群的信息和CA证书内容</p> 
+<p><strong><code>B.设置客户端认证参数</code></strong></p> 
+<pre><code class="prism language-powershell">kubectl config <span class="token function">set-credentials</span> kube-controller-manager 
+  <span class="token operator">--</span>client-certificate=<span class="token punctuation">.</span><span class="token operator">/</span>kube-controller-manager<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>client-key=<span class="token punctuation">.</span><span class="token operator">/</span>kube-controller-manager-key<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+</code></pre> 
+<p>配置介绍：</p> 
+<ul>
+<li>set-credentials：设置客户端名字，这里用连接apiserver的组件名称</li>
+<li>–client-certificate：客户端的证书文件，apiserver用来做验证</li>
+<li>–client-key：也是客户端证书，key文件</li>
+</ul> 
+<p>上边这两歩，就相当于之前说的范例里A公司和中介C公司的介绍信内容内嵌在这个配置文件中，去拜访B公司时候使用</p> 
+<p><strong><code>C.设置上下文参数</code></strong></p> 
+<pre><code class="prism language-powershell">kubectl config <span class="token function">set-context</span> default 
+  <span class="token operator">--</span>cluster=kubernetes 
+  <span class="token operator">--</span>user=kube-controller-manager 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+</code></pre> 
+<p>配置介绍：</p> 
+<ul>
+<li>set-context：设置上下文，设置配置文件中的contexts项，后边跟上下文名称，这里设置为default（多用于操作多个k8s集群时区分当前是在哪个上下文，即哪个集群里操作的）</li>
+<li>–cluster：集群名称，要和上边第一步的名称完全一致</li>
+<li>–user：用户名称，要和第二歩的客户端名称完全一致</li>
+</ul> 
+<p><strong><code>D.设置当前默认上下文</code></strong><br> 使用kubeconfig中的一个环境项作为当前配置，<a href="http://kubernetes.kansea.com/docs/user-guide/kubectl/kubectl_config_use-context/">官方解读</a></p> 
+<pre><code class="prism language-powershell">kubectl config <span class="token function">use-context</span> default <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+
+<span class="token comment"># 等集群拉起后，可以通过这个命令查看当前所在的是哪个集群的上下文</span>
+kubectl config current-context
+</code></pre> 
+<p>配置说明：</p> 
+<ul><li>设置context（上下文）用哪个kubeconfig，这里就是设置default的上下文，使用我们上边配置的kube-controller-manager.kubeconfig</li></ul> 
+<h5>
+<a id="323controllermanager_782"></a>3.2.3、创建controller-manager配置文件</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/kubernetes/cfg/kube-controller-manager<span class="token punctuation">.</span>conf &lt;&lt; EOF
+KUBE_CONTROLLER_MANAGER_OPTS=<span class="token string">"--logtostderr=false \
+--v=2 \
+--log-dir=/opt/kubernetes/logs \
+--leader-elect=true \
+--kubeconfig=/opt/kubernetes/cfg/kube-controller-manager.kubeconfig \
+--bind-address=127.0.0.1 \
+--allocate-node-cidrs=true \
+--cluster-cidr=10.244.0.0/16 \
+--service-cluster-ip-range=10.0.0.0/24 \
+--cluster-signing-cert-file=/opt/kubernetes/ssl/ca.pem \
+--cluster-signing-key-file=/opt/kubernetes/ssl/ca-key.pem  \
+--root-ca-file=/opt/kubernetes/ssl/ca.pem \
+--service-account-private-key-file=/opt/kubernetes/ssl/ca-key.pem \
+--cluster-signing-duration=87600h0m0s"</span>
+EOF
+</code></pre> 
+<p>配置介绍：</p> 
+<ul>
+<li>–kubeconfig：连接apiserver配置文件。</li>
+<li>–leader-elect：当该组件启动多个时,自动选举(HA)</li>
+<li>–cluster-signing-cert-file：自动为kubelet颁发证书的CA</li>
+<li>–cluster-signing-key-file：自动为kubelet颁发证书的CA</li>
+</ul> 
+<h5>
+<a id="324systemd_809"></a>3.2.4、配置systemd管理、启动服务</h5> 
+<pre><code class="prism language-powershell"><span class="token comment"># 配置systemd管理</span>
+<span class="token function">cat</span> &gt; <span class="token operator">/</span>usr/lib/systemd/system/kube-controller-manager<span class="token punctuation">.</span>service &lt;&lt; EOF
+<span class="token namespace">[Unit]</span>
+Description=Kubernetes Controller Manager
+Documentation=https:<span class="token operator">/</span><span class="token operator">/</span>github<span class="token punctuation">.</span>com/kubernetes/kubernetes
+ 
+<span class="token namespace">[Service]</span>
+EnvironmentFile=<span class="token operator">/</span>opt/kubernetes/cfg/kube-controller-manager<span class="token punctuation">.</span>conf
+ExecStart=<span class="token operator">/</span>opt/kubernetes/bin/kube-controller-manager <span class="token variable">$KUBE_CONTROLLER_MANAGER_OPTS</span>
+Restart=on-failure
+ 
+<span class="token namespace">[Install]</span>
+WantedBy=multi-user<span class="token punctuation">.</span>target
+EOF
+
+<span class="token comment"># 启动服务</span>
+systemctl daemon-reload
+systemctl <span class="token function">start</span> kube-controller-manager
+systemctl enable kube-controller-manager
+systemctl status kube-controller-manager
+</code></pre> 
+<p><strong><code>小提示：</code></strong><br> 启动会额外有这俩报错，是因为没有配置cloud-provider参数，这个对于内部使用的集群基本用不着</p> 
+<blockquote> 
+ <p>Dec 20 21:34:03 cluster-node1 kube-controller-manager[72926]: E1220 21:34:03.576016 72926 core.go:212] failed to start cloud node lifecycle controller: no cloud provider provided<br> Dec 20 21:34:03 cluster-node1 kube-controller-manager[72926]: E1220 21:34:03.596638 72926 core.go:92] Failed to start service controller: WARNING: no cloud provider provided, services of type LoadBalancer will fail</p> 
+</blockquote> 
+<h4>
+<a id="33kubescheduler_840"></a>3.3、部署kube-scheduler</h4> 
+<p>也是一样的步骤：生成证书、生成kubeconfig文件、创建配置文件、systemd管理及启动服务</p> 
+<h5>
+<a id="331_842"></a>3.3.1、生成证书</h5> 
+<pre><code class="prism language-powershell"><span class="token comment"># 切换工作目录</span>
+cd ~<span class="token operator">/</span>TLS/k8s
+ 
+<span class="token comment"># 创建证书请求文件</span>
+<span class="token function">cat</span> &gt; kube-scheduler-csr<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"CN"</span>: <span class="token string">"system:kube-scheduler"</span><span class="token punctuation">,</span>
+  <span class="token string">"hosts"</span>: <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string">"key"</span>: <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"algo"</span>: <span class="token string">"rsa"</span><span class="token punctuation">,</span>
+    <span class="token string">"size"</span>: 2048
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"names"</span>: <span class="token punctuation">[</span>
+    <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"C"</span>: <span class="token string">"CN"</span><span class="token punctuation">,</span>
+      <span class="token string">"L"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+      <span class="token string">"ST"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+      <span class="token string">"O"</span>: <span class="token string">"system:masters"</span><span class="token punctuation">,</span>
+      <span class="token string">"OU"</span>: <span class="token string">"System"</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+EOF
+ 
+<span class="token comment"># 生成证书</span>
+cfssl gencert <span class="token operator">-</span>ca=ca<span class="token punctuation">.</span>pem <span class="token operator">-</span>ca-key=ca-key<span class="token punctuation">.</span>pem <span class="token operator">-</span>config=ca-config<span class="token punctuation">.</span>json <span class="token operator">-</span>profile=kubernetes kube-scheduler-csr<span class="token punctuation">.</span>json <span class="token punctuation">|</span> cfssljson <span class="token operator">-</span>bare kube-scheduler
+</code></pre> 
+<h5>
+<a id="332kubeconfig_873"></a>3.3.2、生成kubeconfig文件</h5> 
+<pre><code class="prism language-powershell">KUBE_CONFIG=<span class="token string">"/opt/kubernetes/cfg/kube-scheduler.kubeconfig"</span>
+KUBE_APISERVER=<span class="token string">"https://192.168.100.101:6443"</span>
+ 
+kubectl config <span class="token function">set-cluster</span> kubernetes 
+  <span class="token operator">--</span>certificate-authority=<span class="token operator">/</span>opt/kubernetes/ssl/ca<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>server=$<span class="token punctuation">{<!-- --></span>KUBE_APISERVER<span class="token punctuation">}</span> 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">set-credentials</span> kube-scheduler 
+  <span class="token operator">--</span>client-certificate=<span class="token punctuation">.</span><span class="token operator">/</span>kube-scheduler<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>client-key=<span class="token punctuation">.</span><span class="token operator">/</span>kube-scheduler-key<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">set-context</span> default 
+  <span class="token operator">--</span>cluster=kubernetes 
+  <span class="token operator">--</span>user=kube-scheduler 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">use-context</span> default <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+</code></pre> 
+<h5>
+<a id="333_899"></a>3.3.3、创建服务配置文件</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/kubernetes/cfg/kube-scheduler<span class="token punctuation">.</span>conf &lt;&lt; EOF
+KUBE_SCHEDULER_OPTS=<span class="token string">"--logtostderr=false \
+--v=2 \
+--log-dir=/opt/kubernetes/logs \
+--leader-elect \
+--kubeconfig=/opt/kubernetes/cfg/kube-scheduler.kubeconfig \
+--bind-address=127.0.0.1"</span>
+EOF
+</code></pre> 
+<h5>
+<a id="334systemd_912"></a>3.3.4、配置systemd管理、服务启动</h5> 
+<pre><code class="prism language-powershell"><span class="token comment"># 配置systemd管理</span>
+<span class="token function">cat</span> &gt; <span class="token operator">/</span>usr/lib/systemd/system/kube-scheduler<span class="token punctuation">.</span>service &lt;&lt; EOF
+<span class="token namespace">[Unit]</span>
+Description=Kubernetes Scheduler
+Documentation=https:<span class="token operator">/</span><span class="token operator">/</span>github<span class="token punctuation">.</span>com/kubernetes/kubernetes
+
+<span class="token namespace">[Service]</span>
+EnvironmentFile=<span class="token operator">/</span>opt/kubernetes/cfg/kube-scheduler<span class="token punctuation">.</span>conf
+ExecStart=<span class="token operator">/</span>opt/kubernetes/bin/kube-scheduler <span class="token variable">$KUBE_SCHEDULER_OPTS</span>
+Restart=on-failure
+ 
+<span class="token namespace">[Install]</span>
+WantedBy=multi-user<span class="token punctuation">.</span>target
+EOF
+
+<span class="token comment"># 启动</span>
+systemctl daemon-reload
+systemctl <span class="token function">start</span> kube-scheduler
+systemctl enable kube-scheduler
+systemctl status kube-scheduler
+</code></pre> 
+<h4>
+<a id="34kubectl_937"></a>3.4、配置kubectl管理集群</h4> 
+<h5>
+<a id="341kubectl_938"></a>3.4.1、配置kubectl证书</h5> 
+<pre><code class="prism language-powershell">cd ~<span class="token operator">/</span>TLS/k8s
+ 
+<span class="token function">cat</span> &gt; admin-csr<span class="token punctuation">.</span>json &lt;&lt;EOF
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"CN"</span>: <span class="token string">"admin"</span><span class="token punctuation">,</span>
+  <span class="token string">"hosts"</span>: <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string">"key"</span>: <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"algo"</span>: <span class="token string">"rsa"</span><span class="token punctuation">,</span>
+    <span class="token string">"size"</span>: 2048
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"names"</span>: <span class="token punctuation">[</span>
+    <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"C"</span>: <span class="token string">"CN"</span><span class="token punctuation">,</span>
+      <span class="token string">"L"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+      <span class="token string">"ST"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+      <span class="token string">"O"</span>: <span class="token string">"system:masters"</span><span class="token punctuation">,</span>
+      <span class="token string">"OU"</span>: <span class="token string">"System"</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+EOF
+ 
+cfssl gencert <span class="token operator">-</span>ca=ca<span class="token punctuation">.</span>pem <span class="token operator">-</span>ca-key=ca-key<span class="token punctuation">.</span>pem <span class="token operator">-</span>config=ca-config<span class="token punctuation">.</span>json <span class="token operator">-</span>profile=kubernetes admin-csr<span class="token punctuation">.</span>json <span class="token punctuation">|</span> cfssljson <span class="token operator">-</span>bare admin
+</code></pre> 
+<h5>
+<a id="342kubectlkubeconfig_966"></a>3.4.2、配置kubectl使用的kubeconfig</h5> 
+<pre><code class="prism language-powershell">mkdir <span class="token operator">/</span>root/<span class="token punctuation">.</span>kube
+ 
+KUBE_CONFIG=<span class="token string">"/root/.kube/config"</span>
+KUBE_APISERVER=<span class="token string">"https://192.168.100.101:6443"</span>
+ 
+kubectl config <span class="token function">set-cluster</span> kubernetes 
+  <span class="token operator">--</span>certificate-authority=<span class="token operator">/</span>opt/kubernetes/ssl/ca<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>server=$<span class="token punctuation">{<!-- --></span>KUBE_APISERVER<span class="token punctuation">}</span> 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">set-credentials</span> cluster-admin 
+  <span class="token operator">--</span>client-certificate=<span class="token punctuation">.</span><span class="token operator">/</span>admin<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>client-key=<span class="token punctuation">.</span><span class="token operator">/</span>admin-key<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">set-context</span> default 
+  <span class="token operator">--</span>cluster=kubernetes 
+  <span class="token operator">--</span>user=cluster-admin 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">use-context</span> default <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+</code></pre> 
+<h5>
+<a id="343_994"></a>3.4.3、验证</h5> 
+<p>各组件状态正常即可</p> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 k8s]</span><span class="token comment"># kubectl get cs</span>
+Warning: v1 ComponentStatus is deprecated in v1<span class="token punctuation">.</span>19+
+NAME                 STATUS    MESSAGE                         ERROR
+scheduler            Healthy   ok
+controller-manager   Healthy   ok
+etcd-2               Healthy   <span class="token punctuation">{<!-- --></span><span class="token string">"health"</span>:<span class="token string">"true"</span><span class="token punctuation">,</span><span class="token string">"reason"</span>:<span class="token string">""</span><span class="token punctuation">}</span>
+etcd-0               Healthy   <span class="token punctuation">{<!-- --></span><span class="token string">"health"</span>:<span class="token string">"true"</span><span class="token punctuation">,</span><span class="token string">"reason"</span>:<span class="token string">""</span><span class="token punctuation">}</span>
+etcd-1               Healthy   <span class="token punctuation">{<!-- --></span><span class="token string">"health"</span>:<span class="token string">"true"</span><span class="token punctuation">,</span><span class="token string">"reason"</span>:<span class="token string">""</span><span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="35kubelet_1008"></a>3.5、部署kubelet</h4> 
+<p>master也是要作为节点存在的，所以也要部署kubelet和kube-proxy</p> 
+<h5>
+<a id="351kubelet_1010"></a>3.5.1、定义kubelet配置参数</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/kubernetes/cfg/kubelet-config<span class="token punctuation">.</span>yml &lt;&lt; EOF
+kind: KubeletConfiguration
+apiVersion: kubelet<span class="token punctuation">.</span>config<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/v1beta1
+address: 0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0
+port: 10250
+readOnlyPort: 10255
+cgroupDriver: cgroupfs
+clusterDNS:
+<span class="token operator">-</span> 10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>240
+clusterDomain: cluster<span class="token punctuation">.</span>local 
+failSwapOn: false
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    cacheTTL: 2m0s
+    enabled: true
+  x509:
+    clientCAFile: <span class="token operator">/</span>opt/kubernetes/ssl/ca<span class="token punctuation">.</span>pem 
+authorization:
+  mode: Webhook
+  webhook:
+    cacheAuthorizedTTL: 5m0s
+    cacheUnauthorizedTTL: 30s
+evictionHard:
+  imagefs<span class="token punctuation">.</span>available: 15%
+  memory<span class="token punctuation">.</span>available: 100Mi
+  nodefs<span class="token punctuation">.</span>available: 10%
+  nodefs<span class="token punctuation">.</span>inodesFree: 5%
+maxOpenFiles: 1000000
+maxPods: 110
+EOF
+</code></pre> 
+<p><strong>配置说明：</strong><br> 更多配置详情可翻阅<a href="https://kubernetes.io/zh-cn/docs/tasks/administer-cluster/kubelet-config-file/">官方范例</a>和<a href="https://kubernetes.io/zh-cn/docs/reference/config-api/kubelet-config.v1beta1/">官方参数解读</a></p> 
+<ul>
+<li>evictionHard：驱逐资源硬限制（当达到下面配置项的阈值后会触发驱逐）</li>
+<li>imagefs.available：容器运行时镜像存储空间剩余量</li>
+<li>memory.available：宿主机可用内存</li>
+<li>nodefs.available：宿主机可用磁盘空间（一般是指根目录）</li>
+<li>nodefs.inodesFree：宿主机可用inode（df -i可查看总量）</li>
+</ul> 
+<h5>
+<a id="352_1055"></a>3.5.2、创建配置文件</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/kubernetes/cfg/kubelet<span class="token punctuation">.</span>conf &lt;&lt; EOF
+KUBELET_OPTS=<span class="token string">"--logtostderr=false \
+--v=2 \
+--log-dir=/opt/kubernetes/logs \
+--hostname-override=k8s-master1 \
+--network-plugin=cni \
+--kubeconfig=/opt/kubernetes/cfg/kubelet.kubeconfig \
+--bootstrap-kubeconfig=/opt/kubernetes/cfg/bootstrap.kubeconfig \
+--config=/opt/kubernetes/cfg/kubelet-config.yml \
+--cert-dir=/opt/kubernetes/ssl \
+--pod-infra-container-image=registry.cn-hangzhou.aliyuncs.com/google-containers/pause-amd64:3.0"</span>
+EOF
+</code></pre> 
+<p>配置说明：</p> 
+<ul>
+<li>–hostname-override ：kubectl get node显示的名称，集群唯一，保持和主机名一致即可（不可重复）</li>
+<li>–network-plugin：启用CNI（官方解读）</li>
+<li>–kubeconfig：空路径，会自动生成，后面用于连接apiserver</li>
+<li>–bootstrap-kubeconfig：首次启动向apiserver申请证书的配置（下一步就是生成这个配置）</li>
+<li>–config：配置文件参数（上一步配置的参数文件）</li>
+<li>–cert-dir：kubelet证书目录</li>
+<li>–pod-infra-container-image ：管理Pod网络的pause容器的镜像</li>
+</ul> 
+<h5>
+<a id="353bootstrapkubeconfig_1080"></a>3.5.3、生成bootstrap.kubeconfig文件</h5> 
+<pre><code class="prism language-powershell"><span class="token comment"># 临时变量</span>
+KUBE_CONFIG=<span class="token string">"/opt/kubernetes/cfg/bootstrap.kubeconfig"</span>
+KUBE_APISERVER=<span class="token string">"https://192.168.100.101:6443"</span>
+TOKEN=<span class="token string">"a2dfd3748230d54213367c6dcb63efde"</span> <span class="token comment"># !!与/opt/kubernetes/cfg/token.csv文件中数据保持一致</span>
+
+<span class="token comment"># 生成配置</span>
+kubectl config <span class="token function">set-cluster</span> kubernetes 
+  <span class="token operator">--</span>certificate-authority=<span class="token operator">/</span>opt/kubernetes/ssl/ca<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>server=$<span class="token punctuation">{<!-- --></span>KUBE_APISERVER<span class="token punctuation">}</span> 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">set-credentials</span> <span class="token string">"kubelet-bootstrap"</span> 
+  <span class="token operator">--</span>token=$<span class="token punctuation">{<!-- --></span>TOKEN<span class="token punctuation">}</span> 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">set-context</span> default 
+  <span class="token operator">--</span>cluster=kubernetes 
+  <span class="token operator">--</span>user=<span class="token string">"kubelet-bootstrap"</span> 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>  
+
+kubectl config <span class="token function">use-context</span> default <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+</code></pre> 
+<h5>
+<a id="354kubeletbootstrap_1107"></a>3.5.4、授权kubelet-bootstrap用户允许请求证书</h5> 
+<p>    在启动kubelet后，kubelet会自动用上一步的kubeconfig配置去向apiserver申请证书，而配置里的client用户是kubelet-bootstrap，所以要先给该用户一个权限才可以</p> 
+<pre><code class="prism language-powershell">kubectl create clusterrolebinding kubelet-bootstrap 
+<span class="token operator">--</span>clusterrole=system:node-bootstrapper 
+<span class="token operator">--</span>user=kubelet-bootstrap
+</code></pre> 
+<h5>
+<a id="355systemd_1116"></a>3.5.5、配置systemd管理、启动服务</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>usr/lib/systemd/system/kubelet<span class="token punctuation">.</span>service &lt;&lt; EOF
+<span class="token namespace">[Unit]</span>
+Description=Kubernetes Kubelet
+After=docker<span class="token punctuation">.</span>service
+ 
+<span class="token namespace">[Service]</span>
+EnvironmentFile=<span class="token operator">/</span>opt/kubernetes/cfg/kubelet<span class="token punctuation">.</span>conf
+ExecStart=<span class="token operator">/</span>opt/kubernetes/bin/kubelet <span class="token variable">$KUBELET_OPTS</span>
+Restart=on-failure
+LimitNOFILE=65536
+ 
+<span class="token namespace">[Install]</span>
+WantedBy=multi-user<span class="token punctuation">.</span>target
+EOF
+
+<span class="token comment"># 启动</span>
+systemctl daemon-reload
+systemctl <span class="token function">start</span> kubelet
+systemctl status kubelet
+</code></pre> 
+<h5>
+<a id="356kubelet_1140"></a>3.5.6、批准kubelet的证书申请</h5> 
+<pre><code class="prism language-powershell"><span class="token comment"># 查看证书申请csr（certificatesigningrequest），状态为pending等待中</span>
+<span class="token namespace">[root@k8s-master1 ~]</span><span class="token comment"># kubectl get csr</span>
+NAME                                                   AGE   SIGNERNAME                                    REQUESTOR           REQUESTEDDURATION   CONDITION
+node-csr-6m-PtPGVEiw089UJ9dnNf3cjbiMdKizuq27umnYdD7I   86s   kubernetes<span class="token punctuation">.</span>io/kube-apiserver-client-kubelet   kubelet-bootstrap   &lt;none&gt;              Pending
+
+<span class="token comment"># 批准kubelet证书申请</span>
+<span class="token namespace">[root@k8s-master1 ~]</span><span class="token comment"># kubectl certificate approve node-csr-6m-PtPGVEiw089UJ9dnNf3cjbiMdKizuq27umnYdD7I</span>
+certificatesigningrequest<span class="token punctuation">.</span>certificates<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/node-csr-6m-PtPGVEiw089UJ9dnNf3cjbiMdKizuq27umnYdD7I approved
+
+<span class="token comment"># 查看csr状态，状态为Approved,Issued（已批准）</span>
+<span class="token namespace">[root@k8s-master1 ~]</span><span class="token comment"># kubectl get csr</span>
+NAME                                                   AGE     SIGNERNAME                                    REQUESTOR           REQUESTEDDURATION   CONDITION
+node-csr-6m-PtPGVEiw089UJ9dnNf3cjbiMdKizuq27umnYdD7I   6m12s   kubernetes<span class="token punctuation">.</span>io/kube-apiserver-client-kubelet   kubelet-bootstrap   &lt;none&gt;              Approved<span class="token punctuation">,</span>Issued
+
+ <span class="token comment"># 查看node（cni网络插件还没安装，所以当前还是NotReady状态）</span>
+<span class="token namespace">[root@k8s-master1 ~]</span><span class="token comment"># kubectl get nodes</span>
+NAME          STATUS     ROLES    AGE   VERSION
+k8s-master1   NotReady   &lt;none&gt;   39s   v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+</code></pre> 
+<h4>
+<a id="36kubeproxy_1163"></a>3.6、部署kube-proxy</h4> 
+<h5>
+<a id="361_1164"></a>3.6.1、生成证书</h5> 
+<pre><code class="prism language-powershell"><span class="token comment"># 切换到工作目录</span>
+cd ~<span class="token operator">/</span>TLS/k8s
+ 
+<span class="token comment"># 创建证书请求文件</span>
+<span class="token function">cat</span> &gt; kube-proxy-csr<span class="token punctuation">.</span>json &lt;&lt; EOF
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"CN"</span>: <span class="token string">"system:kube-proxy"</span><span class="token punctuation">,</span>
+  <span class="token string">"hosts"</span>: <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string">"key"</span>: <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"algo"</span>: <span class="token string">"rsa"</span><span class="token punctuation">,</span>
+    <span class="token string">"size"</span>: 2048
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"names"</span>: <span class="token punctuation">[</span>
+    <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"C"</span>: <span class="token string">"CN"</span><span class="token punctuation">,</span>
+      <span class="token string">"L"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+      <span class="token string">"ST"</span>: <span class="token string">"ShangHai"</span><span class="token punctuation">,</span>
+      <span class="token string">"O"</span>: <span class="token string">"k8s"</span><span class="token punctuation">,</span>
+      <span class="token string">"OU"</span>: <span class="token string">"System"</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+EOF
+ 
+<span class="token comment"># 生成证书</span>
+cfssl gencert <span class="token operator">-</span>ca=ca<span class="token punctuation">.</span>pem <span class="token operator">-</span>ca-key=ca-key<span class="token punctuation">.</span>pem <span class="token operator">-</span>config=ca-config<span class="token punctuation">.</span>json <span class="token operator">-</span>profile=kubernetes kube-proxy-csr<span class="token punctuation">.</span>json <span class="token punctuation">|</span> cfssljson <span class="token operator">-</span>bare kube-proxy
+</code></pre> 
+<h5>
+<a id="362kubeconfig_1195"></a>3.6.2、生成kubeconfig配置文件</h5> 
+<pre><code class="prism language-powershell">KUBE_CONFIG=<span class="token string">"/opt/kubernetes/cfg/kube-proxy.kubeconfig"</span>
+KUBE_APISERVER=<span class="token string">"https://192.168.100.101:6443"</span>
+ 
+kubectl config <span class="token function">set-cluster</span> kubernetes 
+  <span class="token operator">--</span>certificate-authority=<span class="token operator">/</span>opt/kubernetes/ssl/ca<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>server=$<span class="token punctuation">{<!-- --></span>KUBE_APISERVER<span class="token punctuation">}</span> 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">set-credentials</span> kube-proxy 
+  <span class="token operator">--</span>client-certificate=<span class="token punctuation">.</span><span class="token operator">/</span>kube-proxy<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>client-key=<span class="token punctuation">.</span><span class="token operator">/</span>kube-proxy-key<span class="token punctuation">.</span>pem 
+  <span class="token operator">--</span>embed-certs=true 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">set-context</span> default 
+  <span class="token operator">--</span>cluster=kubernetes 
+  <span class="token operator">--</span>user=kube-proxy 
+  <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+  
+kubectl config <span class="token function">use-context</span> default <span class="token operator">--</span>kubeconfig=$<span class="token punctuation">{<!-- --></span>KUBE_CONFIG<span class="token punctuation">}</span>
+</code></pre> 
+<h5>
+<a id="363kubeconfig_1221"></a>3.6.3、定义配置参数，指定kubeconfig文件</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/kubernetes/cfg/kube-proxy-config<span class="token punctuation">.</span>yml &lt;&lt; EOF
+kind: KubeProxyConfiguration
+apiVersion: kubeproxy<span class="token punctuation">.</span>config<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/v1alpha1
+bindAddress: 0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0
+metricsBindAddress: 0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0:10249
+clientConnection:
+  kubeconfig: <span class="token operator">/</span>opt/kubernetes/cfg/kube-proxy<span class="token punctuation">.</span>kubeconfig
+hostnameOverride: k8s-master1
+<span class="token comment">#mode: "ipvs"</span>
+
+clusterCIDR: 10<span class="token punctuation">.</span>244<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0/16
+EOF
+</code></pre> 
+<p><strong>单独介绍下mode参数</strong><br> 这个是配置kube-proxy的工作模式，目前用的基本就是这两种，都是基于内核的netfilter实现的：</p> 
+<ul>
+<li>
+<strong>iptables：</strong> 默认使用的模式，通过创建一条条iptables规则链来访问集群内service。这种模式pod内ping不通service的IP</li>
+<li>
+<strong>ipvs：</strong> 专门用来做负载均衡的技术，lvs就用的这个。pod可以ping通service的IP</li>
+</ul> 
+<p>这里就先不展开详细说了，要单独开单章说明。<br> 这里部署就先用默认的iptables模式就可以，在服务量级不大的时候，iptables和ipvs性能差不多</p> 
+<h5>
+<a id="364_1245"></a>3.6.4、创建配置文件</h5> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; <span class="token operator">/</span>opt/kubernetes/cfg/kube-proxy<span class="token punctuation">.</span>conf &lt;&lt; EOF
+KUBE_PROXY_OPTS=<span class="token string">"--logtostderr=false \
+--v=2 \
+--log-dir=/opt/kubernetes/logs \
+--config=/opt/kubernetes/cfg/kube-proxy-config.yml"</span>
+EOF
+3<span class="token punctuation">.</span>6<span class="token punctuation">.</span>5、配置systemd管理、启动服务
+<span class="token function">cat</span> &gt; <span class="token operator">/</span>usr/lib/systemd/system/kube-proxy<span class="token punctuation">.</span>service &lt;&lt; EOF
+<span class="token namespace">[Unit]</span>
+Description=Kubernetes Proxy
+After=network<span class="token punctuation">.</span>target
+ 
+<span class="token namespace">[Service]</span>
+EnvironmentFile=<span class="token operator">/</span>opt/kubernetes/cfg/kube-proxy<span class="token punctuation">.</span>conf
+ExecStart=<span class="token operator">/</span>opt/kubernetes/bin/kube-proxy <span class="token variable">$KUBE_PROXY_OPTS</span>
+Restart=on-failure
+LimitNOFILE=65536
+ 
+<span class="token namespace">[Install]</span>
+WantedBy=multi-user<span class="token punctuation">.</span>target
+EOF
+
+<span class="token comment"># 启动服务</span>
+systemctl daemon-reload
+systemctl <span class="token function">start</span> kube-proxy
+systemctl enable kube-proxy
+systemctl status kube-proxy
+</code></pre> 
+<h4>
+<a id="37cni_1277"></a>3.7、安装cni网络插件</h4> 
+<blockquote> 
+ <p>这里选择用calico来作为网络插件使用</p> 
+</blockquote> 
+<p><strong>calico官网：</strong><a href="https://www.tigera.io/project-calico/">https://www.tigera.io/project-calico/</a></p> 
+<p>查看版本对应关系<br> 从<a href="https://projectcalico.docs.tigera.io/archive/v3.23/getting-started/kubernetes/requirements">官网文档说明</a>里得知，calico-v3.23版本支持k8s的v1.23版本，所以这里就选择安装v3.23版本好了<br> <img src="https://images2.imgbox.com/c5/a6/RTCikmt7_o.png" alt="在这里插入图片描述"></p> 
+<h5>
+<a id="371_1288"></a>3.7.1、拉取配置</h5> 
+<p>如果拉取不到，<a href="https://download.csdn.net/download/weixin_43860781/87383020">可以点这里下载，为本次文章使用的所有软件包，官方拉取纯净版</a></p> 
+<pre><code class="prism language-powershell">mkdir <span class="token operator">/</span>opt/kubernetes/calico &amp;&amp; cd <span class="token operator">/</span>opt/kubernetes/calico
+
+<span class="token comment"># 下载官方yaml文件</span>
+curl https:<span class="token operator">/</span><span class="token operator">/</span>projectcalico<span class="token punctuation">.</span>docs<span class="token punctuation">.</span>tigera<span class="token punctuation">.</span>io/archive/v3<span class="token punctuation">.</span>23/manifests/calico<span class="token punctuation">.</span>yaml <span class="token operator">-</span>O
+</code></pre> 
+<h5>
+<a id="372_1297"></a>3.7.2、根据环境修改文件配置项</h5> 
+<p>修改calico.yaml中calico-node容器的env环境变量<br> a、改CALICO_IPV4POOL_CIDR项为我们上边定义的clusterCIDR（指定pod的IP池）</p> 
+<pre><code class="prism language-powershell">      containers:
+
+        <span class="token operator">-</span> name: calico-node
+          image: docker<span class="token punctuation">.</span>io/calico/node:v3<span class="token punctuation">.</span>23<span class="token punctuation">.</span>5
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+            <span class="token operator">-</span> name: CALICO_IPV4POOL_CIDR
+              value: <span class="token string">"10.244.0.0/16"</span>
+</code></pre> 
+<p>b、添加 IP_AUTODETECTION_METHOD 环境变量：</p> 
+<pre><code class="prism language-powershell">      containers:
+
+        <span class="token operator">-</span> name: calico-node
+          image: docker<span class="token punctuation">.</span>io/calico/node:v3<span class="token punctuation">.</span>23<span class="token punctuation">.</span>5
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+  env:
+    <span class="token comment"># 这是需要我们添加的环境变量</span>
+            <span class="token operator">-</span> name: IP_AUTODETECTION_METHOD
+              value: <span class="token string">"interface=ens33"</span>
+    <span class="token comment">#我这里网卡是ens33，就填的ens33</span>
+</code></pre> 
+<p>如果这个不指定的话，可能calico-node启动会报这个错</p> 
+<blockquote> 
+ <p>Readiness probe failed: calico/node is not ready: BIRD is not ready: Error querying BIRD: unable to connect to BIRDv4 socket: dial unix /var/run/calico/bird.ctl: connect: connection refused</p> 
+</blockquote> 
+<h5>
+<a id="373_1329"></a>3.7.3、启动服务</h5> 
+<p>可以提前把yaml里container所需镜像下好，再启动</p> 
+<pre><code class="prism language-powershell"><span class="token comment"># 拉起</span>
+kubectl apply <span class="token operator">-</span>f calico<span class="token punctuation">.</span>yaml
+
+<span class="token comment"># 查看服务</span>
+<span class="token namespace">[root@k8s-master1 calico]</span><span class="token comment"># kubectl get pod -n kube-system</span>
+NAME                                       READY   STATUS    RESTARTS   AGE
+calico-kube-controllers-54756b744f-nkxxm   1/1     Running   0          4m36s
+calico-node-8kmr5                          1/1     Running   0          4m36s
+
+<span class="token comment"># 等calico的pod都Running后，查看node状态也变为ready</span>
+<span class="token namespace">[root@k8s-master1 calico]</span><span class="token comment"># kubectl get nodes</span>
+NAME          STATUS   ROLES    AGE   VERSION
+k8s-master1   Ready    &lt;none&gt;   97m   v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+</code></pre> 
+<blockquote> 
+ <p>如果有启动失败，可以describe查看event或者docker logs查看容器日志排错</p> 
+</blockquote> 
+<p>这样一个单节点集群就完成了?</p> 
+<h4>
+<a id="38apiserverkubelet_1352"></a>3.8、配置apiserver访问kubelet权限</h4> 
+<p>允许使用kubectl来查看pod日志</p> 
+<p>不然会有如下报错</p> 
+<blockquote> 
+ <p>Error from server (Forbidden): Forbidden (user=kubernetes, verb=get, resource=nodes, subresource=proxy) ( pods/log calico-node-8kmr5)</p> 
+</blockquote> 
+<p><strong>编辑配置并启动</strong></p> 
+<pre><code class="prism language-powershell">mkdir <span class="token operator">/</span>opt/kubernetes/yaml &amp;&amp; cd <span class="token operator">/</span>opt/kubernetes/yaml
+
+<span class="token comment"># 配置</span>
+<span class="token function">cat</span> &gt; apiserver-to-kubelet-rbac<span class="token punctuation">.</span>yaml &lt;&lt; EOF
+apiVersion: rbac<span class="token punctuation">.</span>authorization<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    rbac<span class="token punctuation">.</span>authorization<span class="token punctuation">.</span>kubernetes<span class="token punctuation">.</span>io/autoupdate: <span class="token string">"true"</span>
+  labels:
+    kubernetes<span class="token punctuation">.</span>io/bootstrapping: rbac-defaults
+  name: system:kube-apiserver-to-kubelet
+rules:
+  <span class="token operator">-</span> apiGroups:
+      <span class="token operator">-</span> <span class="token string">""</span>
+    resources:
+      <span class="token operator">-</span> nodes/proxy
+      <span class="token operator">-</span> nodes/stats
+      <span class="token operator">-</span> nodes/log
+      <span class="token operator">-</span> nodes/spec
+      <span class="token operator">-</span> nodes/metrics
+      <span class="token operator">-</span> pods/log
+    verbs:
+      <span class="token operator">-</span> <span class="token string">"*"</span>
+<span class="token operator">--</span><span class="token operator">-</span>
+apiVersion: rbac<span class="token punctuation">.</span>authorization<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:kube-apiserver
+  namespace: <span class="token string">""</span>
+roleRef:
+  apiGroup: rbac<span class="token punctuation">.</span>authorization<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io
+  kind: ClusterRole
+  name: system:kube-apiserver-to-kubelet
+subjects:
+  <span class="token operator">-</span> apiGroup: rbac<span class="token punctuation">.</span>authorization<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io
+    kind: User
+    name: kubernetes
+EOF
+
+kubectl apply <span class="token operator">-</span>f apiserver-to-kubelet-rbac<span class="token punctuation">.</span>yaml
+</code></pre> 
+<p>这样再去执行kubectl logs就可以了</p> 
+<h3>
+<a id="4Worker_1406"></a>4、新增Worker节点</h3> 
+<p>现在192.168.100.101（master）已经拉起一套单节点的k8s集群，后边就是把另外两个node节点也给加进来</p> 
+<h4>
+<a id="41node_1408"></a>4.1、node节点准备</h4> 
+<pre><code class="prism language-powershell">mkdir <span class="token operator">-</span>p <span class="token operator">/</span>opt/kubernetes/<span class="token punctuation">{<!-- --></span>cfg<span class="token punctuation">,</span>bin<span class="token punctuation">,</span>log<span class="token punctuation">,</span>ssl<span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="42masternodemaster_1414"></a>4.2、把master上的配置信息拷贝到node节点中（master节点操作）</h4> 
+<p>注：这里注意，要把cfg/kubelet.kubeconfig这个文件删除，因为是apiserver那边颁发证书后自动生成的，每个节点不一样</p> 
+<pre><code class="prism language-powershell">scp <span class="token operator">/</span>opt/kubernetes/cfg/<span class="token punctuation">{<!-- --></span>kubelet*<span class="token punctuation">,</span>kube-proxy*<span class="token punctuation">,</span>bootstrap*<span class="token punctuation">}</span> 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102:<span class="token operator">/</span>opt/kubernetes/cfg/
+scp <span class="token operator">/</span>opt/kubernetes/cfg/<span class="token punctuation">{<!-- --></span>kubelet*<span class="token punctuation">,</span>kube-proxy*<span class="token punctuation">,</span>bootstrap*<span class="token punctuation">}</span> 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103:<span class="token operator">/</span>opt/kubernetes/cfg/
+
+scp <span class="token operator">/</span>opt/kubernetes/bin/<span class="token punctuation">{<!-- --></span>kubelet*<span class="token punctuation">,</span>kube-proxy*<span class="token punctuation">}</span> 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102:<span class="token operator">/</span>opt/kubernetes/bin/
+scp <span class="token operator">/</span>opt/kubernetes/bin/<span class="token punctuation">{<!-- --></span>kubelet*<span class="token punctuation">,</span>kube-proxy*<span class="token punctuation">}</span> 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103:<span class="token operator">/</span>opt/kubernetes/bin/
+
+scp <span class="token operator">/</span>opt/kubernetes/ssl/ca<span class="token punctuation">.</span>pem 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102:<span class="token operator">/</span>opt/kubernetes/ssl/
+scp <span class="token operator">/</span>opt/kubernetes/ssl/ca<span class="token punctuation">.</span>pem 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103:<span class="token operator">/</span>opt/kubernetes/ssl/
+
+scp <span class="token operator">/</span>usr/lib/systemd/system/<span class="token punctuation">{<!-- --></span>kubelet<span class="token punctuation">,</span>kube-proxy<span class="token punctuation">}</span><span class="token punctuation">.</span>service 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102:<span class="token operator">/</span>usr/lib/systemd/system/
+scp <span class="token operator">/</span>usr/lib/systemd/system/<span class="token punctuation">{<!-- --></span>kubelet<span class="token punctuation">,</span>kube-proxy<span class="token punctuation">}</span><span class="token punctuation">.</span>service 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103:<span class="token operator">/</span>usr/lib/systemd/system/
+</code></pre> 
+<h4>
+<a id="43node_1431"></a>4.3、修改配置（node节点操作）</h4> 
+<pre><code class="prism language-powershell"><span class="token comment"># a. 修改cfg/kubelet.conf文件中hostname-override值为所在node节点主机名</span>
+vim cfg/kubelet<span class="token punctuation">.</span>conf
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> 
+<span class="token operator">--</span>hostname-override=k8s-node1 
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+<span class="token comment"># b.修改cfg/kube-proxy-config.yml文件中hostnameOverride值为所在node节点主机名</span>
+vim kube-proxy-config<span class="token punctuation">.</span>yml
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+hostnameOverride: k8s-node1
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+<span class="token comment"># c.删除kubelet.kubconfig</span>
+<span class="token function">rm</span> <span class="token operator">/</span>opt/kubernetes/cfg/kubelet<span class="token punctuation">.</span>kubeconfig
+</code></pre> 
+<h4>
+<a id="44node_1450"></a>4.4、启动服务（node节点操作）</h4> 
+<pre><code class="prism language-powershell">systemctl daemon-reload
+systemctl <span class="token function">start</span> kubelet kube-proxy
+systemctl enable kubelet kube-proxy
+</code></pre> 
+<h4>
+<a id="45master_1458"></a>4.5、master中查看证书申请并同意</h4> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 kubernetes]</span><span class="token comment"># kubectl get csr</span>
+NAME                                                   AGE     SIGNERNAME                                    REQUESTOR           REQUESTEDDURATION   CONDITION
+node-csr-1seYXEb3ZkQvuSPVuW5_jKM8y0MhCOBZ5xX4qkcigUo   13s     kubernetes<span class="token punctuation">.</span>io/kube-apiserver-client-kubelet   kubelet-bootstrap   &lt;none&gt;              Pending
+node-csr-V2YmiDZhAu1CY87EZbZAKCweGHF1JZb635oecD39l-c   3m14s   kubernetes<span class="token punctuation">.</span>io/kube-apiserver-client-kubelet   kubelet-bootstrap   &lt;none&gt;              Pending
+<span class="token namespace">[root@k8s-master1 kubernetes]</span><span class="token comment">#</span>
+<span class="token namespace">[root@k8s-master1 kubernetes]</span><span class="token comment"># kubectl certificate approve node-csr-1seYXEb3ZkQvuSPVuW5_jKM8y0MhCOBZ5xX4qkcigUo node-csr-V2YmiDZhAu1CY87EZbZAKCweGHF1JZb635oecD39l-c</span>
+certificatesigningrequest<span class="token punctuation">.</span>certificates<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/node-csr-1seYXEb3ZkQvuSPVuW5_jKM8y0MhCOBZ5xX4qkcigUo approved
+certificatesigningrequest<span class="token punctuation">.</span>certificates<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/node-csr-V2YmiDZhAu1CY87EZbZAKCweGHF1JZb635oecD39l-c approved
+</code></pre> 
+<h4>
+<a id="46node_1472"></a>4.6、查看集群node状态</h4> 
+<p>会在新加节点上启动一些初始服务，如calico-node，所以需要稍等一会状态就可变为ready</p> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 kubernetes]</span><span class="token comment"># kubectl get nodes</span>
+NAME          STATUS   ROLES    AGE     VERSION
+k8s-master1   Ready    &lt;none&gt;   151m    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+k8s-node1     Ready    &lt;none&gt;   4m49s   v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+k8s-node2     Ready    &lt;none&gt;   4m49s   v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+</code></pre> 
+<p>到此，简易的单master，双node的三节点集群就搭建完成了</p> 
+<h3>
+<a id="5Coredns_1484"></a>5、部署Coredns</h3> 
+<p>    一般情况下，pod之间通信都是用service的clusterIP，但是ip有难以记忆等问题，所以需要加一个DNS来解析，可以使用service_name来进行服务之间相互调用。大概是从k8s的1.11版本以来，k8s就直接从kube-dns转为coredns了，所以本次DNS选择coredns</p> 
+<p>    还是一如既往的去看下coredns和k8s之间的版本联系，<a href="https://github.com/coredns/deployment/blob/master/kubernetes/CoreDNS-k8s_version.md">通过这里官方给出的kubeadm部署使用的版本记录得出</a>，coredns:1.8.6肯定是可以在k8s1.23版本中使用的，所以本次就使用1.8.6版本的coredns了<br> <img src="https://images2.imgbox.com/9d/39/bIPYsk2H_o.png" alt="在这里插入图片描述"></p> 
+<h4>
+<a id="51_1491"></a>5.1、拉取配置</h4> 
+<blockquote> 
+ <p>如果配置和镜像下载不下来，<a href="https://download.csdn.net/download/weixin_43860781/87383020">可以点这里下载，为本次文章使用的所有软件包，官方拉取纯净版</a></p> 
+</blockquote> 
+<pre><code class="prism language-powershell"><span class="token comment"># 这里就用容器形式部署DNS了，方便快捷</span>
+mkdir <span class="token operator">/</span>opt/kubernetes/coredns &amp;&amp; cd <span class="token operator">/</span>opt/kubernetes/coredns
+curl https:<span class="token operator">/</span><span class="token operator">/</span>raw<span class="token punctuation">.</span>githubusercontent<span class="token punctuation">.</span>com/kubernetes/kubernetes/master/cluster/addons/dns/coredns/coredns<span class="token punctuation">.</span>yaml<span class="token punctuation">.</span>base <span class="token operator">-</span>O
+<span class="token function">mv</span> coredns<span class="token punctuation">.</span>yaml<span class="token punctuation">.</span>base coredns<span class="token punctuation">.</span>yaml
+</code></pre> 
+<h4>
+<a id="52_1500"></a>5.2、修改配置</h4> 
+<p>修改coredns.yaml中的带有__DNS__的值</p> 
+<pre><code class="prism language-powershell">1、原文：__DNS__DOMAIN__
+    改为：cluster<span class="token punctuation">.</span>local （dns域，和上边kubelet中配置的保持一致）
+2、原文：__DNS__MEMORY__LIMIT__
+    改为：500Mi
+3、原文：__DNS__SERVER__
+    改为：10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>240  （这里是dns的svc—ip，要和上边kubelet中配置的clusterDNS值一致）
+</code></pre> 
+<p>修改使用镜像</p> 
+<pre><code class="prism language-powershell">原文：image: registry<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/coredns/coredns:v1<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0
+改为：image: coredns/coredns:1<span class="token punctuation">.</span>8<span class="token punctuation">.</span>6
+</code></pre> 
+<h4>
+<a id="53_1520"></a>5.3、运行</h4> 
+<pre><code class="prism language-powershell">kubectl apply <span class="token operator">-</span>f coredns<span class="token punctuation">.</span>yaml
+<span class="token namespace">[root@k8s-master1 coredns]</span><span class="token comment"># kubectl get pod,svc -n kube-system</span>
+NAME                                           READY   STATUS    RESTARTS   AGE
+pod/calico-kube-controllers-54756b744f-p9n9m   1/1     Running   0          5h2m
+pod/calico-node-6k4xn                          1/1     Running   0          5h2m
+pod/calico-node-cnzm9                          1/1     Running   0          5h2m
+pod/calico-node-qqwnr                          1/1     Running   0          5h2m
+pod/coredns-57c6b56d8d-hcn58                   1/1     Running   0          21m
+
+NAME               <span class="token function">TYPE</span>        CLUSTER-IP   EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>                  AGE
+service/kube-dns   ClusterIP   10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>240   &lt;none&gt;        53/UDP<span class="token punctuation">,</span>53/TCP<span class="token punctuation">,</span>9153/TCP   22m
+</code></pre> 
+<h4>
+<a id="54_1536"></a>5.4、测试</h4> 
+<pre><code class="prism language-powershell"><span class="token comment"># 查看当前的svc</span>
+<span class="token namespace">[root@k8s-master1 coredns]</span><span class="token comment"># kubectl get svc</span>
+NAME         <span class="token function">TYPE</span>        CLUSTER-IP     EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>   AGE
+kubernetes   ClusterIP   10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>1       &lt;none&gt;        443/TCP   6h59m
+
+<span class="token comment"># 启动一个临时pod（busybox）测试解析</span>
+<span class="token namespace">[root@k8s-master1 coredns]</span><span class="token comment"># kubectl run -ti --rm busybox-test --image=busybox:1.35 sh</span>
+<span class="token operator">/</span> <span class="token comment"># nslookup kubernetes</span>
+Server:         10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>240
+Address:        10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>240:53
+
+<span class="token operator">*</span><span class="token operator">*</span> server can't find kubernetes<span class="token punctuation">.</span>cluster<span class="token punctuation">.</span>local: NXDOMAIN
+
+Name:   kubernetes<span class="token punctuation">.</span>default<span class="token punctuation">.</span>svc<span class="token punctuation">.</span>cluster<span class="token punctuation">.</span>local
+Address: 10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>1
+<span class="token comment"># 测试端口</span>
+<span class="token operator">/</span> <span class="token comment"># nc -vz kubernetes 443</span>
+kubernetes <span class="token punctuation">(</span>10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>1:443<span class="token punctuation">)</span> open
+<span class="token operator">/</span> <span class="token comment">#</span>
+
+<span class="token operator">/</span> <span class="token comment"># nc -vz 10.0.0.1 443</span>
+10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>1 <span class="token punctuation">(</span>10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>1:443<span class="token punctuation">)</span> open
+</code></pre> 
+<h3>
+<a id="6dashboard_1563"></a>6、部署一个官方的dashboard</h3> 
+<p>根据官方配置即可<a href="https://github.com/kubernetes/dashboard">kubernetes/dashboard：用于 Kubernetes 集群的通用 Web UI (github.com)</a></p> 
+<h4>
+<a id="61_1565"></a>6.1、拉取官方配置文件</h4> 
+<blockquote> 
+ <p>如果拉取不到，<a href="https://download.csdn.net/download/weixin_43860781/87383020">可以点这里下载，为本次文章使用的所有软件包，官方拉取纯净版</a></p> 
+</blockquote> 
+<pre><code class="prism language-powershell">mkdir <span class="token operator">/</span>opt/kubernetes/dashboard &amp;&amp; cd <span class="token operator">/</span>opt/kubernetes/dashboard
+curl https:<span class="token operator">/</span><span class="token operator">/</span>raw<span class="token punctuation">.</span>githubusercontent<span class="token punctuation">.</span>com/kubernetes/dashboard/v2<span class="token punctuation">.</span>7<span class="token punctuation">.</span>0/aio/deploy/recommended<span class="token punctuation">.</span>yaml <span class="token operator">-</span>O
+</code></pre> 
+<h4>
+<a id="62_1574"></a>6.2、修改配置</h4> 
+<p>集群角色简介：</p> 
+<ul>
+<li>ClusterRole：是集群的权限</li>
+<li>ServiceAccount：是集群的用户</li>
+<li>ClusterRoleBinding：起到把权限和用户绑在一起的作用</li>
+</ul> 
+<p>官方的配置里创建的serviceaccount用户(kubernetes-dashboard)没有权限打开面板页面</p> 
+<p>所以我们把默认用户绑到集群原有的cluster-admin规则上即可，修改配置</p> 
+<pre><code class="prism language-powershell"><span class="token comment"># ClusterRoleBinding 这块内容修改为如下内容，需要修改的地方是roleRef.name，</span>
+apiVersion: rbac<span class="token punctuation">.</span>authorization<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-dashboard
+roleRef:
+  apiGroup: rbac<span class="token punctuation">.</span>authorization<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io
+  kind: ClusterRole
+  <span class="token comment">#name: kubernetes-dashboard</span>
+  name: cluster-admin
+subjects:
+  <span class="token operator">-</span> kind: ServiceAccount
+    name: kubernetes-dashboard
+
+    namespace: kubernetes-dashboard
+    
+<span class="token comment"># 修改service</span>
+<span class="token comment"># 默认是ClusterIP类型，要改为NodePort方便访问（加一行即可）</span>
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+spec:
+  <span class="token function">type</span>: NodePort
+  ports:
+    <span class="token operator">-</span> port: 443
+      targetPort: 8443
+  selector:
+    k8s-app: kubernetes-dashboard
+</code></pre> 
+<h4>
+<a id="63_1619"></a>6.3、拉起服务</h4> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 dashboard]</span><span class="token comment"># kubectl apply -f recommended.yaml</span>
+<span class="token namespace">[root@k8s-master1 dashboard]</span><span class="token comment"># kubectl get pod,svc -n kubernetes-dashboard</span>
+NAME                                             READY   STATUS    RESTARTS   AGE
+pod/dashboard-metrics-scraper-6f669b9c9b-6hkkf   1/1     Running   0          56m
+pod/kubernetes-dashboard-758765f476-nh988        1/1     Running   0          56m
+
+NAME                                <span class="token function">TYPE</span>        CLUSTER-IP    EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>         AGE
+service/dashboard-metrics-scraper   ClusterIP   10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>203<span class="token punctuation">.</span>46   &lt;none&gt;        8000/TCP        56m
+service/kubernetes-dashboard        NodePort    10<span class="token punctuation">.</span>0<span class="token punctuation">.</span>51<span class="token punctuation">.</span>31    &lt;none&gt;        443:30143/TCP   56m
+</code></pre> 
+<h4>
+<a id="64token_1633"></a>6.4、获取token</h4> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 dashboard]</span><span class="token comment"># kubectl get secret -n kubernetes-dashboard |grep dashboard-token</span>
+kubernetes-dashboard-token-2qcjl   kubernetes<span class="token punctuation">.</span>io/service-account-token   3      10m
+<span class="token namespace">[root@k8s-master1 dashboard]</span><span class="token comment"># kubectl describe secret kubernetes-dashboard-token-2qcjl -n kubernetes-dashboard</span>
+Name:         kubernetes-dashboard-token-2qcjl
+Namespace:    kubernetes-dashboard
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+token:      eyJhbGciOiJSUzI1NiIsImtpZCI6<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token comment"># 复制这段内容，是下边登录的密码</span>
+</code></pre> 
+<h4>
+<a id="65Chrome_1645"></a>6.5、访问测试（Chrome）</h4> 
+<p>现在新版本可以直接在Chrome访问了</p> 
+<p>192.168.100.101:30143（IP是集群任意节点IP，端口是上边service/kubernetes-dashboard的port值）<br> <img src="https://images2.imgbox.com/21/f5/ZXXKIWvO_o.png" alt="在这里插入图片描述"></p> 
+<p>输入上一步获取的token后，登录有如下内容即为成功</p> 
+<p><img src="https://images2.imgbox.com/d5/5c/aeWAC0b4_o.png" alt="在这里插入图片描述"></p> 
+<h3>
+<a id="7metrics_1656"></a>7、再装一个metrics</h3> 
+<p>实现目的：可以通过kubectl top xxx看状态等</p> 
+<h4>
+<a id="71_1658"></a>7.1、拉取官方配置</h4> 
+<blockquote> 
+ <p>如果拉取不到，<a href="https://download.csdn.net/download/weixin_43860781/87383020">可以点这里下载，为本次文章使用的所有软件包，官方拉取纯净版</a></p> 
+</blockquote> 
+<pre><code class="prism language-powershell">mkdir <span class="token operator">/</span>opt/kubernetes/metrics &amp;&amp; cd <span class="token operator">/</span>opt/kubernetes/metrics
+wget https:<span class="token operator">/</span><span class="token operator">/</span>github<span class="token punctuation">.</span>com/kubernetes-sigs/metrics-server/releases/latest/download/components<span class="token punctuation">.</span>yaml
+</code></pre> 
+<h4>
+<a id="72_1667"></a>7.2、修改配置</h4> 
+<p>因为yaml里用的镜像是国外的，所以要改一下</p> 
+<p>先找一个可用的镜像</p> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 metrics]</span><span class="token comment"># docker search metrics-server</span>
+NAME                                          DESCRIPTION                                     STARS     OFFICIAL   AUTOMATED
+mirrorgooglecontainers/metrics-server-amd64                                                   17
+bitnami/metrics-server                        Bitnami Docker Image <span class="token keyword">for</span> Metrics Server         13                   <span class="token namespace">[OK]</span>
+rancher/metrics-server                                                                        5
+rancher/metrics-server-amd64          
+</code></pre> 
+<pre><code>                                                    2
+</code></pre> 
+<p>修改yaml中镜像</p> 
+<pre><code class="prism language-powershell">原内容：
+        image: k8s<span class="token punctuation">.</span>gcr<span class="token punctuation">.</span>io/metrics-server/metrics-server:v0<span class="token punctuation">.</span>6<span class="token punctuation">.</span>2
+        imagePullPolicy: IfNotPresent
+改为：
+        image: bitnami/metrics-server:0<span class="token punctuation">.</span>6<span class="token punctuation">.</span>2
+        imagePullPolicy: IfNotPresent
+</code></pre> 
+<p><strong>添加不验证证书配置</strong></p> 
+<p>不然启动后describe时events里会报Readiness probe failed: HTTP probe failed with statuscode: 500</p> 
+<pre><code class="prism language-powershell">原内容：
+      containers:
+      <span class="token operator">-</span> args:
+        <span class="token operator">-</span> <span class="token operator">--</span>cert-<span class="token function">dir</span>=<span class="token operator">/</span>tmp
+        <span class="token operator">-</span> <span class="token operator">--</span>secure-port=4443
+        <span class="token operator">-</span> <span class="token operator">--</span>kubelet-preferred-address-types=InternalIP<span class="token punctuation">,</span>ExternalIP<span class="token punctuation">,</span>Hostname
+        <span class="token operator">-</span> <span class="token operator">--</span>kubelet-<span class="token function">use-node</span><span class="token operator">-</span>status-port
+        <span class="token operator">-</span> <span class="token operator">--</span>metric-resolution=15s
+
+        image: bitnami/metrics-server:0<span class="token punctuation">.</span>6<span class="token punctuation">.</span>2
+新增：
+      containers:
+      <span class="token operator">-</span> args:
+        <span class="token operator">-</span> <span class="token operator">--</span>cert-<span class="token function">dir</span>=<span class="token operator">/</span>tmp
+        <span class="token operator">-</span> <span class="token operator">--</span>secure-port=4443
+        <span class="token operator">-</span> <span class="token operator">--</span>kubelet-preferred-address-types=InternalIP<span class="token punctuation">,</span>ExternalIP<span class="token punctuation">,</span>Hostname
+        <span class="token operator">-</span> <span class="token operator">--</span>kubelet-<span class="token function">use-node</span><span class="token operator">-</span>status-port
+        <span class="token operator">-</span> <span class="token operator">--</span>metric-resolution=15s
+        <span class="token operator">-</span> <span class="token operator">--</span>kubelet-insecure-tls    <span class="token comment"># 新增的这个，不验证证书</span>
+
+        image: bitnami/metrics-server:0<span class="token punctuation">.</span>6<span class="token punctuation">.</span>2
+</code></pre> 
+<h4>
+<a id="73_1721"></a>7.3、拉起服务及验证</h4> 
+<pre><code class="prism language-powershell">kubectl apply <span class="token operator">-</span>f components<span class="token punctuation">.</span>yaml
+<span class="token namespace">[root@k8s-master1 metrics]</span><span class="token comment"># kubectl get pod -n kube-system |grep metr</span>
+metrics-server-7c65894ccb-8dxnr            1/1     Running   0          5m32s
+
+ <span class="token comment"># 验证</span>
+ <span class="token namespace">[root@k8s-master1 metrics]</span><span class="token comment"># kubectl top nodes</span>
+NAME          CPU<span class="token punctuation">(</span>cores<span class="token punctuation">)</span>   CPU%   MEMORY<span class="token punctuation">(</span>bytes<span class="token punctuation">)</span>   MEMORY%
+k8s-master1   176m         8%     1329Mi          70%
+k8s-node1     76m          3%     985Mi           52%
+k8s-node2     83m          4%     1065Mi          56%
+</code></pre> 
+<p>到此，基本上就差不多了，下边为扩展（集群扩容、高可用）内容</p> 
+<h2>
+<a id="master_1737"></a>四、扩容-新增master节点（高可用架构）</h2> 
+<p>k8s集群利用deployment实现对pod应用级的高可用，那么master节点上的etcd、apiserver、scheduler和controller manager要怎么实现高可用呢？<br> 首先这四者的运行高可用方式是有区别的</p> 
+<p><strong>etcd：</strong> 我们这次就已经部署分布式的三节点etcd集群了，即为高可用</p> 
+<p><strong>scheduler、controller manager：</strong></p> 
+<ul>
+<li>是依赖ETCD实现选主的功能，同一时间只有一个leader节点工作。</li>
+<li>他们每个节点都会在etcd中注册endpoint信息，会定期更新注册信息（相当于心跳了）</li>
+<li>每个从节点的服务会定期检查endpoint的信息，如果endpoint的信息在时间范围内没有更新，它们会尝试更新自己为leader节点。</li>
+</ul> 
+<p><strong>apiserver：</strong></p> 
+<ul>
+<li>接入层服务，集群的唯一入口，相当于一个无状态的服务</li>
+<li>不同于scheduler和controller，需要借助etcd来选主，多节点时，无论在哪个apiserver节点请求，都是相同的结果</li>
+<li>高可用可以多建几个apiserver的实例，然后通过nginx负载均衡+keepalived(VIP)来实现高可用</li>
+</ul> 
+<p><strong>粗浅的高可用架构图</strong><br> <img src="https://images2.imgbox.com/9c/9d/9xT03pw9_o.png" width="70%"></p> 
+<p>话不多说，继续</p> 
+<h3>
+<a id="1master2_1762"></a>1、部署新增master2节点</h3> 
+<p>按照规划，这里要新增一台192.168.100.104机器，划为master2</p> 
+<h4>
+<a id="11docker_1764"></a>1.1、系统初始化+安装docker</h4> 
+<p>这个前边步骤里都有，就不赘述了，按照前边的步骤<br> <a href="#click_me_jump2">【二.1、系统初始化】</a>和<a href="#click_me_jump3">【三.2、安装docker】</a>操作即可</p> 
+<h4>
+<a id="12_1768"></a>1.2、开始部署</h4> 
+<p>因master2的部署操作和master1基本一致，所以就把配置文件拷贝过来，修改下启动服务即可</p> 
+<pre><code class="prism language-powershell"><span class="token comment"># 创建etcd的ssl目录（master2中操作）</span>
+mkdir <span class="token operator">/</span>opt/etcd
+
+<span class="token comment"># 拷贝master1文件（master1中操作）</span>
+scp <span class="token operator">-</span>r <span class="token operator">/</span>opt/kubernetes/ 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:<span class="token operator">/</span>opt/
+scp <span class="token operator">-</span>r <span class="token operator">/</span>opt/etcd/ssl/ 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:<span class="token operator">/</span>opt/etcd/
+scp <span class="token operator">/</span>usr/lib/systemd/system/kube* 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:<span class="token operator">/</span>usr/lib/systemd/system/
+scp <span class="token operator">/</span>usr/bin/kubectl 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:<span class="token operator">/</span>usr/bin/
+
+<span class="token comment"># 删除kubelet自动生成的配置（master2中操作）</span>
+<span class="token function">rm</span> <span class="token operator">-</span>f <span class="token operator">/</span>opt/kubernetes/cfg/kubelet<span class="token punctuation">.</span>kubeconfig 
+<span class="token function">rm</span> <span class="token operator">-</span>f <span class="token operator">/</span>opt/kubernetes/ssl/kubelet*
+</code></pre> 
+<h4>
+<a id="13master2_1786"></a>1.3、修改配置（master2中操作）</h4> 
+<pre><code class="prism language-powershell">vim <span class="token operator">/</span>opt/kubernetes/cfg/kube-apiserver<span class="token punctuation">.</span>conf 
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token operator">--</span>bind-address=192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104 
+<span class="token operator">--</span>advertise-address=192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104 
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+vim <span class="token operator">/</span>opt/kubernetes/cfg/kube-controller-manager<span class="token punctuation">.</span>kubeconfig
+server: https:<span class="token operator">/</span><span class="token operator">/</span>192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:6443
+
+vim <span class="token operator">/</span>opt/kubernetes/cfg/kube-scheduler<span class="token punctuation">.</span>kubeconfig
+server: https:<span class="token operator">/</span><span class="token operator">/</span>192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:6443
+
+vim <span class="token operator">/</span>opt/kubernetes/cfg/kubelet<span class="token punctuation">.</span>conf
+<span class="token operator">--</span>hostname-override=k8s-master2
+
+vim <span class="token operator">/</span>opt/kubernetes/cfg/kube-proxy-config<span class="token punctuation">.</span>yml
+hostnameOverride: k8s-master2
+
+vim ~<span class="token operator">/</span><span class="token punctuation">.</span>kube/config
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+server: https:<span class="token operator">/</span><span class="token operator">/</span>192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:6443
+</code></pre> 
+<h4>
+<a id="14master2_1812"></a>1.4、启动服务（master2中操作）</h4> 
+<pre><code class="prism language-powershell">systemctl daemon-reload
+systemctl <span class="token function">start</span> kube-apiserver kube-controller-manager kube-scheduler kubelet kube-proxy
+systemctl enable kube-apiserver kube-controller-manager kube-scheduler kubelet kube-proxy
+systemctl status kube-apiserver kube-controller-manager kube-scheduler kubelet kube-proxy
+</code></pre> 
+<h4>
+<a id="15kubeletmaster1_1821"></a>1.5、审批kubelet的申请（master1中操作）</h4> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 opt]</span><span class="token comment"># kubectl get csr</span>
+NAME                                                   AGE   SIGNERNAME                                    REQUESTOR           REQUESTEDDURATION   CONDITION
+node-csr-iMojU9INDQmkgNOCvh8IbW33qj8CQ4sj2Tsizet-mKQ   10m   kubernetes<span class="token punctuation">.</span>io/kube-apiserver-client-kubelet   kubelet-bootstrap   &lt;none&gt;              Pending
+<span class="token namespace">[root@k8s-master1 opt]</span><span class="token comment"># kubectl certificate approve node-csr-iMojU9INDQmkgNOCvh8IbW33qj8CQ4sj2Tsizet-mKQ</span>
+certificatesigningrequest<span class="token punctuation">.</span>certificates<span class="token punctuation">.</span>k8s<span class="token punctuation">.</span>io/node-csr-iMojU9INDQmkgNOCvh8IbW33qj8CQ4sj2Tsizet-mKQ approved
+<span class="token namespace">[root@k8s-master1 opt]</span><span class="token comment"># kubectl get csr</span>
+NAME                                                   AGE   SIGNERNAME                                    REQUESTOR           REQUESTEDDURATION   CONDITION
+node-csr-iMojU9INDQmkgNOCvh8IbW33qj8CQ4sj2Tsizet-mKQ   11m   kubernetes<span class="token punctuation">.</span>io/kube-apiserver-client-kubelet   kubelet-bootstrap   &lt;none&gt;              Approved<span class="token punctuation">,</span>Issued
+</code></pre> 
+<h4>
+<a id="16_1833"></a>1.6、验证</h4> 
+<pre><code class="prism language-powershell"><span class="token comment"># master1中操作</span>
+<span class="token namespace">[root@k8s-master1 opt]</span><span class="token comment"># kubectl get nodes -owide</span>
+NAME          STATUS     ROLES    AGE   VERSION    INTERNAL-IP       EXTERNAL-IP   OS-IMAGE                KERNEL-VERSION           CONTAINER-RUNTIME
+k8s-master1   Ready      &lt;none&gt;   8d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15   192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101   &lt;none&gt;        CentOS Linux 7 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>   3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64   docker:<span class="token operator">/</span><span class="token operator">/</span>20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+k8s-master2   NotReady   &lt;none&gt;   38s   v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15   192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104   &lt;none&gt;        CentOS Linux 7 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>   3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64   docker:<span class="token operator">/</span><span class="token operator">/</span>20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+k8s-node1     Ready      &lt;none&gt;   8d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15   192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102   &lt;none&gt;        CentOS Linux 7 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>   3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64   docker:<span class="token operator">/</span><span class="token operator">/</span>20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+k8s-node2     Ready      &lt;none&gt;   8d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15   192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103   &lt;none&gt;        CentOS Linux 7 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>   3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64   docker:<span class="token operator">/</span><span class="token operator">/</span>20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+
+<span class="token comment"># 需要等待片刻，等calico在master2节点上拉起后，节点才会变为ready</span>
+
+<span class="token comment"># master2中操作</span>
+<span class="token namespace">[root@k8s-master2 opt]</span><span class="token comment"># kubectl get nodes -owide</span>
+NAME          STATUS   ROLES    AGE   VERSION    INTERNAL-IP       EXTERNAL-IP   OS-IMAGE                KERNEL-VERSION           CONTAINER-RUNTIME
+k8s-master1   Ready    &lt;none&gt;   8d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15   192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101   &lt;none&gt;        CentOS Linux 7 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>   3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64   docker:<span class="token operator">/</span><span class="token operator">/</span>20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+k8s-master2   Ready    &lt;none&gt;   11m   v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15   192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104   &lt;none&gt;        CentOS Linux 7 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>   3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64   docker:<span class="token operator">/</span><span class="token operator">/</span>20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+k8s-node1     Ready    &lt;none&gt;   8d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15   192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>102   &lt;none&gt;        CentOS Linux 7 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>   3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64   docker:<span class="token operator">/</span><span class="token operator">/</span>20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+k8s-node2     Ready    &lt;none&gt;   8d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15   192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>103   &lt;none&gt;        CentOS Linux 7 <span class="token punctuation">(</span>Core<span class="token punctuation">)</span>   3<span class="token punctuation">.</span>10<span class="token punctuation">.</span>0-1127<span class="token punctuation">.</span>el7<span class="token punctuation">.</span>x86_64   docker:<span class="token operator">/</span><span class="token operator">/</span>20<span class="token punctuation">.</span>10<span class="token punctuation">.</span>21
+</code></pre> 
+<p>到此，实现了双master集群，有条件的，上三master，这里条件有限，测试就两个了。生产环境最好是三个起。</p> 
+<h3>
+<a id="2nginxkeepalived_1855"></a>2、部署nginx+keepalived高可用架构</h3> 
+<p>按照上图的架构，在集群中需要增加</p> 
+<ul>
+<li>一个nginx，实现请求负载均衡apiserver</li>
+<li>一个keepalived，实现用VIP访问nginx，故障时VIP转移，保证nginx始终可被访问</li>
+</ul> 
+<p>如果是公有云的服务，如腾讯云、阿里云之类的，可直接用他们的CLB、SLB什么的，效果一样</p> 
+<h4>
+<a id="21nginxkeepalivedmaster12_1861"></a>2.1、安装nginx+keepalived（master1/2都操作）</h4> 
+<pre><code class="prism language-powershell">yum install epel-release <span class="token operator">-</span>y
+<span class="token comment"># 要安装stream模块</span>
+yum install nginx nginx-mod-stream keepalived <span class="token operator">-</span>y
+</code></pre> 
+<h4>
+<a id="22streammaster12_1869"></a>2.2、添加stream配置（master1/2都操作）</h4> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt;&gt; <span class="token operator">/</span>etc/nginx/nginx<span class="token punctuation">.</span>conf &lt;&lt; <span class="token string">"EOF"</span>
+stream <span class="token punctuation">{<!-- --></span>
+
+    log_format  main  <span class="token string">'$remote_addr $upstream_addr - [$time_local] $status $upstream_bytes_sent'</span><span class="token punctuation">;</span>
+
+    access_log  <span class="token operator">/</span><span class="token keyword">var</span><span class="token operator">/</span>log/nginx/k8s-access<span class="token punctuation">.</span>log  main<span class="token punctuation">;</span>
+
+    upstream k8s-apiserver <span class="token punctuation">{<!-- --></span>
+       server 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101:6443<span class="token punctuation">;</span>   <span class="token comment"># Master1 APISERVER IP:PORT</span>
+       server 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:6443<span class="token punctuation">;</span>   <span class="token comment"># Master2 APISERVER IP:PORT</span>
+    <span class="token punctuation">}</span>
+    
+    server <span class="token punctuation">{<!-- --></span>
+       listen 16443<span class="token punctuation">;</span> <span class="token comment"># 由于nginx与master节点复用，这个监听端口不能是6443，否则会冲突</span>
+       proxy_pass k8s-apiserver<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+EOF
+</code></pre> 
+<h4>
+<a id="23nginxmaster12_1892"></a>2.3、检测并启动nginx（master1/2都操作）</h4> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 nginx]</span><span class="token comment"># nginx -t</span>
+nginx: the configuration file <span class="token operator">/</span>etc/nginx/nginx<span class="token punctuation">.</span>conf syntax is ok
+nginx: configuration file <span class="token operator">/</span>etc/nginx/nginx<span class="token punctuation">.</span>conf test is successful
+<span class="token namespace">[root@k8s-master1 nginx]</span><span class="token comment"># systemctl start nginx</span>
+<span class="token namespace">[root@k8s-master1 nginx]</span><span class="token comment"># systemctl enable nginx</span>
+Created symlink <span class="token keyword">from</span> <span class="token operator">/</span>etc/systemd/system/multi-user<span class="token punctuation">.</span>target<span class="token punctuation">.</span>wants/nginx<span class="token punctuation">.</span>service to <span class="token operator">/</span>usr/lib/systemd/system/nginx<span class="token punctuation">.</span>service<span class="token punctuation">.</span>
+
+<span class="token comment"># 测试访问一下</span>
+<span class="token namespace">[root@k8s-master1 nginx]</span><span class="token comment"># curl -k https://192.168.100.105:16443/version</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"major"</span>: <span class="token string">"1"</span><span class="token punctuation">,</span>
+  <span class="token string">"minor"</span>: <span class="token string">"23"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitVersion"</span>: <span class="token string">"v1.23.15"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitCommit"</span>: <span class="token string">"b84cb8ab29366daa1bba65bc67f54de2f6c34848"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitTreeState"</span>: <span class="token string">"clean"</span><span class="token punctuation">,</span>
+  <span class="token string">"buildDate"</span>: <span class="token string">"2022-12-08T10:42:57Z"</span><span class="token punctuation">,</span>
+  <span class="token string">"goVersion"</span>: <span class="token string">"go1.17.13"</span><span class="token punctuation">,</span>
+  <span class="token string">"compiler"</span>: <span class="token string">"gc"</span><span class="token punctuation">,</span>
+  <span class="token string">"platform"</span>: <span class="token string">"linux/amd64"</span>
+<span class="token punctuation">}</span><span class="token namespace">[root@k8s-master1 nginx]</span><span class="token comment">#</span>
+</code></pre> 
+<h4>
+<a id="24keepalivedmaster12_1917"></a>2.4、配置keepalived（master1/2都操作）</h4> 
+<p>这里要注意修改配置</p> 
+<ul>
+<li>router_id：master1节点中值为nginx_master，master2节点中值为nginx_backup</li>
+<li>state：master1节点中值为MASTER，master2节点中值为BACKUP</li>
+<li>priority：master1节点中值为100，master2节点值修改为90</li>
+</ul> 
+<pre><code class="prism language-powershell">cd <span class="token operator">/</span>etc/keepalived/
+<span class="token function">mv</span> keepalived<span class="token punctuation">.</span>conf keepalived<span class="token punctuation">.</span>conf_bak
+<span class="token function">cat</span> &gt; keepalived<span class="token punctuation">.</span>conf &lt;&lt; EOF
+global_defs <span class="token punctuation">{<!-- --></span>
+   notification_email <span class="token punctuation">{<!-- --></span>
+     acassen@firewall<span class="token punctuation">.</span>loc
+     failover@firewall<span class="token punctuation">.</span>loc
+     sysadmin@firewall<span class="token punctuation">.</span>loc
+   <span class="token punctuation">}</span>
+   notification_email_from Alexandre<span class="token punctuation">.</span>Cassen@firewall<span class="token punctuation">.</span>loc
+   smtp_server 127<span class="token punctuation">.</span>0<span class="token punctuation">.</span>0<span class="token punctuation">.</span>1
+   smtp_connect_timeout 30
+   router_id nginx_master    <span class="token comment">#每个keepalived节点的唯一标识</span>
+<span class="token punctuation">}</span>
+vrrp_script check_nginx <span class="token punctuation">{<!-- --></span>    <span class="token comment">#监测nginx的状态</span>
+    script <span class="token string">"/etc/keepalived/check_nginx.sh"</span>    <span class="token comment">#监控脚本</span>
+    interval 3    <span class="token comment">#检测间隔时间，即两秒检测一次</span>
+    fall 2    <span class="token comment">#检测失败的最大次数，超过两次认为节点资源发生故障</span>
+    weight <span class="token operator">-</span>20    <span class="token comment">#自动调整优先级的参数，检测成功优先级不变，失败则优先级-20，就会发生切换</span>
+<span class="token punctuation">}</span>
+
+vrrp_instance VI_1 <span class="token punctuation">{<!-- --></span>
+    state MASTER    <span class="token comment">#虚拟路由器的初始状态，可选择MASTER或者BACKUP</span>
+    interface ens33    <span class="token comment">#要修改为实际网卡名</span>
+    virtual_router_id 51    <span class="token comment">#每个虚拟路由的唯一标识ID，本次master和backup同属一个路由，所以值要保持一致</span>
+    priority 100    <span class="token comment">#当前节点的优先级，值越大越优先，主节点比备节点大即可</span>
+    advert_int 1    <span class="token comment">#VRRP通告的时间间隔，默认为1秒</span>
+    authentication <span class="token punctuation">{<!-- --></span>    <span class="token comment">#设置同一虚拟路由之间的认证机制</span>
+        auth_type PASS    <span class="token comment">#认证类型，这里用密码</span>
+        auth_pass 1111    <span class="token comment">#预共享密钥，仅前8位有效（就是配置的密码，可以配置为随机数，但是master和backup要一致）</span>
+    <span class="token punctuation">}</span>
+    virtual_ipaddress <span class="token punctuation">{<!-- --></span>    <span class="token comment">#配置VIP</span>
+        192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>105/24    <span class="token comment">#要保证这个IP没有被占用</span>
+    <span class="token punctuation">}</span>
+    track_script <span class="token punctuation">{<!-- --></span>    <span class="token comment">#定义执行的跟踪脚本</span>
+        check_nginx
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+EOF
+</code></pre> 
+<h4>
+<a id="25nginx_1966"></a>2.5、配置检测nginx状态脚本</h4> 
+<p>实现效果：</p> 
+<ul>
+<li>使用ss命令去检测nginx的16443端口是否存活</li>
+<li> 
+  <ul><li>如果端口存在，则返回状态0，keepalived不做任何处理</li></ul> </li>
+<li> 
+  <ul><li>如果端口不存在，则尝试重启nginx，重新判断端口是否存活</li></ul> </li>
+<li> 
+  <ul><li> 
+    <ul><li>如果端口不存在，则返回状态为1，keepalived会做master降级，VIP漂移操作</li></ul> </li></ul> </li>
+<li> 
+  <ul><li> 
+    <ul><li>如果端口存在，则返回状态为0，keepalived不做任何处理</li></ul> </li></ul> </li>
+</ul> 
+<pre><code class="prism language-powershell"><span class="token function">cat</span> &gt; check_nginx<span class="token punctuation">.</span>sh &lt;&lt; <span class="token string">"EOF"</span>
+<span class="token comment">#!/bin/bash</span>
+count=$<span class="token punctuation">(</span>ss <span class="token operator">-</span>antp <span class="token punctuation">|</span>grep 16443 <span class="token punctuation">|</span>wc <span class="token operator">-</span>l<span class="token punctuation">)</span>
+
+<span class="token keyword">if</span> <span class="token punctuation">[</span> <span class="token string">"<span class="token variable">$count</span>"</span> <span class="token operator">-eq</span> 0 <span class="token punctuation">]</span><span class="token punctuation">;</span>then
+    systemctl restart nginx    <span class="token comment"># 尝试重启nginx</span>
+    <span class="token function">sleep</span> 2
+    count=$<span class="token punctuation">(</span>ss <span class="token operator">-</span>antp <span class="token punctuation">|</span>grep 16443 <span class="token punctuation">|</span>wc <span class="token operator">-</span>l<span class="token punctuation">)</span>  <span class="token comment"># 这里要重新赋值才行</span>
+    <span class="token keyword">if</span> <span class="token punctuation">[</span> <span class="token variable">$count</span> <span class="token operator">-eq</span> 0 <span class="token punctuation">]</span><span class="token punctuation">;</span>then
+      <span class="token function">echo</span> <span class="token string">"<span class="token variable">$count</span>"</span>
+      <span class="token keyword">exit</span> 1
+    <span class="token keyword">else</span>
+      <span class="token keyword">exit</span> 0
+  fi
+<span class="token keyword">else</span>
+  <span class="token keyword">exit</span> 0
+fi
+EOF
+chmod <span class="token operator">+</span>x check_nginx<span class="token punctuation">.</span>sh
+</code></pre> 
+<h4>
+<a id="26keepalived_1996"></a>2.6、启动keepalived</h4> 
+<pre><code class="prism language-powershell">systemctl <span class="token function">start</span> keepalived
+systemctl enable keepalived
+
+<span class="token comment"># 验证，刚开始启动，因为master1优先级高，所以VIP是在master1上</span>
+<span class="token namespace">[root@k8s-master1 keepalived]</span><span class="token comment"># ip a |grep ens33 -A 3</span>
+2: ens33: &lt;BROADCAST<span class="token punctuation">,</span>MULTICAST<span class="token punctuation">,</span>UP<span class="token punctuation">,</span>LOWER_UP&gt; mtu 1500 qdisc pfifo_fast state UP <span class="token function">group</span> default qlen 1000
+    link/ether 00:0c:29:3a:0d:16 brd ff:ff:ff:ff:ff:ff
+    inet 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101/24 brd 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>255 scope global noprefixroute ens33
+       valid_lft forever preferred_lft forever
+    inet 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>105/24 scope global secondary ens33
+       valid_lft forever preferred_lft forever
+    inet6 fe80::30c0:4897:a86f:f217/64 scope link noprefixroute
+       valid_lft forever preferred_lft forever
+
+<span class="token comment"># 测试访问</span>
+<span class="token namespace">[root@k8s-master1 keepalived]</span><span class="token comment"># curl -k https://192.168.100.105:16443/version</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"major"</span>: <span class="token string">"1"</span><span class="token punctuation">,</span>
+  <span class="token string">"minor"</span>: <span class="token string">"23"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitVersion"</span>: <span class="token string">"v1.23.15"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitCommit"</span>: <span class="token string">"b84cb8ab29366daa1bba65bc67f54de2f6c34848"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitTreeState"</span>: <span class="token string">"clean"</span><span class="token punctuation">,</span>
+  <span class="token string">"buildDate"</span>: <span class="token string">"2022-12-08T10:42:57Z"</span><span class="token punctuation">,</span>
+  <span class="token string">"goVersion"</span>: <span class="token string">"go1.17.13"</span><span class="token punctuation">,</span>
+  <span class="token string">"compiler"</span>: <span class="token string">"gc"</span><span class="token punctuation">,</span>
+  <span class="token string">"platform"</span>: <span class="token string">"linux/amd64"</span>
+<span class="token punctuation">}</span><span class="token namespace">[root@k8s-master1 keepalived]</span><span class="token comment">#</span>
+</code></pre> 
+<h4>
+<a id="27VIP_2028"></a>2.7、测试VIP漂移效果</h4> 
+<p>首先要注释掉nginx检测脚本里的重启nginx指令，不然停止nginx后，keepalived又自动拉起了</p> 
+<pre><code class="prism language-powershell"><span class="token comment"># 注释掉重启命令，测试完别忘了打开</span>
+<span class="token namespace">[root@k8s-master1 keepalived]</span><span class="token comment"># cat check_nginx.sh</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">#systemctl restart nginx</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+</code></pre> 
+<p><strong>master1中手动停止nginx</strong></p> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master1 keepalived]</span><span class="token comment"># systemctl stop nginx</span>
+<span class="token namespace">[root@k8s-master1 keepalived]</span><span class="token comment"># ss -antp |grep 16443</span>
+<span class="token comment"># master1中查看vip是否还在</span>
+<span class="token namespace">[root@k8s-master1 keepalived]</span><span class="token comment"># ip a |grep ens33 -A 3</span>
+2: ens33: &lt;BROADCAST<span class="token punctuation">,</span>MULTICAST<span class="token punctuation">,</span>UP<span class="token punctuation">,</span>LOWER_UP&gt; mtu 1500 qdisc pfifo_fast state UP <span class="token function">group</span> default qlen 1000
+    link/ether 00:0c:29:3a:0d:16 brd ff:ff:ff:ff:ff:ff
+    inet 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101/24 brd 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>255 scope global noprefixroute ens33
+       valid_lft forever preferred_lft forever
+    inet6 fe80::30c0:4897:a86f:f217/64 scope link noprefixroute
+       valid_lft forever preferred_lft forever
+<span class="token comment"># 查看keepalived状态</span>
+<span class="token namespace">[root@k8s-master1 keepalived]</span><span class="token comment"># systemctl status keepalived</span>
+● keepalived<span class="token punctuation">.</span>service <span class="token operator">-</span> LVS and VRRP High Availability Monitor
+   Loaded: loaded <span class="token punctuation">(</span><span class="token operator">/</span>usr/lib/systemd/system/keepalived<span class="token punctuation">.</span>service<span class="token punctuation">;</span> enabled<span class="token punctuation">;</span> vendor preset: disabled<span class="token punctuation">)</span>
+   Active: active <span class="token punctuation">(</span>running<span class="token punctuation">)</span> since Sat 2022-12-31 16:15:33 CST<span class="token punctuation">;</span> 11min ago
+ Main PID: 88195 <span class="token punctuation">(</span>keepalived<span class="token punctuation">)</span>
+   CGroup: <span class="token operator">/</span>system<span class="token punctuation">.</span>slice/keepalived<span class="token punctuation">.</span>service
+           ├─88195 <span class="token operator">/</span>usr/sbin/keepalived <span class="token operator">-</span>D
+           ├─88196 <span class="token operator">/</span>usr/sbin/keepalived <span class="token operator">-</span>D
+           ├─88197 <span class="token operator">/</span>usr/sbin/keepalived <span class="token operator">-</span>D
+           ├─99640 <span class="token operator">/</span>usr/sbin/keepalived <span class="token operator">-</span>D
+           ├─99642 <span class="token operator">/</span>bin/bash <span class="token operator">/</span>etc/keepalived/check_nginx<span class="token punctuation">.</span>sh
+           └─99658 <span class="token function">sleep</span> 2
+
+Dec 31 16:26:14 k8s-master1 Keepalived_vrrp<span class="token punctuation">[</span>88197<span class="token punctuation">]</span>: <span class="token operator">/</span>etc/keepalived/check_nginx<span class="token punctuation">.</span>sh exited with status 1
+Dec 31 16:26:17 k8s-master1 Keepalived_vrrp<span class="token punctuation">[</span>88197<span class="token punctuation">]</span>: <span class="token operator">/</span>etc/keepalived/check_nginx<span class="token punctuation">.</span>sh exited with status 1
+Dec 31 16:26:20 k8s-master1 Keepalived_vrrp<span class="token punctuation">[</span>88197<span class="token punctuation">]</span>: <span class="token operator">/</span>etc/keepalived/check_nginx<span class="token punctuation">.</span>sh exited with status 1
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>          
+</code></pre> 
+<p><strong>master2中查看效果</strong></p> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master2 keepalived]</span><span class="token comment"># systemctl status keepalived</span>
+● keepalived<span class="token punctuation">.</span>service <span class="token operator">-</span> LVS and VRRP High Availability Monitor
+   Loaded: loaded <span class="token punctuation">(</span><span class="token operator">/</span>usr/lib/systemd/system/keepalived<span class="token punctuation">.</span>service<span class="token punctuation">;</span> enabled<span class="token punctuation">;</span> vendor preset: disabled<span class="token punctuation">)</span>
+   Active: active <span class="token punctuation">(</span>running<span class="token punctuation">)</span> since Sat 2022-12-31 16:13:01 CST<span class="token punctuation">;</span> 15min ago
+ Main PID: 50116 <span class="token punctuation">(</span>keepalived<span class="token punctuation">)</span>
+   CGroup: <span class="token operator">/</span>system<span class="token punctuation">.</span>slice/keepalived<span class="token punctuation">.</span>service
+           ├─50116 <span class="token operator">/</span>usr/sbin/keepalived <span class="token operator">-</span>D
+           ├─50117 <span class="token operator">/</span>usr/sbin/keepalived <span class="token operator">-</span>D
+           └─50118 <span class="token operator">/</span>usr/sbin/keepalived <span class="token operator">-</span>D
+
+Dec 31 16:24:53 k8s-master2 Keepalived_vrrp<span class="token punctuation">[</span>50118<span class="token punctuation">]</span>: Sending gratuitous ARP on ens33 <span class="token keyword">for</span> 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>105
+Dec 31 16:24:53 k8s-master2 Keepalived_vrrp<span class="token punctuation">[</span>50118<span class="token punctuation">]</span>: Sending gratuitous ARP on ens33 <span class="token keyword">for</span> 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>105
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token namespace">[root@k8s-master2 keepalived]</span><span class="token comment"># ip a |grep ens33 -A 3</span>
+2: ens33: &lt;BROADCAST<span class="token punctuation">,</span>MULTICAST<span class="token punctuation">,</span>UP<span class="token punctuation">,</span>LOWER_UP&gt; mtu 1500 qdisc pfifo_fast state UP <span class="token function">group</span> default qlen 1000
+    link/ether 00:0c:29:ad:ec:3f brd ff:ff:ff:ff:ff:ff
+    inet 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104/24 brd 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>255 scope global noprefixroute ens33
+       valid_lft forever preferred_lft forever
+    inet 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>105/24 scope global secondary ens33
+       valid_lft forever preferred_lft forever
+    inet6 fe80::e166:6ae9:6fa:258e/64 scope link noprefixroute
+       valid_lft forever preferred_lft forever 
+</code></pre> 
+<p><strong>测试访问</strong></p> 
+<p>注意：别在master1上curl，不然会有16443的进程，被keepalived检测到，就会导致VIP又漂到master1上了</p> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master2 keepalived]</span><span class="token comment"># curl -k https://192.168.100.105:16443/version</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"major"</span>: <span class="token string">"1"</span><span class="token punctuation">,</span>
+  <span class="token string">"minor"</span>: <span class="token string">"23"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitVersion"</span>: <span class="token string">"v1.23.15"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitCommit"</span>: <span class="token string">"b84cb8ab29366daa1bba65bc67f54de2f6c34848"</span><span class="token punctuation">,</span>
+  <span class="token string">"gitTreeState"</span>: <span class="token string">"clean"</span><span class="token punctuation">,</span>
+  <span class="token string">"buildDate"</span>: <span class="token string">"2022-12-08T10:42:57Z"</span><span class="token punctuation">,</span>
+  <span class="token string">"goVersion"</span>: <span class="token string">"go1.17.13"</span><span class="token punctuation">,</span>
+  <span class="token string">"compiler"</span>: <span class="token string">"gc"</span><span class="token punctuation">,</span>
+  <span class="token string">"platform"</span>: <span class="token string">"linux/amd64"</span>
+<span class="token punctuation">}</span><span class="token namespace">[root@k8s-master2 keepalived]</span><span class="token comment">#</span>
+</code></pre> 
+<p><strong>请求日志</strong></p> 
+<pre><code class="prism language-powershell"><span class="token namespace">[root@k8s-master2 keepalived]</span><span class="token comment"># tail -f /var/log/nginx/k8s-access.log</span>
+192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101:6443 <span class="token operator">-</span> <span class="token punctuation">[</span>31/Dec/2022:16:06:16 <span class="token operator">+</span>0800<span class="token punctuation">]</span> 200 418
+192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>101:6443 <span class="token operator">-</span> <span class="token punctuation">[</span>31/Dec/2022:16:10:46 <span class="token operator">+</span>0800<span class="token punctuation">]</span> 200 85
+192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104 192<span class="token punctuation">.</span>168<span class="token punctuation">.</span>100<span class="token punctuation">.</span>104:6443 <span class="token operator">-</span> <span class="token punctuation">[</span>31/Dec/2022:16:10:52 <span class="token operator">+</span>0800<span class="token punctuation">]</span> 200 418
+</code></pre> 
+<p>验证没问题之后，可以把master1上的nginx检测脚本恢复，就会自动把nginx拉起了</p> 
+<h3>
+<a id="3server_2128"></a>3、调整所有节点上的server配置</h3> 
+<p>之前部署时，所有kube服务里的apiserver配置还都是192.168.100.101:6443，即master1的apiserver地址<br> 所以现在虽然VIP已经生效，但是服务并没有去调用这个地址<br> 因此最后一步就是，修改所有节点上的配置文件（包括master和node），让服务去调用</p> 
+<blockquote> 
+ <p>说是配置文件，其实也就只是kubeconfig文件</p> 
+</blockquote> 
+<pre><code class="prism language-powershell">sed <span class="token operator">-</span>i <span class="token string">"s/192.168.100.101:6443/192.168.100.105:16443/g"</span> <span class="token operator">/</span>opt/kubernetes/cfg/<span class="token operator">*</span>
+
+
+<span class="token comment"># 验证访问</span>
+<span class="token namespace">[root@k8s-master1 cfg]</span><span class="token comment"># kubectl get nodes</span>
+NAME          STATUS   ROLES    AGE   VERSION
+k8s-master1   Ready    &lt;none&gt;   9d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+k8s-master2   Ready    &lt;none&gt;   21h   v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+k8s-node1     Ready    &lt;none&gt;   9d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+k8s-node2     Ready    &lt;none&gt;   9d    v1<span class="token punctuation">.</span>23<span class="token punctuation">.</span>15
+</code></pre> 
+<p>好了，这次是真结束了，恭喜，一套二进制部署的高可用k8s集群就完成了?<br> End…</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

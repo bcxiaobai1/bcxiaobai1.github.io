@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>阅读 redis 源码，学习缓存淘汰算法 W-TinyLFU - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">阅读 redis 源码，学习缓存淘汰算法 W-TinyLFU</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>所有 IT 从业者都接触过缓存，一定了解基本工作原理，业界流行一句话： <strong>缓存就是万金油，哪里有问题哪里抹一下</strong> 。那他的本质是什么呢？</p> 
+<p style="text-align:center"><img alt="阅读 redis 源码，学习缓存淘汰算法 W-TinyLFU" src="https://images2.imgbox.com/40/20/5GFEWcJ8_o.png"></p> 
+<p></p> 
+<p>上图代表从 cpu 到底层硬盘不同层次，不同模块的运行速度，上层多加一层 cache, 就能解决下层的速度慢的问题，这里的慢是指两点：IO 慢和 cpu 重复计算缓存中间结果</p> 
+<p>但是 cache 受限于成本，cache size 一般都是固定的，所以数据需要淘汰，由此引出一系列其它问题：缓存一致性、击穿、雪崩、污染等等，本文通过阅读 redis 源码，学习主流淘汰算法</p> 
+<p>如果不是 leetcode 146 LRU [1] 刷题需要，我想大家也不会手写 cache, 简单的实现和工程实践相距十万八千里，真正 production ready 的缓存库非常考验细节</p> 
+<h1>Redis 缓存淘汰配置</h1> 
+<p>一般 redis 不建义当成存储使用，只允许当作 cache, 并设置 max-memory, 当内存使用达到最大值时，redis-server 会根据不同配置开始删除 keys. Redis 从 4.0 版本引进了 LFU [2] , 即 Least Frequently Used ，4.0 以前默认使用 LRU 即 Least Recently Used</p> 
+<ul>
+<li>volatile-lru 只针对设置 expire 过期的 key 进行 lru 淘汰</li>
+<li>allkeys-lru 对所有的 key 进行 lru 淘汰</li>
+<li>volatile-lfu 只针对设置 expire 过期的 key 进行 lfu 淘汰</li>
+<li>allkeys-lfu 对所有的 key 进行 lfu 淘汰</li>
+<li>volatile-random 只针对设置 expire 过期的进行随机淘汰</li>
+<li>allkeys-random 所有的 key 随机淘汰</li>
+<li>volatile-ttl 淘汰 ttl 过期时间最小的 key</li>
+<li>noeviction 什么都不做，如果此时内存已满，系统无法写入</li>
+</ul>
+<p>默认策略是 noeviction , 也就是不驱逐，此时如果写满，系统无法写入，建义设置为 LFU 相关的。 LRU 优先淘汰最近未被使用，无法应对冷数据，比如热 keys 短时间没有访问，就会被只使用一次的冷数据冲掉，无法反应真实的使用情况</p> 
+<p>LFU 能避免上述情况，但是 <strong>朴素 LFU 实现无法应对突发流量，无法驱逐历史热 keys</strong> ，所以 redis LFU 实现类似于 W-TinyLFU [3] , 其中 W 是 windows 的意思，即一定时间窗口后对频率进行减半，如果不减的话，cache 就成了对历史数据的统计，而不是缓存</p> 
+<p>上面还提到突发流量如果应对呢？答案是给新访问的 key 一个初始频率值，不至于由于初始值为 0 无法更新频率</p> 
+<h1>LRU 实现</h1> 
+<pre><code>int processCommand(redisClient *c) {
+    ......
+    /* Handle the maxmemory directive.
+     *
+     * First we try to free some memory if possible (if there are volatile
+     * keys in the dataset). If there are not the only thing we can do
+     * is returning an error. */
+    if (server.maxmemory) {
+        int retval = freeMemoryIfNeeded();
+        if ((c-&gt;cmd-&gt;flags &amp; REDIS_CMD_DENYOOM) &amp;&amp; retval == REDIS_ERR) {
+            flagTransaction(c);
+            addReply(c, shared.oomerr);
+            return REDIS_OK;
+        }
+    }
+    ......
+}
+</code></pre> 
+<p>在每次处理 client 命令时都会调用 freeMemoryIfNeeded 检查是否有必有驱逐某些 key, 当 redis 实际使用内存达到上限时开始淘汰。但是 redis 做的比较取巧，并没有对所有的 key 做 lru 队列，而是按照 maxmemory_samples 参数进行采样，系统默认是 5 个 key</p> 
+<p style="text-align:center"><img alt="阅读 redis 源码，学习缓存淘汰算法 W-TinyLFU" src="https://images2.imgbox.com/c3/89/SnZjIMdc_o.png"></p> 
+<p></p> 
+<p>上面是很经典的一个图，当到达 10 个 key 时效果更接近理论上的 LRU 算法，但是 cpu 消耗会变高，所以系统默认值就够了。</p> 
+<h1>LFU 实现</h1> 
+<pre><code>robj *lookupKey(redisDb *db, robj *key, int flags) {
+    dictEntry *de = dictFind(db-&gt;dict,key-&gt;ptr);
+    if (de) {
+        robj *val = dictGetVal(de);
+
+        /* Update the access time for the ageing algorithm.
+         * Don't do it if we have a saving child, as this will trigger
+         * a copy on write madness. */
+        if (!hasActiveChildProcess() &amp;&amp; !(flags &amp; LOOKUP_NOTOUCH)){
+            if (server.maxmemory_policy &amp; MAXMEMORY_FLAG_LFU) {
+                updateLFU(val);
+            } else {
+                val-&gt;lru = LRU_CLOCK();
+            }
+        }
+        return val;
+    } else {
+        returnNULL;
+    }
+}
+</code></pre> 
+<p>当 lookupKey 访问某 key 时，会更新 LRU. 从 redis 4.0 开始逐渐引入了 LFU 算法，由于复用了 LRU 字段，所以只能使用 24 bits</p> 
+<pre><code> * We split the 24 bits into two fields:
+ *
+ *     16 bits      8 bits
+ * +----------------+--------+
+ * + Last decr time | LOG_C  |
+ * +----------------+--------+
+</code></pre> 
+<p>其中低 8 位 counter 用于计数频率，取值为从 0~255, 但是经过取对数的，所以可以表示很大的访问频率</p> 
+<p>高 16 位 ldt ( Last Decrement Time )表示最后一次访问的 miniutes 时间戳, 用于衰减 counter 值，如果 counter 不衰减的话就变成了对历史 key 访问次数的统计了，而不是 LFU</p> 
+<pre><code>/* Update LFU when an object is accessed.
+ * Firstly, decrement the counter if the decrement time is reached.
+ * Then logarithmically increment the counter, and update the access time. */
+void updateLFU(robj *val) {
+    unsigned long counter = LFUDecrAndReturn(val);
+    counter = LFULogIncr(counter);
+    val-&gt;lru = (LFUGetTimeInMinutes()&lt;&lt;8) | counter;
+}
+</code></pre> 
+<p>LFUDecrAndReturn 将已有的 counter 计数衰减后返回， LFULogIncr 尝试对计数加一(有可能不加)后取对数，最后更新 val-lru</p> 
+<pre><code>unsigned long LFUTimeElapsed(unsigned long ldt) {
+    unsigned long now = LFUGetTimeInMinutes();
+    if (now &gt;= ldt) return now-ldt;
+    return 65535-ldt+now;
+}
+</code></pre> 
+<p>注意由于 ldt 只用了 16位计数，最大值 65535，所以会出现回卷 rewind</p> 
+<h1>LFU 获取己有计数</h1> 
+<pre><code> * counter of the scanned objects if needed. */
+unsigned long LFUDecrAndReturn(robj *o) {
+    unsigned long ldt = o-&gt;lru &gt;&gt; 8;
+    unsigned long counter = o-&gt;lru &amp; 255;
+    unsigned long num_periods = server.lfu_decay_time ? LFUTimeElapsed(ldt) / server.lfu_decay_time : 0;
+    if (num_periods)
+        counter = (num_periods &gt; counter) ? 0 : counter - num_periods;
+    return counter;
+}
+</code></pre> 
+<p>num_periods 代表计算出来的待衰减计数， lfu_decay_time 代表衰减系数，默认值是 1，如果 lfu_decay_time 大于 1 衰减速率会变得很慢</p> 
+<p>最后返回的计数值为衰减之后的，也有可能是 0</p> 
+<h1>LFU 计数更新并取对数</h1> 
+<pre><code>/* Logarithmically increment a counter. The greater is the current counter value
+ * the less likely is that it gets really implemented. Saturate it at 255. */
+uint8_t LFULogIncr(uint8_t counter) {
+    if (counter == 255) return 255;
+    double r = (double)rand()/RAND_MAX;
+    double baseval = counter - LFU_INIT_VAL;
+    if (baseval &lt; 0) baseval = 0;
+    double p = 1.0/(baseval*server.lfu_log_factor+1);
+    if (r &lt; p) counter++;
+    return counter;
+}
+</code></pre> 
+<p>计数超过 255, 就不用算了，直接返回即可。 LFU_INIT_VAL 是初始值，默认是 5</p> 
+<p>如果减去初始值后 baseval 小于 0 了，说明快过期了，就更倾向于递增 counter 值</p> 
+<pre><code>double p = 1.0/(baseval*server.lfu_log_factor+1);
+</code></pre> 
+<p>这个概率算法中 lfu_log_factor 是对数的，默认是 10, 当 counter 值较小时自增的概率较大，如果 counter 较大，倾向于不做任何操作</p> 
+<p style="text-align:center"><img alt="阅读 redis 源码，学习缓存淘汰算法 W-TinyLFU" src="https://images2.imgbox.com/b9/44/HiGJK8a5_o.png"></p> 
+<p></p> 
+<p>counter 值从 0~255 可以表示很大的访问频率，足够用了</p> 
+<pre><code># +--------+------------+------------+------------+------------+------------+
+# | factor | 100 hits   | 1000 hits  | 100K hits  | 1M hits    | 10M hits   |
+# +--------+------------+------------+------------+------------+------------+
+# | 0      | 104        | 255        | 255        | 255        | 255        |
+# +--------+------------+------------+------------+------------+------------+
+# | 1      | 18         | 49         | 255        | 255        | 255        |
+# +--------+------------+------------+------------+------------+------------+
+# | 10     | 10         | 18         | 142        | 255        | 255        |
+# +--------+------------+------------+------------+------------+------------+
+# | 100    | 8          | 11         | 49         | 143        | 255        |
+# +--------+------------+------------+------------+------------+------------+
+</code></pre> 
+<p>基于这个特性，我们就可以用 redis-cli --hotkeys 命令，来查看系统中的最近一段时间的热 key, 非常实用。老版本中是没这个功能的，需要人工统计</p> 
+<pre><code>$ redis-cli --hotkeys
+# Scanning the entire keyspace to find hot keys as well as
+# average sizes per key type.  You can use -i 0.1 to sleep 0.1 sec
+# per 100 SCAN commands (not usually needed).
+......
+[47.62%] Hot key 'key17' found so far with counter 6
+[57.14%] Hot key 'key43' found so far with counter 7
+[57.14%] Hot key 'key14' found so far with counter 6
+[85.71%] Hot key 'key42' found so far with counter 7
+[85.71%] Hot key 'key45' found so far with counter 8
+[95.24%] Hot key 'key50' found so far with counter 7
+
+-------- summary -------
+
+Sampled 105 keys in the keyspace!
+hot key found with counter: 7 keyname: key40
+hot key found with counter: 7 keyname: key42
+hot key found with counter: 7 keyname: key50
+</code></pre> 
+<h1>谈谈缓存的指标</h1> 
+<p>前面提到的是 redis LFU 实现，这是集中式的缓存，我们还有很多进程的本地缓存。如何评价一个缓存实现的好坏，有好多指标，细节更重要</p> 
+<p style="text-align:center"><img alt="阅读 redis 源码，学习缓存淘汰算法 W-TinyLFU" src="https://images2.imgbox.com/4f/ca/CqnJruVM_o.png"></p> 
+<p></p> 
+<ul>
+<li>吞吐量：常说的 QPS, 对标 bucket 实现的 hashmap 复杂度是 O(1), 缓存复杂度要高一些，还有锁竞争要处理，总之缓存库实现的效率要高</li>
+<li>缓存命中率：光有吞吐量还不够，缓存命中率也非常关键，命中率越高说明引入缓存作用越大</li>
+<li>高级特性：缓存指标统计，如何应对缓存击穿等等</li>
+</ul>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

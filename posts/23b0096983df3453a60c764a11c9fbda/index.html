@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>16.Netty源码之ChannelPipeline - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">16.Netty源码之ChannelPipeline</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <div style="font-size: 16px"> 
+ <hr> 
+ <h2>highlight: arduino-light</h2> 
+ <h1><strong>服务编排层:ChannelPipeline协调ChannelHandlerHandler</strong></h1> 
+ <p>EventLoop可以说是 Netty 的调度中心，负责监听多种事件类型：I/O 事件、信号事件、定时事件等，然而实际的业务处理逻辑则是由 ChannelPipeline 中所定义的 ChannelHandler 完成的，ChannelPipeline 和 ChannelHandler应用开发的过程中打交道最多的组件。</p> 
+ <p>Netty 服务编排层的核心组件 ChannelPipeline 和 ChannelHandler 为用户提供了 I/O 事件的全部控制权。</p> 
+ <p>在学习之前，先思考几个问题。</p> 
+ <ul>
+<li>ChannelPipeline 与 ChannelHandler 的关系是什么？它们之间是如何协同工作的？</li>
+<li>ChannelHandler 的类型有哪些？有什么区别？</li>
+<li>Netty 中 I/O 事件是如何传播的？</li>
+</ul> 
+ <h2>ChannelPipeline 概述</h2> 
+ <p>Pipeline 的字面意思是管道、流水线。它在 Netty 中起到的作用，和一个工厂的流水线类似。</p> 
+ <p>原始的网络字节流经过 Pipeline ，被一步步加工包装，最后得到加工后的成品。</p> 
+ <p>经过前面课程核心组件的初步学习，我们已经对 ChannelPipeline 有了初步的印象：它是 Netty 的核心处理链，用以实现网络事件的动态编排和有序传播。</p> 
+ <p>今天我们将从以下几个方面一起探讨 ChannelPipeline 的实现原理：</p> 
+ <ul>
+<li>ChannelPipeline 内部结构；</li>
+<li>ChannelHandler 接口设计；</li>
+<li>ChannelPipeline 事件传播机制；</li>
+<li>ChannelPipeline 异常传播机制。</li>
+</ul> 
+ <h2>ChannelPipeline 内部结构</h2> 
+ <p>ChannelPipeline 可以看作是 ChannelHandler 的容器载体，它是由一组 ChannelHandler 实例组成的，内部通过双向链表将不同的 ChannelHandler 链接在一起，如下图所示。</p> 
+ <p>当有 I/O 读写事件触发时，ChannelPipeline 会依次调用 ChannelHandler 列表对 Channel 的数据进行拦截和处理。</p> 
+ <p><img src="https://images2.imgbox.com/0f/0e/ozvpcxlJ_o.png" alt="image.png"></p> 
+ <p>每个 ChannelHandler 都对应一个 ChannelHandlerContext。</p> 
+ <p>所以实际上 ChannelPipeline 维护的是它与 ChannelHandlerContext 的关系。</p> 
+ <p>那么你可能会有疑问，为什么这里会多一层 ChannelHandlerContext 的封装呢？</p> 
+ <p>其实这是一种比较常用的编程思想。ChannelHandlerContext用于保存ChannelHandler。</p> 
+ <p><strong>ChannelHandlerContext包含了ChannelHandler生命周期的所有事件，如 connect、bind、read、</strong> <strong>flush、write、close 等。</strong></p> 
+ <p>可以试想一下，如果没有ChannelHandlerContext 的这层封装，那么我们在做 ChannelHandler 之间传递的时 候。<strong>前置后置的通用逻辑就要在每个 ChannelHandler 里都实现一份。</strong></p> 
+ <p>这样虽然能解决问题，但是代码结构的耦合，会非常不优雅。</p> 
+ <p>根据网络数据的流向，ChannelPipeline 分为入站 ChannelInboundHandler和出站 ChannelOutboundHandler。</p> 
+ <p>服务端接收到客户端数据需要先经过 Decoder 入站处理后，再通过 Encoder 出站通知客户端。</p> 
+ <p><img src="https://images2.imgbox.com/51/47/orXPoVal_o.png" alt="image.png"></p> 
+ <p><strong>ChannelPipeline是双向链表的构造</strong>。</p> 
+ <p><strong>ChannelPipeline 的双向链表分别维护了HeadContext 和 TailContext 的头尾节点。</strong></p> 
+ <p>我们自定义的ChannelHandler会插入到 Head 和 Tail 之间，这两个节点在 Netty 中已经默认实现了，它们在</p> 
+ <p>ChannelPipeline 中起到了至关重要的作用。</p> 
+ <p>首先我们看下 HeadContext 和 TailContext 的继承关系，如下图所示。</p> 
+ <p><img src="https://images2.imgbox.com/51/6c/absS9CIv_o.png" alt="image.png"></p> 
+ <h3>HeadContext:in&amp;out</h3> 
+ <p>对于1个请求先由HeadContext处理入栈,经过一系列的入栈处理器然后传递到TailContext,由TailContext往下传递经过一系列的出栈处理器,最后再经过HeadContext返回。 ```md</p> 
+ <p>&lt;---6 &lt;---5 &lt;---4 HeadContext InBoundHandlerOne TailContext OutBoundHandlerOne 1---&gt; 2---&gt; 3---&gt;</p> 
+ <p>顺序是:12346 其中5是入栈已经在2处理过 所以不需要处理。 ```</p> 
+ <h4>Inbound第一站</h4> 
+ <h4>Outbound最后一站</h4> 
+ <p><strong>HeadContext 既是 Inbound 处理器，也是 Outbound 处理器。</strong> 它分别实现了 ChannelInboundHandler 和 ChannelOutboundHandler。</p> 
+ <p><strong>网络数据写入操作的入口就是由 HeadContext 节点完成的。HeadContext 作为 Pipeline 的头结点负责读取数据并开始传递 InBound 事件，当数据处理完成后，数据会反方向经过 Outbound 处理器，最终传递到 HeadContext，所以 HeadContext 既是数据读取Inbound事件的第一站又是处理 Outbound 事件的最后一站。</strong></p> 
+ <p>此外 HeadContext 在传递事件之前，还会执行一些前置操作。</p> 
+ <h3>TailContext</h3> 
+ <h4>Outbound第一站</h4> 
+ <p>TailContext 只实现了 ChannelInboundHandler 接口。它会在 ChannelInboundHandler 调用链路的最后一步执行，<strong>主要用于终止 Inbound 事件传播</strong>，例如释放 Message 数据资源等。</p> 
+ <p><strong>TailContext 节点作为 OutBound 事件传播的第一站，仅仅是将 OutBound 事件传递给下一个节点。</strong></p> 
+ <p>从整个 ChannelPipeline 调用链路来看，如果由 Channel 直接触发事件传播，那么调用链路将贯穿整个 ChannelPipeline。</p> 
+ <p>然而也可以在其中某一个 ChannelHandlerContext 触发同样的方法，这样只会从当前的 ChannelHandler 开始执行事件传播，该过程不会从头贯穿到尾，在一定场景下，可以提高程序性能。</p> 
+ <h3>ChannelHandler 接口设计</h3> 
+ <p>在学习 ChannelPipeline 事件传播机制之前，我们需要了解 I/O 事件的生命周期。</p> 
+ <p>整个 ChannelHandler 是围绕 I/O 事件的生命周期所设计的，例如建立连接、读数据、写数据、连接销毁等。</p> 
+ <p>ChannelHandler 有两个重要的<strong>子接口</strong>：<strong>ChannelInboundHandler</strong>和<strong>ChannelOutboundHandler</strong>，分别拦截<strong>入</strong></p> 
+ <p><strong>站和出站的各种 I/O 事件</strong>。</p> 
+ <p><strong>1. ChannelInboundHandler 的事件回调方法与触发时机。</strong></p> 
+ <p>​</p> 
+ <p>| 事件回调方法 | 触发时机 | | ------------------------- | --------------------------------- | | channelRegistered | Channel 被注册到 EventLoop | | channelUnregistered | Channel 从 EventLoop 中取消注册 | | channelActive | Channel 处于就绪状态，可以被读写 | | channelInactive | Channel 处于非就绪状态Channel 可以从远端读取到数据 | | channelRead | Channel 可以从远端读取到数据 | | channelReadComplete | Channel 读取数据完成 | | userEventTriggered | 用户事件触发时 | | channelWritabilityChanged | Channel 的写状态发生变化 | | handlerAdded | 当该处理器被添加到pipeline时 |</p> 
+ <p>​</p> 
+ <p><strong>2. ChannelOutboundHandler 的事件回调方法与触发时机。</strong></p> 
+ <p>ChannelOutboundHandler 的事件回调方法非常清晰，直接通过 ChannelOutboundHandler 的接口列表可以看到每种操作所对应的回调方法，如下图所示。</p> 
+ <p>这里每个回调方法都是在相应操作执行之前触发，在此就不多做赘述了。</p> 
+ <p>此外 ChannelOutboundHandler 中绝大部分接口都包含ChannelPromise 参数，以便于在操作完成时能够及时获得通知。</p> 
+ <p><img src="https://images2.imgbox.com/6d/ea/mTSAXTqP_o.png" alt="image.png"></p> 
+ <h2>事件</h2> 
+ <h3>事件枚举</h3> 
+ <pre class="has"><code>public static final int OP_READ = 1 &lt;&lt; 0;//1
+public static final int OP_WRITE = 1 &lt;&lt; 2;//4
+public static final int OP_CONNECT = 1 &lt;&lt; 3;//8
+public static final int OP_ACCEPT = 1 &lt;&lt; 4;//16</code></pre> 
+ <h3>事件传播机制</h3> 
+ <p>在上文中我们介绍了 ChannelPipeline 可分为入站 ChannelInboundHandler 和出站 ChannelOutboundHandler 两种处理器，与此对应传输的事件类型可以分为<strong>Inbound 事件</strong>和<strong>Outbound 事件</strong>。</p> 
+ <p>我们通过一个代码示例，一起体验下 ChannelPipeline 的事件传播机制。 ```java package io.netty.example.pipeline;</p> 
+ <pre class="has"><code>import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioChannelOption;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.logging.LogLevel;
+import io.netty.handler.logging.LoggingHandler;
+
+/**
+ * Echoes back any received data from a client.
+ */
+public final class EchoServer {
+
+    public static void main(String[] args) throws Exception {
+
+        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        EventLoopGroup bossGroup = new NioEventLoopGroup();
+        try {
+            ServerBootstrap b = new ServerBootstrap();
+
+            b.group(bossGroup, workerGroup)
+                    //通过反射创建反射工厂类根据无参构造函数 反射生成实例
+                    //将NioServerSocketChannel绑定到了bossGroup
+                    //NioServerSocketChannel接收到请求会创建SocketChannel放入workerGroup
+                    .channel(NioServerSocketChannel.class)
+
+                    //指的是SocketChannel
+                    .childOption(ChannelOption.SO_KEEPALIVE, true)
+                    //指的是SocketChannel
+                    .childOption(NioChannelOption.SO_KEEPALIVE, Boolean.TRUE)
+                    //默認不使用堆外内存
+                    .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                    //false 不使用堆外内存
+                    .childOption(ChannelOption.ALLOCATOR, 
+                                    new UnpooledByteBufAllocator(false))
+                    //   .handler(new LoggingHandler(LogLevel.INFO))
+                    .childHandler(new ChannelInitializer&lt;SocketChannel&gt;() {
+                        @Override
+                        public void initChannel(SocketChannel ch) throws Exception {
+                            ChannelPipeline p = ch.pipeline();
+                            //正常情况
+                            p.addLast("SampleInBoundHandlerA", new SampleInBoundHandler("SampleInBoundHandlerA", false));
+                            p.addLast("SampleInBoundHandlerB", new SampleInBoundHandler("SampleInBoundHandlerB", false));
+                            p.addLast("SampleInBoundHandlerC", new SampleInBoundHandler("SampleInBoundHandlerC", true));
+
+
+
+
+                            p.addLast("SampleOutBoundHandlerA", new SampleOutBoundHandler("SampleOutBoundHandlerA"));
+                            p.addLast("SampleOutBoundHandlerB", new SampleOutBoundHandler("SampleOutBoundHandlerB"));
+                            p.addLast("SampleOutBoundHandlerC", new SampleOutBoundHandler("SampleOutBoundHandlerC"));
+                        }
+                    });
+
+            ChannelFuture f = b.bind(8090).sync();
+            f.channel().closeFuture().sync();
+        } finally {
+            workerGroup.shutdownGracefully();
+        }
+    }
+}</code></pre> 
+ <pre class="has"><code>package io.netty.example.pipeline;
+
+import io.netty.bootstrap.Bootstrap;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.logging.LogLevel;
+import io.netty.handler.logging.LoggingHandler;
+
+
+public final class EchoClient {
+
+    public static void main(String[] args) throws Exception {
+        // Configure the client.
+        EventLoopGroup group = new NioEventLoopGroup();
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(group)
+             .channel(NioSocketChannel.class)
+             .option(ChannelOption.TCP_NODELAY, true)
+             .handler(new ChannelInitializer&lt;SocketChannel&gt;() {
+                 @Override
+                 public void initChannel(SocketChannel ch) throws Exception {
+                     ChannelPipeline p = ch.pipeline();
+                     p.addLast(new EchoClientHandler());
+                 }
+             });
+
+            // Start the client.
+            ChannelFuture f = b.connect("127.0.0.1", 8090).sync();
+
+            // Wait until the connection is closed.
+            f.channel().closeFuture().sync();
+        } finally {
+            // Shut down the event loop to terminate all threads.
+            group.shutdownGracefully();
+        }
+    }
+}</code></pre> 
+ <pre class="has"><code>package io.netty.example.pipeline;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Handler implementation for the echo client.  It initiates the ping-pong
+ * traffic between the echo client and server by sending the first message to
+ * the server.
+ */
+public class EchoClientHandler extends ChannelInboundHandlerAdapter {
+
+    private final ByteBuf firstMessage;
+
+    /**
+     * Creates a client-side handler.
+     */
+    public EchoClientHandler() {
+        firstMessage = Unpooled.wrappedBuffer("I am echo message".getBytes());
+    }
+
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) {
+        System.out.println("客户端发送消息" + firstMessage.toString());
+        ctx.writeAndFlush(firstMessage);
+    }
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+       // ctx.write(msg);
+    }
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws InterruptedException {
+        TimeUnit.SECONDS.sleep(3);
+        ctx.flush();
+    }
+
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+       // cause.printStackTrace();
+        ctx.close();
+    }
+}</code></pre> 
+ <pre class="has"><code>package io.netty.example.pipeline;
+
+import io.netty.channel.*;
+
+public class SampleInBoundHandler extends ChannelInboundHandlerAdapter {
+  private final String name;
+  private final boolean flush;
+
+  public SampleInBoundHandler(String name, boolean flush) {
+    this.name = name;
+    this.flush = flush;
+  }
+
+  @Override
+  public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+      //打印消息
+      System.out.println("InBoundHandler: " + name);
+    //只有是true的时候才会写消息
+    //否则只会读消息
+    if (flush) {
+      ctx.channel().writeAndFlush(msg);
+    } else {
+      super.channelRead(ctx, msg);
+    }
+  }
+}</code></pre> 
+ <pre class="has"><code>package io.netty.example.pipeline;
+
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
+
+public class SampleOutBoundHandler extends ChannelOutboundHandlerAdapter {
+  private final String name;
+  public SampleOutBoundHandler(String name) {
+    this.name = name;
+  }
+
+  @Override
+  public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+    System.out.println("OutBoundHandler: " + name);
+    super.write(ctx, msg, promise);
+  }
+}</code></pre> 
+ <p>```</p> 
+ <p>通过 Pipeline 的 addLast 方法分别添加了三个 InboundHandler 和 OutboundHandler，添加顺序都是 A -&gt; B -&gt; C，下图可以表示初始化后 ChannelPipeline 的内部结构。</p> 
+ <p><img src="https://images2.imgbox.com/9d/a8/aYFB6gAn_o.png" alt="image.png"></p> 
+ <p>*<em>当客户端向服务端发送请求时，会触发 SampleInBoundHandler 调用链的 channelRead 事件。</em>经过 SampleInBoundHandler 调用链处理完成后，在 SampleInBoundHandlerC 中会调用 writeAndFlush 方法向客户端写回数据，此时会触发 SampleOutBoundHandler 调用链的 write 事件。** 最后我们看下代码示例的控制台输出：</p> 
+ <p><img src="https://images2.imgbox.com/79/08/Ik73B95C_o.png" alt="image (3).png"></p> 
+ <h3>方向:IN先进先出OUT:先进后出</h3> 
+ <p>由此可见，<strong>Inbound 事件和 Outbound 事件的传播方向是不一样的。Inbound 事件的传播方向为 Head -&gt; Tail，而 Outbound 事件传播方向是 Tail -&gt; Head，两者恰恰相反。</strong> 在 Netty 应用编程中一定要理清楚事件传播的顺序。推荐你在系统设计时模拟客户端和服务端的场景画出 ChannelPipeline 的内部结构图，以避免搞混调用关系。</p> 
+ <h3>异常传播机制</h3> 
+ <p>ChannelPipeline 事件传播的实现采用了经典的责任链模式，调用链路环环相扣。那么如果有一个节点处理逻辑异常会出现什么现象呢？我们通过修改 SampleInBoundHandler 的实现来模拟业务逻辑异常： ```java package io.netty.example.pipeline;</p> 
+ <pre class="has"><code>import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioChannelOption;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.logging.LogLevel;
+import io.netty.handler.logging.LoggingHandler;
+
+/**
+ * Echoes back any received data from a client.
+ */
+public final class EchoServer {
+
+    public static void main(String[] args) throws Exception {
+
+        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        EventLoopGroup bossGroup = new NioEventLoopGroup();
+        try {
+            ServerBootstrap b = new ServerBootstrap();
+
+            b.group(bossGroup, workerGroup)
+                    //通过反射创建反射工厂类根据无参构造函数 反射生成实例
+                    //将NioServerSocketChannel绑定到了bossGroup
+                    //NioServerSocketChannel接收到请求会创建SocketChannel放入workerGroup
+                    .channel(NioServerSocketChannel.class)
+
+                    //指的是SocketChannel
+                    .childOption(ChannelOption.SO_KEEPALIVE, true)
+                    //指的是SocketChannel
+                    .childOption(NioChannelOption.SO_KEEPALIVE, Boolean.TRUE)
+                    //默認不使用堆外内存
+                    .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                    //false 不使用堆外内存
+                    .childOption(ChannelOption.ALLOCATOR, new UnpooledByteBufAllocator(false))
+                    //   .handler(new LoggingHandler(LogLevel.INFO))
+                    .childHandler(new ChannelInitializer&lt;SocketChannel&gt;() {
+                        @Override
+                        public void initChannel(SocketChannel ch) throws Exception {
+                            ChannelPipeline p = ch.pipeline();
+                            //正常情况
+                          /*
+                            p.addLast("SampleInBoundHandlerA", new SampleInBoundHandler("SampleInBoundHandlerA", false));
+                            p.addLast("SampleInBoundHandlerB", new SampleInBoundHandler("SampleInBoundHandlerB", false));
+                            p.addLast("SampleInBoundHandlerC", new SampleInBoundHandler("SampleInBoundHandlerC", true));
+                            */
+
+                            p.addLast("SampleInBoundHandlerA", new SampleExceptionInBoundHandler("SampleInBoundHandlerA", false));
+                            p.addLast("SampleInBoundHandlerB", new SampleExceptionInBoundHandler("SampleInBoundHandlerB", false));
+                            p.addLast("SampleInBoundHandlerC", new SampleExceptionInBoundHandler("SampleInBoundHandlerC", true));
+
+                            p.addLast("SampleOutBoundHandlerA", new SampleOutBoundHandler("SampleOutBoundHandlerA"));
+                            p.addLast("SampleOutBoundHandlerB", new SampleOutBoundHandler("SampleOutBoundHandlerB"));
+                            p.addLast("SampleOutBoundHandlerC", new SampleOutBoundHandler("SampleOutBoundHandlerC"));
+                        }
+                    });
+
+            ChannelFuture f = b.bind(8090).sync();
+            f.channel().closeFuture().sync();
+        } finally {
+            workerGroup.shutdownGracefully();
+        }
+    }
+}</code></pre> 
+ <pre class="has"><code>package io.netty.example.pipeline;
+
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+
+public class SampleExceptionInBoundHandler extends ChannelInboundHandlerAdapter {
+    private final String name;
+    private final boolean flush;
+    public SampleExceptionInBoundHandler(String name, boolean flush) {
+        this.name = name;
+        this.flush = flush;
+    }
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        System.out.println("InBoundHandler: " + name);
+        if (flush) {
+            ctx.channel().writeAndFlush(msg);
+        } else {
+            throw new RuntimeException("InBoundHandler: " + name);
+        }
+    }
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        System.out.println("InBoundHandlerException: " + name);
+        ctx.fireExceptionCaught(cause);
+    }
+}</code></pre> 
+ <p>``` 在SampleExceptionInBoundHandler的 channelRead 事件处理中，第一个 A 节点就会抛出 RuntimeException。同时我们重写了 ChannelInboundHandlerAdapter 中的 exceptionCaught 方法，只是在开头加上了控制台输出，方便观察异常传播的行为。下面看一下代码运行的控制台输出结果：</p> 
+ <p><img src="https://images2.imgbox.com/51/04/p2MDiziZ_o.png" alt="image (4).png"></p> 
+ <p>由输出结果可以看出 <strong>ctx.fireExceptionCaugh 会将异常按顺序从 Head 节点传播到 Tail 节点</strong>。</p> 
+ <p>如果用户没有对异常进行拦截处理，最后将由 Tail 节点统一处理，在 TailContext 源码中可以找到具体实现：</p> 
+ <pre class="has"><code>protected void onUnhandledInboundException(Throwable cause) {
+
+    try {
+    logger.warn("An exceptionCaught() event was fired, and it reached at the tail of the pipeline. " + "It usually means the last handler in the pipeline did not handle the exception.",cause);
+    } finally {
+        ReferenceCountUtil.release(cause);
+    }
+}</code></pre> 
+ <p>虽然 Netty 中 TailContext 提供了兜底的异常处理逻辑，但是在很多场景下，并不能满足我们的需求。假如你需要拦截指定的异常类型，并做出相应的异常处理，应该如何实现呢？我们接着往下看。</p> 
+ <h3>异常处理的最佳实践</h3> 
+ <p>在 Netty 应用开发的过程中，良好的异常处理机制会让排查问题的过程事半功倍。所以推荐用户对异常进行统一拦截，然后根据实际业务场景实现更加完善的异常处理机制。</p> 
+ <p>通过异常传播机制的学习，我们应该可以想到最好的方法是在 ChannelPipeline 自定义处理器的末端添加统一的异常处理器，此时 ChannelPipeline 的内部结构如下图所示。</p> 
+ <p><img src="https://images2.imgbox.com/07/41/XPOeGYg2_o.png" alt="image.png"></p> 
+ <p>用户自定义的异常处理器代码示例如下： ```java package io.netty.example.pipeline;</p> 
+ <pre class="has"><code>import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.channel.*;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioChannelOption;
+import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.handler.logging.LogLevel;
+import io.netty.handler.logging.LoggingHandler;
+
+/**
+ * Echoes back any received data from a client.
+ */
+public final class EchoServer {
+
+    public static void main(String[] args) throws Exception {
+
+        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        EventLoopGroup bossGroup = new NioEventLoopGroup();
+        try {
+            ServerBootstrap b = new ServerBootstrap();
+
+            b.group(bossGroup, workerGroup)
+                    //通过反射创建反射工厂类根据无参构造函数 反射生成实例
+                    //将NioServerSocketChannel绑定到了bossGroup
+                    //NioServerSocketChannel接收到请求会创建SocketChannel放入workerGroup
+                    .channel(NioServerSocketChannel.class)
+
+                    //指的是SocketChannel
+                    .childOption(ChannelOption.SO_KEEPALIVE, true)
+                    //指的是SocketChannel
+                    .childOption(NioChannelOption.SO_KEEPALIVE, Boolean.TRUE)
+                    //默認不使用堆外内存
+                    .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+                    //false 不使用堆外内存
+                    .childOption(ChannelOption.ALLOCATOR, new UnpooledByteBufAllocator(false))
+                    //   .handler(new LoggingHandler(LogLevel.INFO))
+                    .childHandler(new ChannelInitializer&lt;SocketChannel&gt;() {
+                        @Override
+                        public void initChannel(SocketChannel ch) throws Exception {
+                            ChannelPipeline p = ch.pipeline();
+                            //正常情况
+                          /*
+                            p.addLast("SampleInBoundHandlerA", new SampleInBoundHandler("SampleInBoundHandlerA", false));
+                            p.addLast("SampleInBoundHandlerB", new SampleInBoundHandler("SampleInBoundHandlerB", false));
+                            p.addLast("SampleInBoundHandlerC", new SampleInBoundHandler("SampleInBoundHandlerC", true));
+                            */
+
+                            p.addLast("SampleInBoundHandlerA", new SampleExceptionInBoundHandler("SampleInBoundHandlerA", false));
+                            p.addLast("SampleInBoundHandlerB", new SampleExceptionInBoundHandler("SampleInBoundHandlerB", false));
+                            p.addLast("SampleInBoundHandlerC", new SampleExceptionInBoundHandler("SampleInBoundHandlerC", true));
+
+                            //添加异常处理器
+                            p.addLast(new ExceptionHandler());
+
+                            p.addLast("SampleOutBoundHandlerA", new SampleOutBoundHandler("SampleOutBoundHandlerA"));
+                            p.addLast("SampleOutBoundHandlerB", new SampleOutBoundHandler("SampleOutBoundHandlerB"));
+                            p.addLast("SampleOutBoundHandlerC", new SampleOutBoundHandler("SampleOutBoundHandlerC"));
+                        }
+                    });
+
+            ChannelFuture f = b.bind(8090).sync();
+            f.channel().closeFuture().sync();
+        } finally {
+            workerGroup.shutdownGracefully();
+        }
+    }
+}</code></pre> 
+ <pre class="has"><code>//进站出站异常处理器
+public class ExceptionHandler extends ChannelDuplexHandler {
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        if (cause instanceof RuntimeException) {
+            System.out.println("Handle Business Exception Success.");
+        }
+    }
+}</code></pre> 
+ <p>``` 加入统一的异常处理器后，可以看到异常已经被优雅地拦截并处理掉了。这也是 Netty 推荐的最佳异常处理实践。</p> 
+ <p><img src="https://images2.imgbox.com/77/2a/jwIZIF6a_o.png" alt="image (5).png"></p> 
+ <h3>总结</h3> 
+ <p>本节课我们深入分析了 Pipeline 的设计原理与事件传播机制。</p> 
+ <p>那么前面的几个问题你是否已经都找到答案,来做个简单的总结：</p> 
+ <ul>
+<li>ChannelPipeline 是双向链表结构，包含 ChannelInboundHandler 和 ChannelOutboundHandler 两种处理器。</li>
+<li>ChannelHandlerContext 是对 ChannelHandler 的封装，每个 ChannelHandler 都对应一个 ChannelHandlerContext，实际上 ChannelPipeline 维护的是与 ChannelHandlerContext 的关系。</li>
+<li>Inbound 事件和 Outbound 事件的传播方向相反，Inbound 事件的传播方向为 Head -&gt; Tail，而 Outbound 事件传播方向是 Tail -&gt; Head。</li>
+<li>异常事件的处理顺序与 ChannelHandler 的添加顺序相同，会依次向后传播，与 Inbound 事件和 Outbound 事件无关。</li>
+</ul> 
+</div>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

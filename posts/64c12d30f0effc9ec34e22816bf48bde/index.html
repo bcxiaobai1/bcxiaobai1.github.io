@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Spring事务捕获异常后依旧回滚 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Spring事务捕获异常后依旧回滚</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p></p> 
+<p style="text-align:center"><img alt="Spring事务捕获异常后依旧回滚" src="https://images2.imgbox.com/52/ff/vfqUK6Vu_o.png"></p> 
+<h2>前沿</h2> 
+<p>一段生产事故发人深省，在Spring的声明式事务中手动捕获异常，居然判定回滚了，这是什么操作？话不多说直接上代码</p> 
+<pre><code>@Service
+public class A {
+
+    @Autowired
+    private B b;
+
+    @Autowired
+    private C c;
+
+    @Transactional(propagation = Propagation.REQUIRED, isolation = Isolation.DEFAULT)
+    public void operate() {
+        try {
+            b.insertB();
+            c.insertC();
+        }catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+@Service
+public class B {
+
+    @Autowired
+    private BM bm;
+
+    @Transactional(propagation = Propagation.REQUIRED)
+    public int insertB() {
+        return bm.insert("B");
+    }
+}
+
+@Service
+public class C {
+
+    @Autowired
+    private CM cm;
+
+    @Transactional(propagation = Propagation.REQUIRED)
+    public int insertC() {
+        return cm.insert("C");
+    }
+}
+复制代码</code></pre> 
+<h2>问题阐述</h2> 
+<p>好了大家都看到上面这段代码了，在正常的情况的我们会往B表和C表中各插入一条数据，那么当代码出现异常时又会怎么样呢？</p> 
+<p>我们现在假设B插入数据成功，但是C插入数据失败了，此时异常会上抛到A，被A中<code>operate</code>方法的try - cache所捕获，正常来说此时数据库中B能插入一条记录，而C表插入失败，这是我们期望的情况，但事实却不是，实际情况是B表没有插入数据，C表也没有插入数据，也就是说整个操作被Spring给回滚了</p> 
+<blockquote> 
+ <p>注意点</p> 
+ <p>如果代码稍稍变动一下，将try - cache放在<code>insertC</code>的代码块中，在同样的场景下，B中会成功插入一条记录</p> 
+</blockquote> 
+<h2>知识点前置条件</h2> 
+<p>了解Spring的传播机制的可以直接跳过</p> 
+<blockquote> 
+ <p>我们先要搞清楚Spring中的<code>REQUIRED</code>的作用</p> 
+ <p>REQUIRED：如果当前没有事务就创建一个新的事务，如果当前已经存在事务就加入到当前事务</p> 
+ <p>也就是说当我们的传播机制同时为<code>REQUIRED</code>时，A、B、C三者的事务是共用一个的，只有当A的流程全部走完时才会做一次commit或者rollback操作，不会在执行B或者C的过程中进行commit和rollback</p> 
+</blockquote> 
+<h2>问题追踪</h2> 
+<p>好，有了一定的知识储备，我们一起来看源码</p> 
+<p>我们首先找到Spring事务的代理入口<code>TransactionInterceptor</code>, 当我们通过调用A类中的<code>operate</code>方法时会调用<code>TransactionInterceptor</code>的<code>invoke</code>方法，这是整个事务的入口，我们直接看重点<code>invoke</code>中的<code>invokeWithinTransaction</code>方法</p> 
+<pre><code>//获取事务属性类 AnnotationTransactionAttributeSource
+TransactionAttributeSource tas = getTransactionAttributeSource();
+//获取事务属性
+final TransactionAttribute txAttr = (tas != null ? tas.getTransactionAttribute(method, targetClass) : null);
+//获取事务管理器
+final TransactionManager tm = determineTransactionManager(txAttr);
+
+PlatformTransactionManager ptm = asPlatformTransactionManager(tm);
+//获取joinpoint
+final String joinpointIdentification = methodIdentification(method, targetClass, txAttr);
+//注解事务会走这里
+if (txAttr == null || !(ptm instanceof CallbackPreferringPlatformTransactionManager)) {
+	// Standard transaction demarcation with getTransaction and commit/rollback calls.
+	//开启事务
+	TransactionInfo txInfo = createTransactionIfNecessary(ptm, txAttr, joinpointIdentification);
+
+	Object retVal;
+	try {
+		// This is an around advice: Invoke the next interceptor in the chain.
+		// This will normally result in a target object being invoked.
+		retVal = invocation.proceedWithInvocation();
+	} catch (Throwable ex) {
+		// target invocation exception
+		//事务回滚
+		completeTransactionAfterThrowing(txInfo, ex);
+		throw ex;
+	} finally {
+		cleanupTransactionInfo(txInfo);
+	}
+
+	if (retVal != null &amp;&amp; vavrPresent &amp;&amp; VavrDelegate.isVavrTry(retVal)) {
+		// Set rollback-only in case of Vavr failure matching our rollback rules...
+		TransactionStatus status = txInfo.getTransactionStatus();
+		if (status != null &amp;&amp; txAttr != null) {
+			retVal = VavrDelegate.evaluateTryFailure(retVal, txAttr, status);
+		}
+	}
+
+	//事务提交
+	commitTransactionAfterReturning(txInfo);
+	return retVal;
+}
+复制代码</code></pre> 
+<p>不重要的代码我已经省略了，好我们来看这个流程，上面这段代码很明显反应出了，当我们程序执行过程中抛出了异常时会调用到<code>completeTransactionAfterThrowing</code>的回滚操作，如果没有发生异常最终会调用事务提交<code>commitTransactionAfterReturning</code>， 我们来分析一下</p> 
+<p style="text-align:center"><img alt="img" src="https://images2.imgbox.com/22/f2/Ul4z0U0U_o.png"></p> 
+<p>正常情况是C发生异常，并且执行到了<code>completeTransactionAfterThrowing</code>事务回滚，但是因为不是新创建的事务，而是加入的事务所以并不会触发回滚操作，而在A中捕获了该异常，并且最终走到<code>commitTransactionAfterReturning</code>事务提交，事实是这样的吗？</p> 
+<p>事实上就是这样的，那就奇怪了，我明明提交了，怎么反而回滚了，我们继续往下看</p> 
+<pre><code>public final TransactionStatus getTransaction(@Nullable TransactionDefinition definition) throws TransactionException {
+	// Use defaults if no transaction definition given.
+	TransactionDefinition def = (definition != null ? definition : TransactionDefinition.withDefaults());
+
+	//重点看.. DataSourceTransactionObject拿到对象
+	Object transaction = doGetTransaction();
+	boolean debugEnabled = logger.isDebugEnabled();
+
+	//第一次进来connectionHolder为空的, 所以不存在事务
+	if (isExistingTransaction(transaction)) {
+		// Existing transaction found -&gt; check propagation behavior to find out how to behave.
+		//如果不是第一次进来, 则会走这个逻辑
+		return handleExistingTransaction(def, transaction, debugEnabled);
+	}
+
+	// Check definition settings for new transaction.
+	if (def.getTimeout() &lt; TransactionDefinition.TIMEOUT_DEFAULT) {
+		throw new InvalidTimeoutException("Invalid transaction timeout", def.getTimeout());
+	}
+
+	// No existing transaction found -&gt; check propagation behavior to find out how to proceed.
+	if (def.getPropagationBehavior() == TransactionDefinition.PROPAGATION_MANDATORY) {
+		throw new IllegalTransactionStateException(
+				"No existing transaction found for transaction marked with propagation 'mandatory'");
+	}
+	//第一次进来大部分会走这里（传播属性是 Required ｜ Requested New ｜ Nested）
+	else if (def.getPropagationBehavior() == TransactionDefinition.PROPAGATION_REQUIRED ||
+			def.getPropagationBehavior() == TransactionDefinition.PROPAGATION_REQUIRES_NEW ||
+			def.getPropagationBehavior() == TransactionDefinition.PROPAGATION_NESTED) {
+		//先挂起
+		SuspendedResourcesHolder suspendedResources = suspend(null);
+		if (debugEnabled) {
+			logger.debug("Creating new transaction with name [" + def.getName() + "]: " + def);
+		}
+		try {
+			//开启事务
+			return startTransaction(def, transaction, debugEnabled, suspendedResources);
+		} catch (RuntimeException | Error ex) {
+			resume(null, suspendedResources);
+			throw ex;
+		}
+	} else {
+		// Create "empty" transaction: no actual transaction, but potentially synchronization.
+		if (def.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT &amp;&amp; logger.isWarnEnabled()) {
+			logger.warn("Custom isolation level specified but no actual transaction initiated; " +
+					"isolation level will effectively be ignored: " + def);
+		}
+		boolean newSynchronization = (getTransactionSynchronization() == SYNCHRONIZATION_ALWAYS);
+		return prepareTransactionStatus(def, null, true, newSynchronization, debugEnabled, null);
+	}
+}
+复制代码</code></pre> 
+<p>这段代码是开启事务的代码，我们来看，当我们A第一次走进来的时候，此时是没有事务的，所以<code>isExistingTransaction</code>方法不成立，往下走，因为我们的传播机制是REQUIRED，所以我们会走到<code>startTransaction</code>方法中</p> 
+<pre><code>private TransactionStatus startTransaction(TransactionDefinition definition, Object transaction, boolean debugEnabled, @Nullable SuspendedResourcesHolder suspendedResources) {
+	boolean newSynchronization = (getTransactionSynchronization() != SYNCHRONIZATION_NEVER);
+	//创建一个新的事务状态, 注意这里的newTransaction 属性为true
+	DefaultTransactionStatus status = newTransactionStatus(
+			definition, transaction, true, newSynchronization, debugEnabled, suspendedResources);
+	//开启事务
+	doBegin(transaction, definition);
+	//开启事务后, 改变事务状态
+	prepareSynchronization(status, definition);
+	return status;
+}
+复制代码</code></pre> 
+<p>好这里我们只需要关注一个点那就是<code>newTransactionStatus</code>的第三个参数<code>newTransaction</code>，只有当我们新创建一个事务的时候才会为<code>true</code>，<strong>这个属性很重要</strong>，我们后续还会用到它</p> 
+<p>好了，到这里第一次的事务开启就已经完成了，然后我们会调用业务逻辑，当调用insertB时，又会走到<code>getTransaction</code>，我们继续来看它，此时<code>isExistingTransaction</code>就可以拿到值了，因为A已经帮我们创建好了事务，此时会调用到<code>handleExistingTransaction</code>方法</p> 
+<pre><code>//如果第二次进来还是PROPAFGATION_REQUIRED， 走这里, newTransation为false
+return prepareTransactionStatus(definition, transaction, false, newSynchronization, debugEnabled, null);
+复制代码</code></pre> 
+<p>针对REQUIRED有用的代码就这一句，其他全部不用看，同样的我们看到第三个参数newTransaction，这里是false了，说明是加入了之前的事务，而不是自己新创建的，然后执行业务代码，最后走到commit，我们来看看commit中做了什么</p> 
+<pre><code>//如果有回滚点
+if (status.hasSavepoint()) {
+	if (status.isDebug()) {
+		logger.debug("Releasing transaction savepoint");
+	}
+	unexpectedRollback = status.isGlobalRollbackOnly();
+	status.releaseHeldSavepoint();
+}
+//如果是新事务, 则提交事务
+else if (status.isNewTransaction()) {
+	if (status.isDebug()) {
+		logger.debug("Initiating transaction commit");
+	}
+	unexpectedRollback = status.isGlobalRollbackOnly();
+	doCommit(status);
+}
+else if (isFailEarlyOnGlobalRollbackOnly()) {
+	unexpectedRollback = status.isGlobalRollbackOnly();
+}
+复制代码</code></pre> 
+<p>它什么事情都没有做，为什么？因为我们的<code>newTransaction</code>不为true，所以当我们的代码在<code>operate</code>方法全部执行完以后才会走到这里</p> 
+<p>好接下来我们来看<code>insertC</code>，前面的流程都一模一样，我们直接看到回滚代码</p> 
+<pre><code>private void processRollback(DefaultTransactionStatus status, boolean unexpected) {
+	try {
+		boolean unexpectedRollback = unexpected;
+
+		try {
+			triggerBeforeCompletion(status);
+
+			if (status.hasSavepoint()) {
+				if (status.isDebug()) {
+					logger.debug("Rolling back transaction to savepoint");
+				}
+				status.rollbackToHeldSavepoint();
+			} else if (status.isNewTransaction()) {
+        if (status.isDebug()) {
+					logger.debug("Initiating transaction rollback");
+				}
+				doRollback(status);
+			} else {
+				// Participating in larger transaction
+				if (status.hasTransaction()) {
+					if (status.isLocalRollbackOnly() || isGlobalRollbackOnParticipationFailure()) {
+						if (status.isDebug()) {
+							logger.debug("Participating transaction failed - marking existing transaction as rollback-only");
+						}
+						doSetRollbackOnly(status);
+					} else {
+						if (status.isDebug()) {
+							logger.debug("Participating transaction failed - letting transaction originator decide on rollback");
+						}
+					}
+				} else {
+					logger.debug("Should roll back transaction but cannot - no transaction available");
+				}
+				// Unexpected rollback only matters here if we're asked to fail early
+				if (!isFailEarlyOnGlobalRollbackOnly()) {
+					unexpectedRollback = false;
+				}
+			}
+		} catch (RuntimeException | Error ex) {
+			triggerAfterCompletion(status, TransactionSynchronization.STATUS_UNKNOWN);
+			throw ex;
+		}
+
+		triggerAfterCompletion(status, TransactionSynchronization.STATUS_ROLLED_BACK);
+
+		// Raise UnexpectedRollbackException if we had a global rollback-only marker
+		if (unexpectedRollback) {
+			throw new UnexpectedRollbackException(
+					"Transaction rolled back because it has been marked as rollback-only");
+		}
+	} finally {
+		cleanupAfterCompletion(status);
+	}
+}
+复制代码</code></pre> 
+<p>我们的<code>insertC</code>方法同样它的newTransaction不是true，所以最终会走到<code>doSetRollbackOnly</code>，这个方法<strong>重中之重</strong>，最后会调用这样一段代码</p> 
+<pre><code>public void setRollbackOnly() {
+	this.rollbackOnly = true;
+}
+复制代码</code></pre> 
+<p>然后我们就要执行到我们的关键代码A中的<code>operate</code>的提交代码了</p> 
+<pre><code>public final void commit(TransactionStatus status) throws TransactionException {
+	if (status.isCompleted()) {
+		throw new IllegalTransactionStateException("Transaction is already completed - do not call commit or rollback more than once per transaction");
+	}
+
+	DefaultTransactionStatus defStatus = (DefaultTransactionStatus) status;
+	if (defStatus.isLocalRollbackOnly()) {
+		if (defStatus.isDebug()) {
+			logger.debug("Transactional code has requested rollback");
+		}
+		processRollback(defStatus, false);
+		return;
+	}
+
+	if (!shouldCommitOnGlobalRollbackOnly() &amp;&amp; defStatus.isGlobalRollbackOnly()) {
+		if (defStatus.isDebug()) {
+			logger.debug("Global transaction is marked as rollback-only but transactional code requested commit");
+		}
+		processRollback(defStatus, true);
+		return;
+	}
+
+	//执行事务提交
+	processCommit(defStatus);
+}
+复制代码</code></pre> 
+<p>好了，看到这大家都明白了吧，在commit中，Spring会去判断<code>defStatus.isGlobalRollbackOnly</code>有没有抛出过异常被Spring所拦截，如果有，那么就不会执行commit操作，转而执行<code>processRollback</code>回滚操作</p> 
+<h2>总结</h2> 
+<blockquote> 
+ <p>在Spring的REQUIRED中，只要异常被Spring捕获到过，那么Spring最终就会回滚整个事务，即使自己在业务中已经捕获</p> 
+ <p>所以我们回到最初的代码，如果我们希望Spring不进行回滚，那么我们只用将try-cache方法insertC方法中就可以，因为此时抛出的异常并不会被Spring所拦截到</p> 
+</blockquote>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

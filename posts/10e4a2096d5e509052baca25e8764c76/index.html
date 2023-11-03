@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>手把手教你玩 MySQL 删库不跑路，直接把 MySQL 的 binlog 玩溜 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">手把手教你玩 MySQL 删库不跑路，直接把 MySQL 的 binlog 玩溜</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p>我们常常听人说，只要你愿意，MySQL 可以恢复至半个月甚至一个月以内的任何一个状态。网上也有很多删库跑路的段子。。。</p> 
+<p>那么今天松哥想和大家来聊一聊 MySQL 中的 binlog，来手把手教大家如何利用 binlog 来恢复 MySQL 中的数据，这样，以后要是不小心删库了，那也不用跑路了。</p> 
+<p>MySQL 中的日志比较重要的有 binlog（归档日志）、redo log（重做日志）以及 undo log，那么跟我们本文相关的主要是 binlog，另外两个日志松哥将来有空了再和大家详细介绍。</p> 
+<h2>
+<a id="1_binlog_6"></a>1. binlog</h2> 
+<p>binlog 我们中文一般称作归档日志，如果大家看过松哥之前发的 MySQL 主从搭建，应该对这个日志有印象，当我们搭建 MySQL 主从的时候就离不开 binlog（传送门：<a href="https://mp.weixin.qq.com/s/y8PR1emyBjvk124b5ByjXg">MySQL8 主从复制踩坑指南</a>）。</p> 
+<p>binlog 是 MySQL Server 层的日志，而不是存储引擎自带的日志，它记录了所有的 DDL 和 DML(不包含数据查询语句)语句，而且是以事件形式记录，还包含语句所执行的消耗的时间等，需要注意的是：</p> 
+<ul>
+<li>binlog 是一种逻辑日志，他里边所记录的是一条 SQL 语句的原始逻辑，例如给某一个字段 +1，注意这个区别于 redo log 的物理日志（在某个数据页上做了什么修改）。</li>
+<li>binlog 文件写满后，会自动切换到下一个日志文件继续写，而不会覆盖以前的日志，这个也区别于 redo log，redo log 是循环写入的，即后面写入的可能会覆盖前面写入的。</li>
+<li>一般来说，我们在配置 binlog 的时候，可以指定 binlog 文件的有效期，这样在到期后，日志文件会自动删除，这样避免占用较多存储空间。</li>
+</ul> 
+<p>根据 MySQL 官方文档的介绍，开启 binlog 之后，大概会有 1% 的性能损耗，不过这还是可以接受的，一般来说，binlog 有两个重要的使用场景：</p> 
+<ul>
+<li>MySQL 主从复制时：在主机上开启 binlog，主机将 binlog 同步给从机，从机通过 binlog 来同步数据，进而实现主机和从机的数据同步。</li>
+<li>MySQL 数据恢复，通过使用 mysqlbinlog 工具再结合 binlog 文件，可以将数据恢复到过去的某一时刻。</li>
+</ul> 
+<h2>
+<a id="2__binlog_21"></a>2. 开启 binlog</h2> 
+<p>为了演示方便，松哥这里在 Docker 中安装了 MySQL，我们以此为例来开始今天的演示。如果小伙伴们还不懂 docker 的使用，可以在公众号后台回复 docker，有松哥写的教程。</p> 
+<p>首先我们在 docker 中安装好 MySQL，然后进入到容器中，通过如下命令可以查看 binlog 是否开启：</p> 
+<p><img src="https://images2.imgbox.com/3e/e9/cd1tUeEk_o.png" alt=""></p> 
+<p>这个 OFF 就表示 binlog 是一个关闭状态，没有开启，接下来我们来开启 binlog。</p> 
+<p>开启 binlog 主要是修改 MySQL 的配置文件 mysqld.cnf，该文件在容器的 <code>/etc/mysql/mysql.conf.d</code> 目录下。</p> 
+<p><img src="https://images2.imgbox.com/24/d3/FdiScEB2_o.png" alt=""></p> 
+<p>针对该配置文件，我们做如下修改：</p> 
+<pre><code class="prism language-cnf"># 这个参数表示启用 binlog 功能，并指定 binlog 的存储目录
+log-bin=javaboy_logbin
+
+# 设置一个 binlog 文件的最大字节
+# 设置最大 100MB
+max_binlog_size=104857600
+
+# 设置了 binlog 文件的有效期（单位：天）
+expire_logs_days = 7
+
+# binlog 日志只记录指定库的更新（配置主从复制的时候会用到）
+#binlog-do-db=javaboy_db
+
+# binlog 日志不记录指定库的更新（配置主从复制的时候会用到）
+#binlog-ignore-db=javaboy_no_db
+
+# 写缓存多少次，刷一次磁盘，默认 0 表示这个操作由操作系统根据自身负载自行决定多久写一次磁盘
+# 1 表示每一条事务提交都会立即写磁盘，n 则表示 n 个事务提交才会写磁盘
+sync_binlog=0
+
+# 为当前服务取一个唯一的 id（MySQL5.7 之后需要配置）
+server-id=1
+</code></pre> 
+<p>各项配置的含义松哥已经在注视中说明了。截图如下：</p> 
+<p><img src="https://images2.imgbox.com/a2/6c/cVc4FpUJ_o.png" alt=""></p> 
+<p>配置完成后，执行如下命令重启 mysql 容器（mysql1 是我这里容器的名字）：</p> 
+<pre><code>docker restart mysql1
+</code></pre> 
+<p>重启之后，再次执行 <code>show variables like 'log_bin%';</code> 即可看到 binlog 已经开启了。</p> 
+<p><img src="https://images2.imgbox.com/9a/4e/50suXfif_o.png" alt=""></p> 
+<p>这里除了 log_bin 变量外，还有两个变量名也值得我们关注：</p> 
+<ul>
+<li>log_bin_basename：这个是将来产生的 binlog 日志文件的名称前缀，换句话说，根据大家目前所看到的配置，将来产生的 binlog 日志文件名为 <code>javaboy_logbin.xxx</code>，这个文件中将会用来记录所有的 DDL 和 DML 语句事件。</li>
+<li>log_bin_index：这个是 binlog 的索引文件，保存了所有 binlog 的目录，因为 binlog 可能会有多个。我们可以来查看一下现在的 <code>javaboy_logbin.index</code> 文件：</li>
+</ul> 
+<p><img src="https://images2.imgbox.com/f7/66/9pj6BR4G_o.png" alt=""></p> 
+<p>可以看到，目前只有一个 logbin 文件。</p> 
+<h2>
+<a id="3__binlog__85"></a>3. 常见 binlog 操作</h2> 
+<p>接下来我们再来介绍几个常见的 binlog 操作命令。</p> 
+<ol><li>查看所有 binlog 日志</li></ol> 
+<p>通过如下方式我们可以查看 binlog 日志列表：</p> 
+<pre><code class="prism language-sql"><span class="token keyword">show</span> master logs<span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/0d/c0/yhHAEL5y_o.png" alt=""></p> 
+<p>可以看到，我这里目前只有一个日志文件，文件名为 <code>javaboy_logbin.000001</code>，File_size 表示这个文件占用的字节大小是 154。</p> 
+<ol start="2"><li>查看 master 状态</li></ol> 
+<p>这个命令我们在搭建 MySQL 主从的时候经常会用到，如下：</p> 
+<p><img src="https://images2.imgbox.com/77/1c/nXrvhHDc_o.png" alt=""></p> 
+<p>这个时候可以看到最新的 binlog 日志文件名称以及最后一个操作事件的 Position 值（这个值有啥用，我们后面会给大家详细介绍）。</p> 
+<ol start="3"><li>刷新 binlog</li></ol> 
+<p>正常来说，一个 binlog 写满之后，会自动切换到下一个 binlog 开始写，不过我们也可以执行一个 <code>flush logs</code> 命令来手动刷新 binlog，手动刷新 binlog 之后，就会产生一个新的 binlog 日志文件，接下来所有的 binlog 日志都将记录到新的文件中。如下：</p> 
+<p><img src="https://images2.imgbox.com/e9/a6/ZbH3otUC_o.png" alt=""></p> 
+<p>由上图可以看到，我们刷新日志之后，再通过 <code>show master logs</code> 去查看日志，发现日志文件已经多了一个新产生的了，然后再通过 <code>show master status</code> 去查看最新的日志文件信息，发现也已经变为 <code>javaboy_logbin.000002</code>。</p> 
+<ol start="4"><li>重置 binlog</li></ol> 
+<p><code>reset master</code> 可以重置 binlog 日志文件，让日志重新从 000001 开始记录，不过如果当前主机有一个或者多个从机在运行，那么该命令就运行不了（因为从机是通过 binlog 来实现数据库同步的，主机把 binlog 清空了，从机会报找不到 binlog 的错误）。</p> 
+<p><img src="https://images2.imgbox.com/5f/c2/uDh1yaBa_o.png" alt=""></p> 
+<ol start="5"><li>查看 binlog</li></ol> 
+<p>由于 binlog 是二进制日志文件，所以要是直接打开，那肯定是看不了的：</p> 
+<p><img src="https://images2.imgbox.com/8a/5b/jPLNwmZy_o.png" alt=""></p> 
+<p>没有看到任何有用的信息。</p> 
+<p>为了查看 binlog，MySQL 为我们提供了两个官方工具，我们一个一个来看，首先是 <code>mysqlbinlog</code> 命令，如下：</p> 
+<p><img src="https://images2.imgbox.com/73/d8/fYUjiZ4z_o.png" alt=""></p> 
+<p>虽然看起来乱糟糟的，不过仔细看着其实都有迹可循。因为我这里是一个新安装的数据库，里边只是创建了一个名为 javaboy 的库，然后创建了一个名为 user 的表加了两条数据，其他什么事情都没做，所以创建库的脚本我们其实能够从纷杂的文件中找到。</p> 
+<p>产生的日志文件中有一个 end_log_pos 是日志文件的 pos 点，这个将来在数据恢复的时候有用。</p> 
+<p>不过这种查看方式不够人性化，我们说 binlog 是按照事件来记录日志的，所以如果我们能够按照事件的方式查看日志，就会好很多，我们再来看看如下一个命令：</p> 
+<pre><code class="prism language-sql"><span class="token keyword">show</span> binlog events <span class="token punctuation">[</span><span class="token operator">IN</span> <span class="token string">'log_name'</span><span class="token punctuation">]</span> <span class="token punctuation">[</span><span class="token keyword">FROM</span> pos<span class="token punctuation">]</span> <span class="token punctuation">[</span><span class="token keyword">LIMIT</span> <span class="token punctuation">[</span><span class="token keyword">offset</span><span class="token punctuation">,</span><span class="token punctuation">]</span> row_count<span class="token punctuation">]</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>这个表示以事件的方式来查看 binlog，这里涉及到几个参数：</p> 
+<ul>
+<li>log_name：可以指定要查看的 binlog 日志文件名，如果不指定的话，表示查看最早的 binlog 文件。</li>
+<li>pos：从哪个 pos 点开始查看，凡是 binlog 记录下来的操作都有一个 pos 点，这个其实就是相当于我们可以指定从哪个操作开始查看日志，如果不指定的话，就是从该 binlog 的开头开始查看。</li>
+<li>offset：这是是偏移量，不指定默认就是 0。</li>
+<li>row_count：查看多少行记录，不指定就是查看所有。</li>
+</ul> 
+<p>我们来看一个简单的例子：</p> 
+<pre><code class="prism language-sql"><span class="token keyword">show</span> binlog events <span class="token operator">in</span> <span class="token string">'javaboy_logbin.000001'</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/f7/2e/IycpA5Vg_o.png" alt=""></p> 
+<p>这下就清晰多了，我们可以看到之前的所有操作，例如：</p> 
+<ul>
+<li>在 Pos 219-322 之间创建了一个库。</li>
+<li>在 Pos 387-537 之间创建了一张表。</li>
+<li>在 Pos 677-780 之间添加了一条记录。</li>
+<li>…</li>
+</ul> 
+<h2>
+<a id="4__167"></a>4. 数据恢复实战</h2> 
+<p>好啦，有了前面的基础知识准备，接下来松哥来给大家手把手演示一个删库/恢复的场景。</p> 
+<p>我先来说说我这个数据库目前的情况。</p> 
+<p>这是一个新安装的数据库，里边我新建了一个数据库名为 javaboy，javaboy 库中新建了一张表名为 user，user 中有两条记录，如下：</p> 
+<p><img src="https://images2.imgbox.com/9a/f0/5ZWuo8KF_o.png" alt=""></p> 
+<p>现在假设我们定期（每周三凌晨三点）对数据库进行备份。</p> 
+<p>现在凌晨三点了，数据库自动备份开始了，我们通过如下命令将数据库备份成 SQL 脚本，如下：</p> 
+<pre><code class="prism language-sql">mysqldump <span class="token operator">-</span>uroot <span class="token operator">-</span>p <span class="token comment">--flush-logs --lock-tables -B javaboy&gt;/root/javaboy.bak.sql</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/f2/0b/HsfM9TwI_o.png" alt=""></p> 
+<p>这里有几个参数跟大家解释下：</p> 
+<ul>
+<li>-u、-p 这两个就不用说了。</li>
+<li>–flush-logs：这个表示在导出之前先刷新 binlog，刷新 binlog 之后将会产生新的 binlog 文件，后续的操作都存在新的 binlog 中。</li>
+<li>–lock-tables：这个表示开始导出前，锁定所有表。需要注意的是当导出多个数据库时，–lock-tables 分别为每个数据库锁定表，因此这个选项不能保证导出文件中的表在数据库之间的逻辑一致性，不同数据库表的导出状态可以完全不同。</li>
+<li>-B：这个表示指定导出的数据库名称，如果使用 <code>--all-databases</code> 或者 <code>-A</code> 代替 <code>-B</code> 表示导出所有的数据库。</li>
+</ul> 
+<p>以上命令执行完成后，会在 /root 目录下生成一个 javaboy.bak.sql 文件，该文件就是备份的 sql 文件了。</p> 
+<p>这是星期三凌晨三点发生的事情。</p> 
+<p>接下来到了星期四早上，来上班了，一顿操作后，往数据库中又添加了两条操作，如下：</p> 
+<p><img src="https://images2.imgbox.com/99/b5/a2LTPYif_o.png" alt=""></p> 
+<p>接下来，小 X 今天跟领导吵架了很不爽，决定删除跑路：</p> 
+<p><img src="https://images2.imgbox.com/52/2d/wGxS2UNo_o.png" alt=""></p> 
+<p>领导发现了大惊，当即要求立马恢复数据。这时候该你表现了。</p> 
+<p>首先，我们有星期三凌晨的备份文件，先用那个文件进行数据恢复：</p> 
+<p><img src="https://images2.imgbox.com/3f/96/83c7i5fv_o.png" alt=""></p> 
+<p>恢复之后，现在到星期三早上凌晨三点的数据有了。</p> 
+<p>从星期三早上凌晨三点到星期四的数据现在没了。</p> 
+<p>这个时候我们就要借助于 binlog 来恢复了。大家还记得，我们星期三凌晨三点执行备份的时候，用了一个参数叫做 <code>--flush-logs</code>，使用了该参数表示从备份那一刻起，新的 binlog 将产生在一个新的日志文件中，对于我们这里来说，新的 binlog 文件当然就是 <code>javaboy_logbin.000002</code> 了，我们去查看一下该文件：</p> 
+<pre><code class="prism language-sql"><span class="token keyword">show</span> binlog events <span class="token operator">in</span> <span class="token string">'javaboy_logbin.000002'</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>我这里生成的该文件比较长，我截取其中一部分：</p> 
+<p><img src="https://images2.imgbox.com/4c/17/luEl3Egy_o.png" alt=""></p> 
+<p>可以看到，在 764-865 这个 Pos 中发生了删库跑路事件，那么我们只需要回放该文件将数据恢复到 764 这个位置即可。</p> 
+<p>由于 <code>javaboy_logbin.000002</code> 文件是在星期三凌晨三点备份之后产生的新文件，因此这个文件从起始到 764 这个 Pos 之间的操作，就是星期三凌晨三点到删库之前的操作了。</p> 
+<p>那么我们来看下通过 binlog 来恢复数据的命令：</p> 
+<pre><code class="prism language-sql">mysqlbinlog <span class="token operator">/</span>var<span class="token operator">/</span>lib<span class="token operator">/</span>mysql<span class="token operator">/</span>javaboy_logbin<span class="token punctuation">.</span><span class="token number">000002</span> <span class="token comment">--stop-position=764 --database=javaboy | mysql -uroot -p</span>
+</code></pre> 
+<p>那么这里涉及到两个参数：</p> 
+<ul>
+<li>–stop-position=764 表示恢复到 764 这个 Pos，不指定的话就把按整个文件恢复了，如果按当前文件恢复的话，由于这个 binlog 文件中有删除数据库的语句，那么就会导致执行完该 binlog 之后，javaboy 库又被删除了。</li>
+<li>–database=javaboy 表示恢复 javaboy 这个库。</li>
+</ul> 
+<p>另外还有一个我们这里没用到的参数叫做 <code>--start-position</code>，这个表示起始的 Pos，不指定的话表示从头开始数据恢复。</p> 
+<p>好啦，弄完之后，再来查看数据库：</p> 
+<p><img src="https://images2.imgbox.com/b0/bd/yd3P3FY9_o.png" alt=""></p> 
+<p>数据恢复啦～</p> 
+<p><strong>注意：所有操作之前，记得该备份就备份（防止你操作错了又回不去），松哥为了省事上面省略了一些备份操作。</strong></p> 
+<h2>
+<a id="5__251"></a>5. 小结</h2> 
+<p>好啦，今天这篇文章主要是和小伙伴们分享了 MySQL 的 binlog 日志，并通过一个小案例来演示如何通过 binlog 实现数据库的删库恢复。好啦，感兴趣的小伙伴可以试试哦（别在生产库上试哦）～</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>RedisSyncer同步引擎的设计与实现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">RedisSyncer同步引擎的设计与实现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p>作者: 贾世闻 展恩强</p> 
+<p>RedisSyncer一款通过replication协议模拟slave来获取源Redis节点数据并写入目标Redis从而实现数据同步的Redis同步中间件。 该项目主要包括以下子项目：</p> 
+<ul>
+<li>redis 同步服务引擎 redissyncer-server</li>
+<li>redissycner 客户端 redissyncer-cli</li>
+<li>redis 数据校验工具 redissycner-compare</li>
+<li>基于docker-compse的一体化部署方案 redissyncer</li>
+</ul> 
+<p>本文主要介绍reidssyncer引擎（既redissyncer-server）的设计与实现，以及引擎运行的机制。</p> 
+<h2>
+<a id="_11"></a>同步流程</h2> 
+<p>原生redis master slave 模式主要分为两个阶段，第一个阶段同步rdb镜像，也就是全量同步部分；全量同步完成后进入命令传播模式，每个执行成功的数据变更操作会同步给slave节点。redissyncer 的模拟了这一机制并将两部分拆解，既可以执行完整同步任务也可以单独执行全量或增量同步。<br> <img src="https://images2.imgbox.com/8b/ce/BnlD2fKI_o.png" alt="请添加图片描述"><br> <img src="https://images2.imgbox.com/1f/58/1Tdicorm_o.png" alt="请添加图片描述"></p> 
+<ul>
+<li>建立socket</li>
+<li>发送auth user password (6.0新增user)</li>
+</ul> 
+<pre><code class="prism language-bash">  	OK 成功
+  	其他 error
+</code></pre> 
+<ul><li>send-&gt;ping</li></ul> 
+<pre><code class="prism language-bash">	返回:
+	ERR invalid password    密码错误
+	NOAUTH Authentication required.没有发送密码
+	operation not permitted 操作没权限
+	PONG  密码成功
+   
+	作用：
+	检测主从节点之间的网络是否可用。
+	检查主从节点当前是否接受处理命令。
+</code></pre> 
+<ul><li>发送从节点端口信息</li></ul> 
+<pre><code class="prism language-bash">	REPLCONF listening-port <span class="token operator">&lt;</span>port<span class="token operator">&gt;</span>
+  
+ 	--<span class="token operator">&gt;</span>OK 成功
+ 	--<span class="token operator">&gt;</span>其他  失败
+</code></pre> 
+<ul><li>发送从节点IP</li></ul> 
+<pre><code class="prism language-bash">	REPLCONF ip-address <span class="token operator">&lt;</span>IP<span class="token operator">&gt;</span>
+  
+	 --<span class="token operator">&gt;</span> OK 成功
+	 --<span class="token operator">&gt;</span> 其他  失败
+</code></pre> 
+<ul><li>发送EOF能力（capability）</li></ul> 
+<pre><code class="prism language-bash">	REPLCONF capa eof
+
+	--<span class="token operator">&gt;</span> OK 成功
+	--<span class="token operator">&gt;</span> 失败
+	作用:
+	是否支持EOF风格的RDB传输，用于无盘复制，就是能够解析出RDB文件的EOF流格式。用于无盘复制的方式中。
+	redis4.0支持两种能力 EOF 和 PSYNC2
+	redis4.0之前版本仅支持EOF能力
+</code></pre> 
+<ul><li>发送PSYNC2能力</li></ul> 
+<pre><code class="prism language-bash">	REPLCONF capa  PSYNC2
+
+	--<span class="token operator">&gt;</span> OK 成功
+ 	--<span class="token operator">&gt;</span> 失败
+	作用: 
+	告诉master支持PSYNC2命令 ,  master 会忽略它不支持的能力.  PSYNC2则表示支持Redis4.0最新的PSYN复制操作。
+</code></pre> 
+<ul><li>发送PSYNC</li></ul> 
+<pre><code class="prism language-css">	<span class="token selector">PSYNC</span> <span class="token punctuation">{<!-- --></span>replid<span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>offset<span class="token punctuation">}</span>
+
+        <span class="token selector">--&gt;  FULLRESYNC</span>  <span class="token punctuation">{<!-- --></span>replid<span class="token punctuation">}</span>  <span class="token punctuation">{<!-- --></span>offset<span class="token punctuation">}</span>   完整同步
+        --&gt;  CONTINUE 部分同步
+        --&gt;  -ERR 主服务器低于2.8<span class="token punctuation">,</span>不支持psync<span class="token punctuation">,</span>从服务器需要发送sync
+        --&gt;  NOMASTERLINK  重试
+        --&gt;  LOADING       重试
+        --&gt;  超过重试机制阈值宕掉任务
+
+      读取PSYNC命令状态，判断是部分同步还是完整同步
+</code></pre> 
+<ul><li>PSYNC —&gt; 启动heartbeat</li></ul> 
+<pre><code class="prism language-bash">	REPLCONF ACK <span class="token operator">&lt;</span>replication_offset<span class="token operator">&gt;</span>
+	心跳检测
+	在命令传播阶段，从服务器默认会以每秒一次的频率
+	发送REPLCONF ACK命令对于主从服务器有三个作用：
+	作用:
+	检测主从服务器的网络连接状态；
+	辅助实现min-slaves选项；
+	检测命令丢失。
+
+	REPLCONF  GETACK 
+	 -<span class="token operator">&gt;</span>REPLCONF ACK <span class="token operator">&lt;</span>replication_offset<span class="token operator">&gt;</span>
+</code></pre> 
+<p>rdb 镜像同步完成后进入命令传播，master 会不断将变化数据推送给slave。</p> 
+<p>为了保证RedisSyncer内部有断点续传、数据补偿、断线重连等机制来保证数据同步过程中稳定性和可用性,具体的机制如下。</p> 
+<p><strong>断点续传机制</strong></p> 
+<p>RedisSyncer的断点续传机制是基于Redis的replid和offset来实现的，RedisSyncer有两个版本的断点续传机制v1和v2。</p> 
+<ul><li>v1版本:</li></ul> 
+<p>v1版本数据写入到目的端redis后，将offset持久化到本地，这样下次重启就从上次的offset拉取。但是由于该方案写目的端的操作和offset持久化不是一个原子的操作。如果中间发生中断会导致数据的不一致。 例如，先写入数据到目的端成功，后持久化offset还没成功就发生了宕机、重启等情况，那么再次断点续传拉取上一次的offset数据最后就不一致了。</p> 
+<p><img src="https://images2.imgbox.com/3a/fb/USE06buw_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>v2版本:</li></ul> 
+<p>在v2版本策略中RedisSyncer会将每一个pipeline批次中不存在事务的的命令通过multi和exec进行包装,并在事务尾部插入offset检查点。 当断点续传时需要从目标Redis的所以db库中查找checkpoint并找到所对应源节点当最大offset，再根据该offset进行断点续传。目前v2版本只支持目标为单机Redis的情况。 在v2版本中：</p> 
+<p><img src="https://images2.imgbox.com/35/58/qonntyUA_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>v2命令事务封装结构</li></ul> 
+<p><img src="https://images2.imgbox.com/54/92/zHu3cU65_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>v2 checkpoint检查点结构：</li></ul> 
+<pre><code class="prism language-bash">	HASH  hset redis-syncer-checkpoint <span class="token punctuation">{<!-- --></span>value<span class="token punctuation">}</span>
+	<span class="token punctuation">{<!-- --></span>value<span class="token punctuation">}</span>:
+    	* <span class="token punctuation">{<!-- --></span>ip<span class="token punctuation">}</span>:<span class="token punctuation">{<!-- --></span>port<span class="token punctuation">}</span>-runid     <span class="token punctuation">{<!-- --></span>replid<span class="token punctuation">}</span>
+    	* <span class="token punctuation">{<!-- --></span>ip<span class="token punctuation">}</span>:<span class="token punctuation">{<!-- --></span>port<span class="token punctuation">}</span>-offset    <span class="token punctuation">{<!-- --></span>offset<span class="token punctuation">}</span>
+    	* pointcheckVersion     <span class="token punctuation">{<!-- --></span>version<span class="token punctuation">}</span>
+</code></pre> 
+<p>在Redis的事务机制中虽然不支持回滚，并且如果事务中间命令执行出错后但是事务还是被执行完成，但是除特殊情况外能够保证一致性。 在v2的机制中，为了防止’写放大’会在目标redis的每一个逻辑库中写入一个checkpoint，因此在执行断点续传操作的时候，同步工具会先扫描目标各个逻辑库中的checkpoint并选出里面最大offset的checkpoint作为断点续传的参数。</p> 
+<p><strong>数据补偿机制</strong></p> 
+<p>在数据同步过程中，存在由于网络稳定性或其他因素导致key写入失败的情况，为此redissyncer实现了一套补偿机制来保证源端与目的端数据的一致性。 数据补偿的前提是命令写入的幂等性，因此在RedisSyncer中会先将INCR、INCRBY、INCRBYFLOAT、APPEND、DECR、DECRBY等部分非幂等命令转换成幂等命令后再写入目标端Redis。 RedisSyncer在目标为单机Redis或者Proxy的时候是通过pipeline机制将数据写入到目标Redis中的，每一个批次的pipeline的提交会返回一个结果列表， 同步工具会验证pipeline中结果的正确性，如果部分命令写入失败，同步工具对该批次与该key相关的命令进行重试。 如果重试超过指定的阀值,将会宕掉任务。对于存在大key的list等非幂等结构，将不会进行数据补偿，强制结束任务待人工处理。</p> 
+<p><strong>断线重连机制</strong></p> 
+<p>由于网络抖动等原因可能会导致同步工具源端与目标端连接在同步过程中断开,因此需要断线重试机制来保证在任务同步的过程中如果出现异常断开的问题。断线重连机制存在于与源Redis节点和RedisSyncer、RedisSyncer与目标Redis节点的连接之间，两者分别有各自的处理机制。</p> 
+<p><img src="https://images2.imgbox.com/da/8b/sf5gg25U_o.png" alt="请添加图片描述"></p> 
+<ul><li>源端重连机制</li></ul> 
+<p>源Redis与RedisSyncer的断线重连机制是通过记录的offset来实现的，当因网络异常等原因断开了连接时，RedisSyncer会重新尝试与源Redis节点建立连接，并通过当前任务记录的runid、offset等信息去拉取断开之前的增量数据，连接重新建立成功后RedisSyncer的同步任务将会无感知继续同步。当断线重连超过指定重试阀值或者因为offset刷过导致没有办法续传数据时，RedisSyncer会宕掉当前当同步任务，等待人工干预。</p> 
+<p><img src="https://images2.imgbox.com/88/72/NqJiWF4L_o.png" alt="请添加图片描述"></p> 
+<ul><li>目标端重连机制</li></ul> 
+<p>RedisSyncer与目标Redis之间的断线重连机制是通过缓存上一批次的pipeline的命令来实现的，当连接断开异常时RedisSyncer进行重重连回放上一批次写入失败的命令。当回放失败或者超过连续重试次数RedisSyncer会宕掉当前当同步任务，等待人工干预。</p> 
+<p><img src="https://images2.imgbox.com/41/59/tSC1i7mc_o.png" alt="请添加图片描述"></p> 
+<h2>
+<a id="_171"></a>命令的链式处理</h2> 
+<p>RedisSyncer中采用链式策略处理同步数据，任何一个策略返回失败，该key都将不会被同步。链式策略流程如图所示</p> 
+<p><img src="https://images2.imgbox.com/e3/da/EpXWtxl3_o.png" alt="请添加图片描述"></p> 
+<p>每一个key在RedisSyncer都会经过一个策略链进行处理，只要有一个策略未通过则这个key将不会同步到目标Redis，比如key过期时间的计算策略如果计算出全量阶段key已过期，则将会自动抛弃该key。</p> 
+<p>策略链中的策略包括：</p> 
+<table>
+<thead><tr>
+<th>类型</th>
+<th>策略描述</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>DataAnalysisStrategy</td>
+<td>命令统计分析</td>
+</tr>
+<tr>
+<td>KeyFilterStrategy</td>
+<td>命令过滤</td>
+</tr>
+<tr>
+<td>DbMappingStrategy</td>
+<td>Db映射</td>
+</tr>
+<tr>
+<td>TimeCalculationStrategy</td>
+<td>过期时间计算</td>
+</tr>
+<tr>
+<td>RdbCommandSendStrategy</td>
+<td>全量数据写入</td>
+</tr>
+<tr>
+<td>AofCommandSendStrategy</td>
+<td>增量数据写入</td>
+</tr>
+<tr>
+<td>…</td>
+<td>…</td>
+</tr>
+</tbody>
+</table>
+<h2>
+<a id="_193"></a>任务管理</h2> 
+<ul><li>任务启动流程</li></ul> 
+<p><img src="https://images2.imgbox.com/d7/38/qnVY7hVd_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>任务停止及清理流程</li></ul> 
+<p>任务主动停止时,RedisSyncer会先停止源Redis端的数据写入然后进入数据保护状态,确保可能还处在RedisSyncer中未写入目标的少部分数据能够完整的写入目标端，并且正确的记录写入的最后一条数据的offset并持久化，保证断点续传时RedisSyncer能够提供正确的offset。</p> 
+<ul><li>任务状态</li></ul> 
+<table>
+<thead><tr>
+<th>TYPE</th>
+<th>code</th>
+<th>description</th>
+<th>status</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>STOP</td>
+<td>0</td>
+<td>任务停止</td>
+<td>已使用</td>
+</tr>
+<tr>
+<td>CREATING</td>
+<td>1</td>
+<td>创建中</td>
+<td>已使用</td>
+</tr>
+<tr>
+<td>CREATED</td>
+<td>2</td>
+<td>创建完成</td>
+<td>已使用</td>
+</tr>
+<tr>
+<td>RUN</td>
+<td>3</td>
+<td>运行状态</td>
+<td>已使用</td>
+</tr>
+<tr>
+<td>BROKEN</td>
+<td>5</td>
+<td>任务异常</td>
+<td>已使用</td>
+</tr>
+<tr>
+<td>RDBRUNING</td>
+<td>6</td>
+<td>全量RDB同步过程中</td>
+<td>已使用</td>
+</tr>
+<tr>
+<td>COMMANDRUNING</td>
+<td>7</td>
+<td>增量同步中</td>
+<td>已使用</td>
+</tr>
+<tr>
+<td>FINISH</td>
+<td>8</td>
+<td>完成状态</td>
+<td>已使用(用于文件导入)</td>
+</tr>
+</tbody>
+</table>
+<ul><li>任务异常处理原则</li></ul> 
+<p>在RedisSycner任务中如果遇到可能会导致数据不一致的错误，RedisSyncer都会宕掉任务，等待人工干预。</p> 
+<p><strong>rdb跨版本同步实现</strong></p> 
+<p>rdb文件存在向前兼容问题，即高版本的rdb文件无法导入低rdb版本的Redis</p> 
+<ul><li>跨版本迁移实现机制</li></ul> 
+<ol>
+<li> <p>对于可能存在大key的结构比如：SET,ZSET,LIST,HASH等结构:</p> </li>
+<li> <p>对于其他命令如：String等结构： 为保证其命令幂等性，命令解析器会根据目标REDIS节点的RDB版本进行序列化(实现DUMP)，传输模块会使用REPLACE反序列化到目标节点。（其中在redis3.0以下版本REPLACE命令不支持[REPLACE]）</p> </li>
+<li> <p>对于对数据成员没有顺序性要求的命令如：SET,ZSET,HASH命令解析器将其解析成一个或多个sadd,zadd,hmset等命令进行处理</p> </li>
+<li> <p>对于对数据成员有顺序性要求的命令如:List等命令，若被命令解析器判断为大key并将其拆分为多个子命令，此时必须保证按顺序发送至目标REDIS节点</p> </li>
+<li> <p>REDIS跨版本间存在的问题： 由于REDIS是向下兼容(低版本无法兼容高版本RDB)，在其RDB文件协议中存在一个vesion版本号标识,REDIS在RDB导入或者全量同步执行rdbLoad时会先检测RDB VERSION是否符合向下兼容，如果不符合则会抛出 Can’t handle RDB format version 错误。</p> </li>
+<li> <p>syncer跨版本实现机制 对于全量同步RDB数据部分syncer将其分命令为两类进行处理</p> </li>
+</ol> 
+<p>RDB文件协议中关于 RDB VERSION部分</p> 
+<pre><code class="prism language-bash">REDIS RDB文件结构开头部分示例
+ ----------------------------<span class="token comment"># RDB is a binary format. There are no new lines or spaces in the file.</span>
+ <span class="token number">52</span> <span class="token number">45</span> <span class="token number">44</span> <span class="token number">49</span> <span class="token number">53</span>              <span class="token comment"># Magic String "REDIS"</span>
+ <span class="token number">30</span> <span class="token number">30</span> <span class="token number">30</span> <span class="token number">37</span>                 <span class="token comment"># 4 digit ASCCII RDB Version Number. In this case, version = "0007" = 7   RDB VERSION字段</span>
+ ----------------------------
+ FE 00                       <span class="token comment"># FE = code that indicates database selector. db number = 00</span>
+</code></pre> 
+<p>关于 RDB VERSION检查部分伪代码</p> 
+<pre><code class="prism language-bash">def rdbLoad<span class="token punctuation">(</span>filename<span class="token punctuation">)</span>:
+    rio <span class="token operator">=</span>  rioInitWithFile<span class="token punctuation">(</span>filename<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment"># 设置标记：</span>
+    <span class="token comment"># a. 服务器状态：rdb_loading = 1</span>
+    <span class="token comment"># b. 载入时间：loading_start_time = now_time</span>
+    <span class="token comment"># c. 载入大小：loading_total_bytes = filename.size</span>
+    startLoading<span class="token punctuation">(</span>rio<span class="token punctuation">)</span>
+    <span class="token comment"># 1.检查该文件是否为RDB文件（即文件开头前5个字符是否为"REDIS"）</span>
+    <span class="token keyword">if</span> <span class="token operator">!</span>checkRDBHeader<span class="token punctuation">(</span>rio<span class="token punctuation">)</span>:
+        redislog<span class="token punctuation">(</span><span class="token string">"error, Wrong signature trying to load DB from file"</span><span class="token punctuation">)</span> 
+        <span class="token builtin class-name">return</span>
+    <span class="token comment"># 2.检查当前RDB文件版本是否兼容（向下兼容）</span>
+    <span class="token keyword">if</span> <span class="token operator">!</span>checkRDBVersion<span class="token punctuation">(</span>rio<span class="token punctuation">)</span>: 
+        redislog<span class="token punctuation">(</span><span class="token string">"error, Can't handle RDB format version"</span><span class="token punctuation">)</span>
+        <span class="token builtin class-name">return</span>
+ <span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span>.
+    //Redis中关于RDB_VERSION检查的代码
+    rdbver <span class="token operator">=</span> atoi<span class="token punctuation">(</span>buf+5<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>rdbver <span class="token operator">&lt;</span> <span class="token number">1</span> <span class="token operator">||</span> rdbver <span class="token operator">&gt;</span> RDB_VERSION<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        rdbCheckError<span class="token punctuation">(</span><span class="token string">"Can't handle RDB format version %d"</span>,rdbver<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        goto err<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>RDB 同步过程中的大 Key 拆分</strong></p> 
+<p>RedisSyncer在全量同步阶段在遇到LIST、SET、ZSET、HASH等结构等时候，当数据大小超过阀值后RedisSyncer会通过迭代器的形式将key拆分成多个子命令写入目标库。防止部分超大key一次性读入内存导致程序产生oom并提高同步的速度。而对于不存在大key的命令同步工具会通过序列化逆序列化的形式写入目标。</p> 
+<h2>
+<a id="_Redis_RDB_280"></a>附录一 Redis RDB协议</h2> 
+<p>redis RDB Dump 文件格式</p> 
+<pre><code class="prism language-bash">----------------------------<span class="token comment"># RDB is a binary format. There are no new lines or spaces in the file.</span>
+<span class="token number">52</span> <span class="token number">45</span> <span class="token number">44</span> <span class="token number">49</span> <span class="token number">53</span>              <span class="token comment"># Magic String "REDIS"</span>
+<span class="token number">30</span> <span class="token number">30</span> <span class="token number">30</span> <span class="token number">37</span>                 <span class="token comment"># 4 digit ASCCII RDB Version Number. In this case, version = "0007" = 7</span>
+----------------------------
+FE 00                       <span class="token comment"># FE = code that indicates database selector. db number = 00</span>
+----------------------------<span class="token comment"># Key-Value pair starts</span>
+FD <span class="token variable">$unsigned</span> int            <span class="token comment"># FD indicates "expiry time in seconds". After that, expiry time is read as a 4 byte unsigned int</span>
+<span class="token variable">$value</span>-type                 <span class="token comment"># 1 byte flag indicating the type of value - set, map, sorted set etc.</span>
+<span class="token variable">$string</span>-encoded-key         <span class="token comment"># The key, encoded as a redis string</span>
+<span class="token variable">$encoded</span>-value              <span class="token comment"># The value. Encoding depends on $value-type</span>
+----------------------------
+FC <span class="token variable">$unsigned</span> long           <span class="token comment"># FC indicates "expiry time in ms". After that, expiry time is read as a 8 byte unsigned long</span>
+<span class="token variable">$value</span>-type                 <span class="token comment"># 1 byte flag indicating the type of value - set, map, sorted set etc.</span>
+<span class="token variable">$string</span>-encoded-key         <span class="token comment"># The key, encoded as a redis string</span>
+<span class="token variable">$encoded</span>-value              <span class="token comment"># The value. Encoding depends on $value-type</span>
+----------------------------
+<span class="token variable">$value</span>-type                 <span class="token comment"># This key value pair doesn't have an expiry. $value_type guaranteed != to FD, FC, FE and FF</span>
+<span class="token variable">$string</span>-encoded-key
+<span class="token variable">$encoded</span>-value
+----------------------------
+FE <span class="token variable">$length</span>-encoding         <span class="token comment"># Previous db ends, next db starts. Database number read using length encoding.</span>
+----------------------------
+<span class="token punctuation">..</span>.                         <span class="token comment"># Key value pairs for this database, additonal database</span>
+
+FF                          <span class="token comment">## End of RDB file indicator</span>
+<span class="token number">8</span> byte checksum             <span class="token comment">## CRC 64 checksum of the entire file.</span>
+
+RDB文件以魔术字符串“REDIS”开头。
+<span class="token number">52</span> <span class="token number">45</span> <span class="token number">44</span> <span class="token number">49</span> <span class="token number">53</span> <span class="token comment"># "REDIS"</span>
+
+RDB 版本号
+接下来的 <span class="token number">4</span> 个字节存储 rdb 格式的版本号。这 <span class="token number">4</span> 个字节被解释为 ascii 字符，然后使用字符串到整数转换转换为整数。
+00 00 00 03 <span class="token comment"># Version = 3</span>
+
+Database Selector
+一个Redis实例可以有多个数据库。
+单个字节0xFE标记数据库选择器的开始。在该字节之后，一个可变长度字段指示数据库编号。请参阅“长度编码”部分以了解如何读取此数据库编号。
+
+键值对
+在数据库选择器之后，该文件包含一系列键值对。
+za
+每个键值对有 <span class="token number">4</span> 个部分 -
+
+<span class="token number">1</span>.密钥到期时间戳。
+<span class="token number">2</span>.指示值类型的一字节标志
+<span class="token number">3</span>.密钥，编码为 Redis 字符串。请参阅“Redis 字符串编码”
+<span class="token number">4</span>.根据值类型编码的值。参见“Redis 值编码”
+</code></pre> 
+<h2>
+<a id="_Redis_RESP_334"></a>附录二 Redis RESP协议</h2> 
+<p>Redis RESP协议</p> 
+<p>RESP 协议是在 Redis 1.2 中引入的，但它成为了 Redis 2.0 中与 Redis 服务器通信的标准方式。是在Redis 客户端中实现的协议。 RESP 实际上是一种序列化协议，它支持以下数据类型：简单字符串、错误、整数、批量字符串和数组。</p> 
+<p>RESP 在 Redis 中用作请求-响应协议的方式如下：</p> 
+<ul>
+<li> <p>客户端将命令作为批量字符串的 RESP 数组发送到 Redis 服务器。</p> </li>
+<li> <p>服务器根据命令实现以其中一种 RESP 类型进行回复。</p> </li>
+</ul> 
+<p>在 RESP 中，某些数据的类型取决于第一个字节：</p> 
+<ul>
+<li> <p>对于简单字符串，回复的第一个字节是“+”</p> </li>
+<li> <p>对于错误，回复的第一个字节是“-”</p> </li>
+<li> <p>对于整数，回复的第一个字节是“：”</p> </li>
+<li> <p>对于批量字符串，回复的第一个字节是“$”</p> </li>
+<li> <p>对于数组，回复的第一个字节是“ *”</p> </li>
+</ul> 
+<p>RESP 能够使用稍后指定的批量字符串或数组的特殊变体来表示 Null 值。在 RESP 中，协议的不同部分总是以“rn”（CRLF）终止。</p> 
+<p><strong>RESP Simple Strings</strong></p> 
+<p>‘+’ 字符开头，后跟不能包含 CR 或 LF 字符（不允许换行）的字符串，以 CRLF 结尾（即“rn”）。如:</p> 
+<pre><code class="prism language-bash"><span class="token string">"+OK<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span>
+</code></pre> 
+<p>RESP Errors</p> 
+<pre><code class="prism language-bash"> <span class="token string">"-Error message<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span>  
+</code></pre> 
+<p>如:</p> 
+<pre><code class="prism language-bash">-ERR unknown <span class="token builtin class-name">command</span> <span class="token string">'foobar'</span>
+-WRONGTYPE Operation against a key holding the wrong kind of value
+</code></pre> 
+<p><strong>RESP Integers</strong></p> 
+<p>Integers只是一个 CRLF 终止的字符串，代表一个整数，以“:”字节为前缀。 例如</p> 
+<pre><code class="prism language-bash"><span class="token string">":0<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span> 
+<span class="token string">":1000<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span>
+</code></pre> 
+<p><strong>Bulk Strings</strong></p> 
+<p>用于表示长度最大为 512 MB 的单个二进制安全字符串。批量字符串按以下方式编码：</p> 
+<ul>
+<li> <p>“$”字节后跟组成字符串的字节数（前缀长度），以 CRLF 结尾。</p> </li>
+<li> <p>实际的字符串数据。</p> </li>
+<li> <p>最后的 CRLF。</p> </li>
+</ul> 
+<p>“foobar”的编码如下：</p> 
+<pre><code class="prism language-bash"><span class="token string">"<span class="token variable">$6</span><span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>foobar<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span>
+</code></pre> 
+<p>当字符串为空</p> 
+<pre><code class="prism language-bash"><span class="token string">"<span class="token variable">$0</span><span class="token entity" title="r">r</span><span class="token entity" title="n">n</span><span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span>
+</code></pre> 
+<p>Bulk Strings还可以用于表示 Null 值的特殊格式来表示值不存在。在这种特殊格式中，长度为 -1，并且没有数据，因此 Null 表示为：</p> 
+<pre><code class="prism language-bash"><span class="token string">"$-1<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span>
+</code></pre> 
+<p><strong>RESP Arrays</strong></p> 
+<p>格式：</p> 
+<ul>
+<li> <p>一个’*'字符作为第一个字节，然后是数组中元素的数量作为十进制数，然后是 CRLF。</p> </li>
+<li> <p>Array 的每个元素的附加 RESP 类型。 空数组表示为：</p> </li>
+</ul> 
+<pre><code class="prism language-bash"><span class="token string">"*0<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span>
+</code></pre> 
+<p>“foo”和“bar”的数组表示为</p> 
+<pre><code class="prism language-bash"><span class="token string">"*2<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span><span class="token variable">$3</span><span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>foo<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span><span class="token variable">$3</span><span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>bar<span class="token entity" title="r">r</span><span class="token entity" title="n">n</span>"</span>
+</code></pre> 
+<p>[“foo”,nil,“bar”] （Null elements in Arrays）</p> 
+<pre><code class="prism language-bash">*3<span class="token punctuation"></span>r<span class="token punctuation"></span>n<span class="token variable">$3</span><span class="token punctuation"></span>r<span class="token punctuation"></span>nfoo<span class="token punctuation"></span>r<span class="token punctuation"></span>n$-1<span class="token punctuation"></span>r<span class="token punctuation"></span>n<span class="token variable">$3</span><span class="token punctuation"></span>r<span class="token punctuation"></span>nbar<span class="token punctuation"></span>r<span class="token punctuation"></span>n
+</code></pre>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

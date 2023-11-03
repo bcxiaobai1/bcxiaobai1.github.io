@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>MySQL MVCC底层原理解析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MySQL MVCC底层原理解析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-dracula">
+                    
+                        
+                    
+                    <h1>
+<a id="1__0"></a>1 事务并发中遇到的问题</h1> 
+<h2>
+<a id="11__1"></a>1.1 脏读</h2> 
+<p>当一个事务读取到了另外一个事务修改但未提交的数据，被称为脏读。<br> <img src="https://images2.imgbox.com/4b/35/7DFSPrQq_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="12__5"></a>1.2 不可重复读</h2> 
+<p>当事务内相同的记录被检索两次，且两次得到的结果不同时，此现象称为不可重复读。</p> 
+<p><img src="https://images2.imgbox.com/25/a8/a5h2Y1m3_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="13__10"></a>1.3 幻读</h2> 
+<p>当一个事务同样的查询条件查询两次（多次），查出的条数不一致称为幻读。<br> <img src="https://images2.imgbox.com/26/02/wM4BCkZm_o.png" alt="在这里插入图片描述"></p> 
+<h1>
+<a id="2__13"></a>2 隔离级别</h1> 
+<p>我们上边介绍了几种并发事务执行过程中可能遇到的一些问题，这些问题也有轻重缓急之分，我们给这些问题按照严重性来排一下序：</p> 
+<p>脏读 &gt; 不可重复读 &gt; 幻读</p> 
+<p>SQL 标准中规定，针对不同的隔离级别，并发事务可以发生不同严重程度的<br> 问题，具体情况如下：</p> 
+<p>READ UNCOMMITTED：未提交读。<br> READ COMMITTED：已提交读。<br> REPEATABLE READ：可重复读。<br> SERIALIZABLE：可串行化</p> 
+<p>SQL 标准中规定，针对不同的隔离级别，并发事务可以发生不同严重程度的问题，具体情况如下：<br> <img src="https://images2.imgbox.com/08/d3/cjIY5zsX_o.png" alt="在这里插入图片描述"><br> READ UNCOMMITTED 隔离级别下，可能发生脏读、不可重复读和幻读问题。<br> READ COMMITTED 隔离级别下，可能发生不可重复读和幻读问题，但是不可以发生脏读问题。<br> REPEATABLE READ 隔离级别下，可能发生幻读问题，但是不可以发生脏读和不可重复读的问题。<br> SERIALIZABLE 隔离级别下，各种问题都不可以发生。</p> 
+<h1>
+<a id="3__34"></a>3 版本链</h1> 
+<p>我们知道，对于使用 InnoDB 存储引擎的表来说，它的聚簇索引记录中都包含两个必要的隐藏列（row_id 并不是必要的，我们创建的表中有主键或者非 NULL的 UNIQUE 键时都不会包含 row_id 列）:</p> 
+<p><strong>trx_id：</strong> 每次一个事务对某条聚簇索引记录进行改动时，都会把该事务的事务 id 赋值给 trx_id 隐藏列。</p> 
+<p><strong>roll_pointer：</strong> 每次对某条聚簇索引记录进行改动时，都会把旧的版本写入到undo 日志中，然后这个隐藏列就相当于一个指针，可以通过它来找到该记录修改前的信息。</p> 
+<p>假设插入该记录的事务 id 为 80的记录，那么此刻该条记录的示意图如下所示：</p> 
+<p><img src="https://images2.imgbox.com/6a/0f/xiZ9cxWA_o.png" alt="在这里插入图片描述"></p> 
+<p>假设之后两个事务 id 分别为 100、200 的事务对这条记录进行 UPDATE 操作，操作流程如下：</p> 
+<p><strong>Trx 100：</strong></p> 
+<pre><code class="prism language-java">UPDATE t_people <span class="token class-name">SET</span> name <span class="token operator">=</span> <span class="token string">'关羽'</span> <span class="token class-name">WHERE</span> number <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+UPDATE t_people <span class="token class-name">SET</span> name <span class="token operator">=</span> <span class="token string">'张飞'</span> <span class="token class-name">WHERE</span> number <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>Trx 200：</strong></p> 
+<pre><code class="prism language-java">UPDATE t_people <span class="token class-name">SET</span> name <span class="token operator">=</span> <span class="token string">'赵云'</span> <span class="token class-name">WHERE</span> number <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+UPDATE t_people <span class="token class-name">SET</span> name <span class="token operator">=</span> <span class="token string">'诸葛亮'</span> <span class="token class-name">WHERE</span> number <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>每次对记录进行改动，都会记录一条 undo 日志，每条 undo 日志也都有一个 roll_pointer 属性（INSERT 操作对应的 undo 日志没有该属性，因为该记录并没有更早的版本），可以将这些 undo 日志都连起来，串成一个链表，所以现在的情况就像下图一样：</p> 
+<p><img src="https://images2.imgbox.com/f5/98/aHc3AmTn_o.png" alt="在这里插入图片描述"><br> 对该记录每次更新后，都会将旧值放到一条 undo 日志中，就算是该记录的一个旧版本，随着更新次数的增多，所有的版本都会被 roll_pointer 属性连接成一个链表，我们把这个链表称之为版本链，版本链的头节点就是当前记录最新的值。另外，每个版本中还包含生成该版本时对应的事务 id。于是可以利用这个记录的版本链来控制并发事务访问相同记录的行为，那么这种机制就被称之为 <strong>多版本并发控制(Mulit-Version Concurrency Control MVCC)</strong>。</p> 
+<h1>
+<a id="4_ReadView_65"></a>4 ReadView</h1> 
+<h2>
+<a id="41_ReadView__67"></a>4.1 ReadView 定义</h2> 
+<p>InnoDB 提出了一个 ReadView 的概念，这个 ReadView 中主要包含 4个比较重要的内容：</p> 
+<p>(1) m_ids：表示在生成 ReadView 时当前系统中 活跃 的读写事务的事务 id 列表。<br> (2) min_trx_id: 表示在生成 ReadView 时当前系统中活跃的读写事务中最小的事务 id，也就是 m_ids 中的最小值。<br> (3) max_trx_id：表示生成 ReadView 时系统中应该分配给下一个事务的 id 值。max_trx_id 并不是 m_ids 中的最大值，事务 id 是递增分配的。比方说现在有 id 为 1，2，3 这三个事务，之后 id 为 3 的事务提交了。那么一个新的读事务在生成 ReadView 时，m_ids 就包括 1 和 2，min_trx_id 的值就是 1，max_trx_id的值就是 4。<br> (4) creator_trx_id：表示生成该 ReadView 的事务的事务 id。</p> 
+<h2>
+<a id="42__74"></a>4.2 访问控制</h2> 
+<p>有了这个 ReadView，这样在访问某条记录时，只需要按照下边的步骤判断记录的某个版本是否可见：</p> 
+<p>(1) 如果被访问版本的 trx_id 属性值与 ReadView 中的 creator_trx_id 值相同，意味着当前事务在访问它自己修改过的记录，所以该版本可以被当前事务访问。<br> (2) 如果被访问版本的 trx_id 属性值小于 ReadView 中的 min_trx_id 值，表明生成该版本的事务在当前事务生成 ReadView 前已经提交，所以该版本可以被当前事务访问。<br> (3) 如果被访问版本的 trx_id 属性值大于或等于 ReadView 中的 max_trx_id值，表明生成该版本的事务在当前事务生成 ReadView 后才开启，所以该版本不可以被当前事务访问。<br> (4) 如果被访问版本的 trx_id 属性值在 ReadView 的 min_trx_id 和 max_trx_id之间(min_trx_id &lt; trx_id &lt; max_trx_id)，那就需要判断一下 trx_id 属性值是不是在m_ids 列表中，如果在，说明创建 ReadView 时生成该版本的事务还是活跃的，该版本不可以被访问；如果不在，说明创建 ReadView 时生成该版本的事务已经被提交，该版本可以被访问。<br> (5) 如果某个版本的数据对当前事务不可见的话，那就顺着版本链找到下一个版本的数据，继续按照上边的步骤判断可见性，依此类推，直到版本链中的最后一个版本。如果最后一个版本也不可见的话，那么就意味着该条记录对该事务完全不可见，查询结果就不包含该记录。</p> 
+<h2>
+<a id="43__83"></a>4.3 再谈隔离</h2> 
+<p>对于使用 READ UNCOMMITTED 隔离级别的事务来说，由于可以读到未提交事务修改过的记录，所以直接读取记录的最新版本就好了。<br> 对于使用 SERIALIZABLE 隔离级别的事务来说，InnoDB 使用加锁的方式来访问记录。</p> 
+<p>在 MySQL 中，READ COMMITTED 和 REPEATABLE READ 隔离级别的的一个非常大的区别就是它们生成 ReadView 的时机不同。</p> 
+<h3>
+<a id="431_READ_COMMITTED_89"></a>4.3.1 READ COMMITTED（读已提交）</h3> 
+<p><strong>读已提交，每次读取数据前都生成一个 ReadView。</strong></p> 
+<p><img src="https://images2.imgbox.com/d7/21/RMknD5Xh_o.png" alt="在这里插入图片描述"><br> 假设现在有一个使用 READ COMMITTED 隔离级别的事务开始执行：</p> 
+<p><strong>详解查询：</strong></p> 
+<pre><code class="prism language-bash"><span class="token comment">#使用 READ COMMITTED 隔离级别的事务</span>
+<span class="token comment">#Transaction 100、200未提交，得到的列 name 的值为 刘备</span>
+SELECT name FROM t_people WHERE number <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>这个 SELECET 的执行过程如下：</p> 
+<p>(1) 在执行 SELECT 语句时会先生成一个 ReadView，ReadView 的 m_ids 列表的内容就是[100, 200]，min_trx_id 为 100，max_trx_id 为 201，creator_trx_id 为 0。</p> 
+<p>(2) 然后从版本链中挑选可见的记录，从图中可以看出，最新版本的列 name 的内容是诸葛亮，该版本的 trx_id 值为 200，在 m_ids 列表内，所以不符合可见性要求。(如果被访问版本的 trx_id 属性值在 ReadView 的 min_trx_id 和 max_trx_id之间,就需要判断一下 trx_id 属性值是不是在m_ids 列表中，如果在，说明创建 ReadView 时生成该版本的事务还是活跃的，该版本不可以被访问；如果不在，说明创建 ReadView 时生成该版本的事务已经被提交，该版本可以被访问 )，根据 roll_pointer 跳到下一个版本。</p> 
+<p>(3) 诸葛亮下一个版本的列name的内容是赵云，该版本的trx_id值也为200，也在m_ids列表内，所以也不符合要求，继续跳到下一个版本。</p> 
+<p>(4) 赵云下一个版本的列name的内容是张飞，该版本的trx_id值也为100，也在m_ids列表内，所以也不符合要求，继续跳到下一个版本。</p> 
+<p>(5) 张飞下一个版本的列name的内容是关羽，该版本的trx_id值也为100，也在m_ids列表内，所以也不符合要求，继续跳到下一个版本。</p> 
+<p>(6) 关羽下一个版本是刘备，该版本的trx_id值为80，小于ReadView 中的 min_trx_id 值，所以这个版本是符合要求的。</p> 
+<p><strong>不可重复读：</strong> 100事务、200事务开启读取到name都为刘备。当100事务提交时，由于是读已提交事务隔离级别，每次读取都会创建ReadView，200事务读取时，创建生成的ReadView m_ids 为 [200]，这时根据读取规则读取到的name就为张飞。</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 使用 READ COMMITTED 隔离级别的事务</span>
+BEGIN<span class="token punctuation">;</span>
+<span class="token comment"># SELECE1：Transaction 100、200 均未提交,得到name值为刘备</span>
+SELECT name  FROM t_people WHERE number <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span> 
+
+<span class="token comment"># SELECE2：Transaction 100 提交，Transaction 200 未提交</span>
+<span class="token comment">#Transaction 200 事务查询，得到name值为张飞，发生不可重复读。</span>
+SELECT name  FROM teacher WHERE number <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span> 
+
+</code></pre> 
+<h3>
+<a id="432_REPEATABLE_READ_129"></a>4.3.2 REPEATABLE READ（可重读）</h3> 
+<p><strong>可重读，在第一次读取数据时生成一个 ReadView。</strong></p> 
+<p><strong>解决不可重复读：</strong> 100事务、200事务开启，创建ReadView，m_ids 为[100,200]，读取到name都为刘备。当100事务提交时，由于是可重读事务隔离级别，只创建一次ReadView，m_ids 仍然是[100,200]，这时根据读取规则读取到的name仍然是刘备。</p> 
+<h1>
+<a id="5__134"></a>5 幻读</h1> 
+<p>当一个事务同样的查询条件查询两次（多次），查出的条数不一致称为幻读。</p> 
+<p>在 REPEATABLE READ 隔离级别下的事务 T1 先根据某个搜索条件读取到多条记录，然后事务 T2 插入一条符合相应搜索条件的记录并提交，然后事务 T1 再根据相同搜索条件执行查询。结果会是什么？按照 ReadView 中的比较规则，不管事务 T2 比事务 T1 是否先开启，事务 T1 都是看不到 T2 的提交的。但是，在 REPEATABLE READ 隔离级别下 InnoDB 中的 MVCC 可以很大程度地避免幻读现象，而不是完全禁止幻读。</p> 
+<pre><code class="prism language-bash"><span class="token comment">#SELECT：快照读。update：当前读。</span>
+REPEATABLE READ 可以解决快照读幻读问题。解决不了当前读幻读的问题。
+</code></pre> 
+<p><strong>案例：</strong></p> 
+<p>1 执行begin，执行select *。<br> <img src="https://images2.imgbox.com/04/ad/RpieAI1g_o.png" alt="在这里插入图片描述"><br> 2 开启另一个窗口 执行insert、select、commit。<br> <img src="https://images2.imgbox.com/02/31/8RgzCWxZ_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/8a/72/t9Z3PRiG_o.png" alt="在这里插入图片描述"></p> 
+<p>3 回到原窗口执行查询</p> 
+<p><img src="https://images2.imgbox.com/21/bd/EWgcmGHp_o.png" alt="在这里插入图片描述"><br> 4 执行 update 、提交<br> <img src="https://images2.imgbox.com/c7/bc/6vx91I7R_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/1f/54/ivorj9qe_o.png" alt="在这里插入图片描述"><br> 5 查找</p> 
+<p><img src="https://images2.imgbox.com/73/4d/l8Sn7ZD1_o.png" alt="在这里插入图片描述"></p> 
+<h1>
+<a id="6__161"></a>6 总结</h1> 
+<p>从上边的描述中我们可以看出来，所谓的 MVCC（Multi-Version ConcurrencyControl ，多版本并发控制）指的就是在使用 READ COMMITTD、REPEATABLE READ这两种隔离级别的事务在执行普通的 SELECT 操作时访问记录的版本链的过程，这样子可以使不同事务的读-写、写-读操作并发执行，从而提升系统性能。</p> 
+<p>READ COMMITTD、REPEATABLE READ 这两个隔离级别的一个很大不同就是,生成 ReadView 的时机不同，READ COMMITTD 在每一次进行普通 SELECT 操作前都会生成一个 ReadView，而 REPEATABLE READ 只在第一次进行普通 SELECT 操作前生成一个 ReadView，之后的查询操作都重复使用这个 ReadView 就好了，从而基本上可以避免幻读现象。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

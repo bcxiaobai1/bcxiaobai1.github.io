@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【文末35本书一次送】Kafka 消费者之 findCoordinator源码解析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【文末35本书一次送】Kafka 消费者之 findCoordinator源码解析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-dracula">
+                    
+                        
+                    
+                    <blockquote> 
+  
+  <a href="https://github.com/didi/LogiKM"><font size="5" color="blue"><b>?《<u>Kafka运维管控平台</u>》?</b></font></a> 
+  
+  
+  <font size="4" color="orange">✏️更强大的管控能力✏️ </font>
+  
+  
+  <font size="4" color="red">?更高效的问题定位能力? </font> 
+  
+  
+  <font size="4" color="green">?更便捷的集群运维能力? </font> 
+  
+  
+  <font size="4" color="blue">?更专业的资源治理? </font> 
+  
+  
+  <font size="4" color="gray">?更友好的运维生态? </font> 
+  
+</blockquote> 
+<p><font size="4" color="red">文末送35书 </font></p> 
+<p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul><li>
+<ul>
+<li><a href="#consumeGroup_18">在这里我们先来梳理一下consumeGroup的相关知识</a></li>
+<li><a href="#findCoordinator_41">findCoordinator流程展示</a></li>
+<li><a href="#_46">客户端源码分析</a></li>
+<li>
+<ul>
+<li><a href="#orgapachekafkaclientsconsumerinternalsAbstractCoordinatorlookupCoordinator_102">org.apache.kafka.clients.consumer.internals.AbstractCoordinator#lookupCoordinator</a></li>
+<li>
+<ul><li><a href="#orgapachekafkaclientsNetworkClientleastLoadedNode_134">org.apache.kafka.clients.NetworkClient#leastLoadedNode</a></li></ul>
+    </li>
+<li><a href="#FindCoordinatorRequest_197">拆解FindCoordinatorRequest</a></li>
+</ul>
+   </li>
+<li><a href="#_204">服务端源码分析</a></li>
+<li>
+<ul>
+<li><a href="#kafkaserverKafkaApishandleFindCoordinatorRequest_206">kafka.server.KafkaApis#handleFindCoordinatorRequest</a></li>
+<li>
+<ul>
+<li><a href="#kafkacoordinatorgroupGroupMetadataManagerpartitionFor_238">kafka.coordinator.group.GroupMetadataManager#partitionFor</a></li>
+<li><a href="#kafkaserverKafkaApisgetOrCreateInternalTopic_246">kafka.server.KafkaApis#getOrCreateInternalTopic</a></li>
+<li><a href="#kafkaserverKafkaApiscreateTopic_266">kafka.server.KafkaApis#createTopic</a></li>
+</ul>
+    </li>
+<li><a href="#FindCoordinatorResponse_272">拆解FindCoordinatorResponse</a></li>
+</ul>
+   </li>
+<li><a href="#_279">总结</a></li>
+</ul>
+ </li></ul>
+</div>
+<p></p> 
+<h2>
+<a id="consumeGroup_18"></a>在这里我们先来梳理一下consumeGroup的相关知识</h2> 
+<p>1、首先，我们会给每个consume设置groupId，对于相同groupId且订阅相同topic的consume，会组成consumeGroup，如图一所示<br> <img src="https://images2.imgbox.com/b2/5a/zLJZWMDT_o.png" alt="图一"></p> 
+<p>2、对于Server端的topic来说，会有partition这个概念，如图二所示</p> 
+<p><img src="https://images2.imgbox.com/30/f5/zM3ePVf3_o.png" alt="图二"></p> 
+<p>3、现在我们有多个consume及多个partition，到底由哪个consume来消费哪个partition呢？就由consume启动时的分区分配策略来决定。</p> 
+<ul>
+<li> <p>如果consume数量小于partition的数量，则一个consume有可能消费多个分区，如图三所示<br> <img src="https://images2.imgbox.com/73/af/Yr27cu8M_o.png" alt="图三"></p> </li>
+<li> <p>如果consume数量大于partition的数量，则会有consume线程空跑，如图四所示<br> <img src="https://images2.imgbox.com/27/86/xjn4ynza_o.png" alt="图4"></p> <p>4、kafka的内置topic：consumer_offsets专门记录消费位点信息，既然是内置topic，那自然也会有partition及partition leader的概念，对于同一个groupId的消费位点都会记录在同一个partition中，在这篇文章中findCoordinator即是找到该groupId对应的partition的leader节点，我们知道这个节点才能将位移信息提交到这里保存，如果该partition还有其他副本，则该节点还会与其他副本同步位移信息。与该节点交互都是由GroupCoordinator完成的。</p> </li>
+</ul> 
+<p><img src="https://images2.imgbox.com/37/8c/xcAYH0he_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="findCoordinator_41"></a>findCoordinator流程展示</h2> 
+<p><img src="https://images2.imgbox.com/c2/4e/lFFV9q9w_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_46"></a>客户端源码分析</h2> 
+<p>这里还是放一下findCoordinator的代码，看其他consume的代码就发现客户端跟kafkaServer通信的格式大多是这样的，如果通信一次发现该GroupCoordinator的信息还未获取到则继续重试，直到超时，这里的超时时间即为poll时传入的超时时间，这个时间设置贯穿了整个consume的运行代码。</p> 
+<pre><code class="prism language-java">    <span class="token keyword">protected</span> <span class="token keyword">synchronized</span> <span class="token keyword">boolean</span> <span class="token function">ensureCoordinatorReady</span><span class="token punctuation">(</span><span class="token keyword">final</span> <span class="token class-name">Timer</span> timer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//如果还未加入group则与group通信</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">coordinatorUnknown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>findCoordinatorException <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token punctuation">(</span>findCoordinatorException <span class="token keyword">instanceof</span> <span class="token class-name">RetriableException</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">final</span> <span class="token class-name">RuntimeException</span> fatalException <span class="token operator">=</span> findCoordinatorException<span class="token punctuation">;</span>
+                findCoordinatorException <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+                <span class="token keyword">throw</span> fatalException<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">final</span> <span class="token class-name">RequestFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> future <span class="token operator">=</span> <span class="token function">lookupCoordinator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            client<span class="token punctuation">.</span><span class="token function">poll</span><span class="token punctuation">(</span>future<span class="token punctuation">,</span> timer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+          <span class="token comment">//如果还没回调完成则说明是超时的</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>future<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// ran out of time</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>future<span class="token punctuation">.</span><span class="token function">failed</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>future<span class="token punctuation">.</span><span class="token function">isRetriable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    log<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"Coordinator discovery failed, refreshing metadata"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    client<span class="token punctuation">.</span><span class="token function">awaitMetadataUpdate</span><span class="token punctuation">(</span>timer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span> <span class="token keyword">else</span>
+                    <span class="token keyword">throw</span> future<span class="token punctuation">.</span><span class="token function">exception</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//获取group的信息之后client会与group对应的节点建立连接，如果不可用则还会重试</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>coordinator <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">&amp;&amp;</span> client<span class="token punctuation">.</span><span class="token function">isUnavailable</span><span class="token punctuation">(</span>coordinator<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// we found the coordinator, but the connection has failed, so mark</span>
+                <span class="token comment">// it dead and backoff before retrying discovery</span>
+                <span class="token function">markCoordinatorUnknown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                timer<span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span>rebalanceConfig<span class="token punctuation">.</span>retryBackoffMs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">//如果与group通信成功则会跳出循环</span>
+        <span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token function">coordinatorUnknown</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> timer<span class="token punctuation">.</span><span class="token function">notExpired</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token operator">!</span><span class="token function">coordinatorUnknown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>这里还有一点，跟踪代码可以看到以下代码在每次check以及与Server端通信完成之后都会有一样的逻辑，可以仔细思考一下，coordinator即获取到的group节点对象，client.isUnavailable(coordinator)是在与group建立连接，每次判断coordinator不为空且client与group连接失败，则将coordinator置空，为什么会这样呢？很有可能是请求到group的信息之后发现该节点已下线或者不可用，此时服务端很有可能也在进行选举，所以我们需要将coordinator清空，待服务端选举完成后再次通信。</p> 
+<pre><code class="prism language-java">  <span class="token keyword">protected</span> <span class="token keyword">synchronized</span> <span class="token class-name">Node</span> <span class="token function">checkAndGetCoordinator</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>coordinator <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">&amp;&amp;</span> client<span class="token punctuation">.</span><span class="token function">isUnavailable</span><span class="token punctuation">(</span>coordinator<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">markCoordinatorUnknown</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">.</span>coordinator<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="orgapachekafkaclientsconsumerinternalsAbstractCoordinatorlookupCoordinator_102"></a>org.apache.kafka.clients.consumer.internals.AbstractCoordinator#lookupCoordinator</h3> 
+<p>这段代码有个亮点就是先寻找的负载最小节点，然后与该节点通信获取group节点的信息。</p> 
+<pre><code class="prism language-java">   <span class="token keyword">protected</span> <span class="token keyword">synchronized</span> <span class="token class-name">RequestFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> <span class="token function">lookupCoordinator</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>findCoordinatorFuture <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// find a node to ask about the coordinator</span>
+            <span class="token comment">//与最小负载的node通信</span>
+            <span class="token class-name">Node</span> node <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>client<span class="token punctuation">.</span><span class="token function">leastLoadedNode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>node <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                log<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"No broker available to send FindCoordinator request"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">return</span> <span class="token class-name">RequestFuture</span><span class="token punctuation">.</span><span class="token function">noBrokersAvailable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                findCoordinatorFuture <span class="token operator">=</span> <span class="token function">sendFindCoordinatorRequest</span><span class="token punctuation">(</span>node<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">// remember the exception even after the future is cleared so that</span>
+                <span class="token comment">// it can still be thrown by the ensureCoordinatorReady caller</span>
+                findCoordinatorFuture<span class="token punctuation">.</span><span class="token function">addListener</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">RequestFutureListener</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onSuccess</span><span class="token punctuation">(</span><span class="token class-name">Void</span> value<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span> <span class="token comment">// do nothing</span>
+
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onFailure</span><span class="token punctuation">(</span><span class="token class-name">RuntimeException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        findCoordinatorException <span class="token operator">=</span> e<span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> findCoordinatorFuture<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="orgapachekafkaclientsNetworkClientleastLoadedNode_134"></a>org.apache.kafka.clients.NetworkClient#leastLoadedNode</h4> 
+<p>我们先来看看是如何寻找负载最小节点的，这里代码还是挺讲究的，首先就是取随机数，防止每次都从第一个节点连接，如果判断没有在途的request则直接返回该节点，否则取在途request最小的节点，如果该节点不存在，则依次取连接的节点、需要重试的节点，如果找到不为null的节点则返回该节点，否则返回null。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token class-name">Node</span> <span class="token function">leastLoadedNode</span><span class="token punctuation">(</span><span class="token keyword">long</span> now<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Node</span><span class="token punctuation">&gt;</span></span> nodes <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>metadataUpdater<span class="token punctuation">.</span><span class="token function">fetchNodes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>nodes<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalStateException</span><span class="token punctuation">(</span><span class="token string">"There are no nodes in the Kafka cluster"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">int</span> inflight <span class="token operator">=</span> <span class="token class-name">Integer</span><span class="token punctuation">.</span>MAX_VALUE<span class="token punctuation">;</span>
+
+        <span class="token class-name">Node</span> foundConnecting <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token class-name">Node</span> foundCanConnect <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token class-name">Node</span> foundReady <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token comment">//随机取一个节点</span>
+        <span class="token keyword">int</span> offset <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>randOffset<span class="token punctuation">.</span><span class="token function">nextInt</span><span class="token punctuation">(</span>nodes<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> nodes<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">int</span> idx <span class="token operator">=</span> <span class="token punctuation">(</span>offset <span class="token operator">+</span> i<span class="token punctuation">)</span> <span class="token operator">%</span> nodes<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">Node</span> node <span class="token operator">=</span> nodes<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>idx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//如果该节点是可连接的，且selector空闲，且发送队列空闲则可以发送请求</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">canSendRequest</span><span class="token punctuation">(</span>node<span class="token punctuation">.</span><span class="token function">idString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> now<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//inFlightRequests记录了已发送请求但还未收到response的request，这里判定如果该节点没有这种数据则直接作为最小负载节点返回</span>
+                <span class="token keyword">int</span> currInflight <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>inFlightRequests<span class="token punctuation">.</span><span class="token function">count</span><span class="token punctuation">(</span>node<span class="token punctuation">.</span><span class="token function">idString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>currInflight <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// if we find an established connection with no in-flight requests we can stop right away</span>
+                    log<span class="token punctuation">.</span><span class="token function">trace</span><span class="token punctuation">(</span><span class="token string">"Found least loaded node {} connected with no in-flight requests"</span><span class="token punctuation">,</span> node<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">return</span> node<span class="token punctuation">;</span>
+                    <span class="token comment">//否则取inFlightRequests中最小count的节点作为最小负载节点</span>
+                <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>currInflight <span class="token operator">&lt;</span> inflight<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// otherwise if this is the best we have found so far, record that</span>
+                    inflight <span class="token operator">=</span> currInflight<span class="token punctuation">;</span>
+                    foundReady <span class="token operator">=</span> node<span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>connectionStates<span class="token punctuation">.</span><span class="token function">isPreparingConnection</span><span class="token punctuation">(</span>node<span class="token punctuation">.</span><span class="token function">idString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                foundConnecting <span class="token operator">=</span> node<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">canConnect</span><span class="token punctuation">(</span>node<span class="token punctuation">,</span> now<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//如果该节点未被记录或者断连之后超过重试时间，则允许设置该节点</span>
+                foundCanConnect <span class="token operator">=</span> node<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                log<span class="token punctuation">.</span><span class="token function">trace</span><span class="token punctuation">(</span><span class="token string">"Removing node {} from least loaded node selection since it is neither ready "</span> <span class="token operator">+</span>
+                        <span class="token string">"for sending or connecting"</span><span class="token punctuation">,</span> node<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// We prefer established connections if possible. Otherwise, we will wait for connections</span>
+        <span class="token comment">// which are being established before connecting to new nodes.</span>
+        <span class="token comment">//优先取状态良好的节点</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>foundReady <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            log<span class="token punctuation">.</span><span class="token function">trace</span><span class="token punctuation">(</span><span class="token string">"Found least loaded node {} with {} inflight requests"</span><span class="token punctuation">,</span> foundReady<span class="token punctuation">,</span> inflight<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> foundReady<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>foundConnecting <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            log<span class="token punctuation">.</span><span class="token function">trace</span><span class="token punctuation">(</span><span class="token string">"Found least loaded connecting node {}"</span><span class="token punctuation">,</span> foundConnecting<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> foundConnecting<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>foundCanConnect <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            log<span class="token punctuation">.</span><span class="token function">trace</span><span class="token punctuation">(</span><span class="token string">"Found least loaded node {} with no active connection"</span><span class="token punctuation">,</span> foundCanConnect<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> foundCanConnect<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            log<span class="token punctuation">.</span><span class="token function">trace</span><span class="token punctuation">(</span><span class="token string">"Least loaded node selection failed to find an available node"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="FindCoordinatorRequest_197"></a>拆解FindCoordinatorRequest</h3> 
+<p>通过下图我们来看看发送了哪些数据，key_type有两种枚举，一种是GROUP，另一种是TRANSACTION，如果type为GROUP的话那key就是groupId</p> 
+<p><img src="https://images2.imgbox.com/6c/49/Ens178KU_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_204"></a>服务端源码分析</h2> 
+<h3>
+<a id="kafkaserverKafkaApishandleFindCoordinatorRequest_206"></a>kafka.server.KafkaApis#handleFindCoordinatorRequest</h3> 
+<p>服务端还是通过KafkaApi来处理请求，代码也比较简单。</p> 
+<pre><code class="prism language-scala"> <span class="token keyword">def</span> handleFindCoordinatorRequest<span class="token punctuation">(</span>request<span class="token operator">:</span> RequestChannel<span class="token punctuation">.</span>Request<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">val</span> findCoordinatorRequest <span class="token operator">=</span> request<span class="token punctuation">.</span>body<span class="token punctuation">[</span>FindCoordinatorRequest<span class="token punctuation">]</span>
+    <span class="token comment">//校验数据</span>
+    <span class="token comment">//……省略部分代码</span>
+      <span class="token comment">// get metadata (and create the topic if necessary)</span>
+      <span class="token keyword">val</span> <span class="token punctuation">(</span>partition<span class="token punctuation">,</span> topicMetadata<span class="token punctuation">)</span> <span class="token operator">=</span> CoordinatorType<span class="token punctuation">.</span>forId<span class="token punctuation">(</span>findCoordinatorRequest<span class="token punctuation">.</span>data<span class="token punctuation">.</span>keyType<span class="token punctuation">)</span> <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> CoordinatorType<span class="token punctuation">.</span>GROUP <span class="token keyword">=&gt;</span>
+            <span class="token comment">//4.1 找到对应发分区</span>
+          <span class="token keyword">val</span> partition <span class="token operator">=</span> groupCoordinator<span class="token punctuation">.</span>partitionFor<span class="token punctuation">(</span>findCoordinatorRequest<span class="token punctuation">.</span>data<span class="token punctuation">.</span>key<span class="token punctuation">)</span>
+            <span class="token comment">//4.2 获取对应的元数据</span>
+          <span class="token keyword">val</span> metadata <span class="token operator">=</span> getOrCreateInternalTopic<span class="token punctuation">(</span>GROUP_METADATA_TOPIC_NAME<span class="token punctuation">,</span> request<span class="token punctuation">.</span>context<span class="token punctuation">.</span>listenerName<span class="token punctuation">)</span>
+          <span class="token punctuation">(</span>partition<span class="token punctuation">,</span> metadata<span class="token punctuation">)</span>
+
+        <span class="token keyword">case</span> CoordinatorType<span class="token punctuation">.</span>TRANSACTION <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> partition <span class="token operator">=</span> txnCoordinator<span class="token punctuation">.</span>partitionFor<span class="token punctuation">(</span>findCoordinatorRequest<span class="token punctuation">.</span>data<span class="token punctuation">.</span>key<span class="token punctuation">)</span>
+          <span class="token keyword">val</span> metadata <span class="token operator">=</span> getOrCreateInternalTopic<span class="token punctuation">(</span>TRANSACTION_STATE_TOPIC_NAME<span class="token punctuation">,</span> request<span class="token punctuation">.</span>context<span class="token punctuation">.</span>listenerName<span class="token punctuation">)</span>
+          <span class="token punctuation">(</span>partition<span class="token punctuation">,</span> metadata<span class="token punctuation">)</span>
+
+        <span class="token keyword">case</span> _ <span class="token keyword">=&gt;</span>
+          <span class="token keyword">throw</span> <span class="token keyword">new</span> InvalidRequestException<span class="token punctuation">(</span><span class="token string">"Unknown coordinator type in FindCoordinator request"</span><span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+      <span class="token comment">//组装返回参数</span>
+     <span class="token comment">//……省略部分代码</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="kafkacoordinatorgroupGroupMetadataManagerpartitionFor_238"></a>kafka.coordinator.group.GroupMetadataManager#partitionFor</h4> 
+<p>我们知道consume消费后对应的位点是保存在kafka的内部名为"__consumer_offsets"的内置topic中，内置topic初始化时由<code>offsets.topic.num.partitions</code> 参数来决定分区数，默认值是50，相同consumeGroup的offset最终会保存在其中一个分区中，而保存在哪个分区就由下面这段代码来决定，可以看到逻辑很简单，就是取groupId的hashCode，然后对总的分区数取模。比如groupId为"consume_group"，最终就会在34号分区保存位点。</p> 
+<pre><code class="prism language-scala">  <span class="token keyword">def</span> partitionFor<span class="token punctuation">(</span>groupId<span class="token operator">:</span> <span class="token builtin">String</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Int</span> <span class="token operator">=</span> Utils<span class="token punctuation">.</span>abs<span class="token punctuation">(</span>groupId<span class="token punctuation">.</span>hashCode<span class="token punctuation">)</span> <span class="token operator">%</span> groupMetadataTopicPartitionCount
+</code></pre> 
+<h4>
+<a id="kafkaserverKafkaApisgetOrCreateInternalTopic_246"></a>kafka.server.KafkaApis#getOrCreateInternalTopic</h4> 
+<p>这里是先从当前node的元数据缓存中拿到对应topic的数据，如果没有，则创建。从这段代码也可以猜想kafka内置topic的创建原理，是一种懒加载的思想，当第一个consume接入之后才会创建对应topicPartition文件。</p> 
+<pre><code class="prism language-scala">  <span class="token keyword">private</span> <span class="token keyword">def</span> getOrCreateInternalTopic<span class="token punctuation">(</span>topic<span class="token operator">:</span> <span class="token builtin">String</span><span class="token punctuation">,</span> listenerName<span class="token operator">:</span> ListenerName<span class="token punctuation">)</span><span class="token operator">:</span> MetadataResponse<span class="token punctuation">.</span>TopicMetadata <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">val</span> topicMetadata <span class="token operator">=</span> metadataCache<span class="token punctuation">.</span>getTopicMetadata<span class="token punctuation">(</span>Set<span class="token punctuation">(</span>topic<span class="token punctuation">)</span><span class="token punctuation">,</span> listenerName<span class="token punctuation">)</span>
+    topicMetadata<span class="token punctuation">.</span>headOption<span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>createInternalTopic<span class="token punctuation">(</span>topic<span class="token punctuation">)</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<p>这里的topicMetadata就是对应入参topic返回类似列表的对象，因为入参只有一个topic，所以直接取第一个数据，数据结构见下图，可以更直观的理解返回参数。</p> 
+<p><img src="https://images2.imgbox.com/e1/b2/5kUxae81_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/a5/36/9bl83ys1_o.png" alt="在这里插入图片描述"></p> 
+<h4>
+<a id="kafkaserverKafkaApiscreateTopic_266"></a>kafka.server.KafkaApis#createTopic</h4> 
+<p>Topic创建的流程如下图所示，详情请看 <a href="https://mp.weixin.qq.com/s?__biz=Mzg4ODY1NTcxNg==&amp;mid=2247485101&amp;idx=1&amp;sn=e89ee4792d3798a2f6ca5f5ad9b69464">Topic创建流程源码分析</a><br> <img src="https://images2.imgbox.com/3f/bc/y2Z8a6Lo_o.png" alt="在这里插入图片描述"></p> 
+<h3>
+<a id="FindCoordinatorResponse_272"></a>拆解FindCoordinatorResponse</h3> 
+<p>通过下图我们来看看返回了哪些数据，可以看到前面取了很多数据，最终拼到返回参数里面的只有leader所在的节点信息</p> 
+<p><img src="https://images2.imgbox.com/51/b1/CV3JENvn_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_279"></a>总结</h2> 
+<p>这块代码本身不是很复杂，主要是有一些细节需要考虑，通过仔细思量这些细节对我们今后分析consume异常会大有好处。流程总结如下<br> 1、寻找最小负载节点信息<br> 2、向最小负载节点发送FindCoordinatorRequest<br> 3、最小负载节点处理该请求。</p> 
+<ul>
+<li>首先找到该groupId对应的分区</li>
+<li>通过内存中缓存的metaData获取该分区的信息，如果不存在则创建topic</li>
+<li>返回查找到的分区leader信息</li>
+</ul> 
+<hr> 
+<p><span id="jump99"></span></p> 
+ 
+ <font color="red" size="5"> <b> 再赠35本,欢度每周五 </b> </font>
+ 
+<p>从开始决定送书到现在,我已经送麻了, 又快到周五啦,接着搞, 这次联合北大出版社送书, 周五一口气送<br> 「 <font color="red"> 35 </font> 」本,。</p> 
+<p>提供 其中N款书</p> 
+<p>1自然语言处理NLP从入门到项目实战（Python语言实现）<br> 2机器学习数学基础：概率论与数理统计<br> 3数据结构和算法基础（Java语言实现）<br> 4 Vue.js框架与Web前端开发从入门到精通<br> 5 人工智能数学基础与Python机器学习实战<br> 6 Vue.js全家桶零基础入门到进阶项目实战<br> 7 Node.js入门指南<br> 8 Web渗透攻防实战<br> 9 架构基础：从需求到架构</p> 
+<p>1亿级流量Java高并发与网络编程实战<br> 2Java高并发编程指南<br> 3Java深度调试技术<br> 4Java多线程与大数据处理实战<br> 5Java核心技术及面试指南</p> 
+<p>参与方式:<br> 3. 给本文<font color="red">「一键三连」</font> 支持博主<br> 4. 加抽奖群,参与抽奖 周五开奖！</p> 
+<hr> 
+<p>【编辑推荐】</p> 
+<blockquote> 
+ <p>合理的架构设计使系统具有更好的稳定性、可扩展性和安全性，因此架构设计在系统开发中扮演着极其重要的角色，是系统开发人员的bibei知识。本书深入浅出地对架构设计领域的知识进行了系统全面的讲解，详细剖析了不同功能模块的先进设计理念，并结合了大厂实战案例进行分析，是一本非常有参考价值的书籍。</p> 
+</blockquote> 
+ 
+
+<p><a href="https://www.szzdzhp.com/szzInfo.html">参与抽奖</a></p> 
+ 
+ <img src="https://images2.imgbox.com/8b/19/1Abe1CN8_o.png" height="160" width="160"> 
+ 
+ 
+ <img src="https://images2.imgbox.com/43/c1/lsEn9TiG_o.png" height="200" width="160"> 
+ 
+ 
+ <font size="5" color="red"><b> <u>进来参与抽奖 </u> </b></font> 
+ 
+<hr> 
+ 
+ <font size="5" color="red"> ?? <strong>扫描</strong> 下方 <strong>关注公众号</strong> 参与每周福利??</font> 
+
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

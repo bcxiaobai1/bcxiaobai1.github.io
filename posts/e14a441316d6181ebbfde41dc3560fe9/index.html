@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>分区副本限流机制三部曲(源码篇) - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">分区副本限流机制三部曲(源码篇)</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-dracula">
+                    
+                        
+                    
+                    <blockquote> 
+  
+  <a href="https://github.com/didi/LogiKM"><font size="5" color="blue"><b>?《<u>Kafka运维管控平台</u>》?</b></font></a> 
+  
+  
+  <font size="4" color="orange">✏️更强大的管控能力✏️ </font>
+  
+  
+  <font size="4" color="red">?更高效的问题定位能力? </font> 
+  
+  
+  <font size="4" color="green">?更便捷的集群运维能力? </font> 
+  
+  
+  <font size="4" color="blue">?更专业的资源治理? </font> 
+  
+  
+  <font size="4" color="gray">?更友好的运维生态? </font> 
+  
+</blockquote> 
+<p><font size="4" color="red">文末送书5本</font></p> 
+<p>这一篇我们主要来看看分区副本重分配限流是如何实现的，此源码分析基于kafka2.5版本。在开始之前我们先来回顾一下分区重分配的流程，如图一所示。</p> 
+<p><img src="https://images2.imgbox.com/a8/ba/893qIlzn_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li>执行分区重分配脚本，这里相当于起了个kafka客户端，执行完脚本将重分配数据写入zk即返回了。</li>
+<li>kafkaController监听到zk分区重分配节点数据变动，会调相应的handler来处理数据，这里相当于kafka服务端大脑的角色，控制了分区重分配主要处理的流程，并发送命令给其他节点执行，描述的简单一点就是会根据重分配脚本在对应的broker<br> 创建新的副本并删除需要移除的副本。</li>
+<li>最后，kafkaController收到各个broker执行完操作的命令，会执行一些重分配结束后操作，包括修改zk<br> 节点数据，更新元数据信息等。</li>
+</ul> 
+<p>大家也可以思考一下，如果把限流这个功能交给你，你会如何设计与开发？今天我们想聊的限流，就是在创建新的副本中实现的。在需要创建副本时，kafkaController会向对应的broker发送LeaderAndISRRequest请求，下面我们就从这里开始。</p> 
+<h2>
+<a id="brokerLeaderAndIsr_26"></a>broker对LeaderAndIsr请求的处理</h2> 
+<p>入口在kafka.server.KafkaApis.handleLeaderAndIsrRequest，处理LeaderAndIsrRequest<br> 请求的代码就不放了，处理也比较简单，因为我们现在是做分区重分配，是先增加副本然后再下线删除不要的副本，所以会走里面makeFollowers方法的逻辑，在makeFollowers<br> 中主要就是建立对应的文件夹，然后启对应的ReplicaFetcherThread来跟leader通信拉取数据，下面我们主要来分析一下ReplicaFetcherThread的代码。</p> 
+<h2>
+<a id="FetchRequestFetchResponsefetchRequestOpt_31"></a>这里主要就是构建FetchRequest然后处理FetchResponse，如果fetchRequestOpt为空，则会让线程等待一秒，</h2> 
+<pre><code class="prism language-scala">  <span class="token keyword">private</span> <span class="token keyword">def</span> maybeFetch<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">//同步数据，获取锁</span>
+      <span class="token keyword">val</span> fetchRequestOpt <span class="token operator">=</span> inLock<span class="token punctuation">(</span>partitionMapLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//2.1 构建同步数据request</span>
+        <span class="token keyword">val</span> ResultWithPartitions<span class="token punctuation">(</span>fetchRequestOpt<span class="token punctuation">,</span> partitionsWithError<span class="token punctuation">)</span> <span class="token operator">=</span> buildFetch<span class="token punctuation">(</span>partitionStates<span class="token punctuation">.</span>partitionStateMap<span class="token punctuation">.</span>asScala<span class="token punctuation">)</span>
+  
+        handlePartitionsWithErrors<span class="token punctuation">(</span>partitionsWithError<span class="token punctuation">,</span> <span class="token string">"maybeFetch"</span><span class="token punctuation">)</span>
+  
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>fetchRequestOpt<span class="token punctuation">.</span>isEmpty<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          trace<span class="token punctuation">(</span>s<span class="token string">"There are no active partitions. Back off for $fetchBackOffMs ms before sending a fetch request"</span><span class="token punctuation">)</span>
+          <span class="token comment">//如果发现没有需要构建的数据，则等待1秒</span>
+          partitionMapCond<span class="token punctuation">.</span>await<span class="token punctuation">(</span>fetchBackOffMs<span class="token punctuation">,</span> TimeUnit<span class="token punctuation">.</span>MILLISECONDS<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+  
+        fetchRequestOpt
+      <span class="token punctuation">}</span>
+      <span class="token comment">//2.2 在限流的情况下fetchRequestOpt是空，所以不会发请求，直接样本重置，或者达到限流标准</span>
+      fetchRequestOpt<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> <span class="token keyword">case</span> ReplicaFetch<span class="token punctuation">(</span>sessionPartitions<span class="token punctuation">,</span> fetchRequest<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        processFetchRequest<span class="token punctuation">(</span>sessionPartitions<span class="token punctuation">,</span> fetchRequest<span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="request_55"></a>构建同步数据request代码分析</h3> 
+<p>在这里，我们看到了关键代码shouldFollowerThrottle，下面我们进入到这个方法，看是如何实现限流的。</p> 
+<pre><code class="prism language-scala">  <span class="token keyword">override</span> <span class="token keyword">def</span> buildFetch<span class="token punctuation">(</span>partitionMap<span class="token operator">:</span> Map<span class="token punctuation">[</span>TopicPartition<span class="token punctuation">,</span> PartitionFetchState<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token operator">:</span> ResultWithPartitions<span class="token punctuation">[</span>Option<span class="token punctuation">[</span>ReplicaFetch<span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">val</span> partitionsWithError <span class="token operator">=</span> mutable<span class="token punctuation">.</span>Set<span class="token punctuation">[</span>TopicPartition<span class="token punctuation">]</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">val</span> builder <span class="token operator">=</span> fetchSessionHandler<span class="token punctuation">.</span>newBuilder<span class="token punctuation">(</span>partitionMap<span class="token punctuation">.</span>size<span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span>
+    partitionMap<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> <span class="token keyword">case</span> <span class="token punctuation">(</span>topicPartition<span class="token punctuation">,</span> fetchState<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+      <span class="token comment">// 2.1.1判断是否需要限流</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>fetchState<span class="token punctuation">.</span>isReadyForFetch <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>shouldFollowerThrottle<span class="token punctuation">(</span>quota<span class="token punctuation">,</span> fetchState<span class="token punctuation">,</span> topicPartition<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">val</span> logStartOffset <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>logStartOffset<span class="token punctuation">(</span>topicPartition<span class="token punctuation">)</span>
+          builder<span class="token punctuation">.</span>add<span class="token punctuation">(</span>topicPartition<span class="token punctuation">,</span> <span class="token keyword">new</span> FetchRequest<span class="token punctuation">.</span>PartitionData<span class="token punctuation">(</span>
+            fetchState<span class="token punctuation">.</span>fetchOffset<span class="token punctuation">,</span> logStartOffset<span class="token punctuation">,</span> fetchSize<span class="token punctuation">,</span> Optional<span class="token punctuation">.</span>of<span class="token punctuation">(</span>fetchState<span class="token punctuation">.</span>currentLeaderEpoch<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">case</span> _<span class="token operator">:</span> KafkaStorageException <span class="token keyword">=&gt;</span>
+            <span class="token comment">// The replica has already been marked offline due to log directory failure and the original failure should have already been logged.</span>
+            <span class="token comment">// This partition should be removed from ReplicaFetcherThread soon by ReplicaManager.handleLogDirFailure()</span>
+            partitionsWithError <span class="token operator">+=</span> topicPartition
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">val</span> fetchData <span class="token operator">=</span> builder<span class="token punctuation">.</span>build<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token comment">//判断如果fetchData是空的话直接返回None</span>
+    <span class="token keyword">val</span> fetchRequestOpt <span class="token operator">=</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>fetchData<span class="token punctuation">.</span>sessionPartitions<span class="token punctuation">.</span>isEmpty <span class="token operator">&amp;&amp;</span> fetchData<span class="token punctuation">.</span>toForget<span class="token punctuation">.</span>isEmpty<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      None
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">val</span> requestBuilder <span class="token operator">=</span> FetchRequest<span class="token punctuation">.</span>Builder
+        <span class="token punctuation">.</span>forReplica<span class="token punctuation">(</span>fetchRequestVersion<span class="token punctuation">,</span> replicaId<span class="token punctuation">,</span> maxWait<span class="token punctuation">,</span> minBytes<span class="token punctuation">,</span> fetchData<span class="token punctuation">.</span>toSend<span class="token punctuation">)</span>
+        <span class="token punctuation">.</span>setMaxBytes<span class="token punctuation">(</span>maxBytes<span class="token punctuation">)</span>
+        <span class="token punctuation">.</span>toForget<span class="token punctuation">(</span>fetchData<span class="token punctuation">.</span>toForget<span class="token punctuation">)</span>
+        <span class="token punctuation">.</span>metadata<span class="token punctuation">(</span>fetchData<span class="token punctuation">.</span>metadata<span class="token punctuation">)</span>
+      Some<span class="token punctuation">(</span>ReplicaFetch<span class="token punctuation">(</span>fetchData<span class="token punctuation">.</span>sessionPartitions<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> requestBuilder<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+
+    ResultWithPartitions<span class="token punctuation">(</span>fetchRequestOpt<span class="token punctuation">,</span> partitionsWithError<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="shouldFollowerThrottle_94"></a>shouldFollowerThrottle源码分析</h3> 
+<p>这里代码实际很简单，有三个判断，第一个是判断副本是否同步，如果没同步则!fetchState.isReplicaInSync为true。第二个会去判断topicPartition是否在限流的内存配置中，这里的内存配置就是在分区重分配第一步时，将配置数据写入zk后触发的。第三个就是真正的限流了，判断是否达到阙值。<br> 如果达到zk中设置的阙值，就会返回false，fetchData就会为空，在外层代码中会使等待一秒再重新请求。</p> 
+<pre><code class="prism language-scala"><span class="token keyword">private</span> <span class="token keyword">def</span> shouldFollowerThrottle<span class="token punctuation">(</span>quota<span class="token operator">:</span> ReplicaQuota<span class="token punctuation">,</span> fetchState<span class="token operator">:</span> PartitionFetchState<span class="token punctuation">,</span> topicPartition<span class="token operator">:</span> TopicPartition<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Boolean</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token operator">!</span>fetchState<span class="token punctuation">.</span>isReplicaInSync <span class="token operator">&amp;&amp;</span> quota<span class="token punctuation">.</span>isThrottled<span class="token punctuation">(</span>topicPartition<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> quota<span class="token punctuation">.</span>isQuotaExceeded
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="leaderleaderbrokerFetchkafkaserverKafkaApishandleFetchRequest_102"></a>在leader端同理，leader所在的broker会接收Fetch请求，入口在kafka.server.KafkaApis#handleFetchRequest，里面也有一段类似的代码，如下</h3> 
+<pre><code class="prism language-scala"> <span class="token keyword">val</span> shouldLeaderThrottleResult <span class="token operator">=</span> shouldLeaderThrottle<span class="token punctuation">(</span>quota<span class="token punctuation">,</span> tp<span class="token punctuation">,</span> replicaId<span class="token punctuation">)</span>
+          <span class="token keyword">val</span> fetchDataInfo <span class="token operator">=</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>shouldLeaderThrottleResult<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// If the partition is being throttled, simply return an empty set.</span>
+            FetchDataInfo<span class="token punctuation">(</span>readInfo<span class="token punctuation">.</span>fetchedData<span class="token punctuation">.</span>fetchOffsetMetadata<span class="token punctuation">,</span> MemoryRecords<span class="token punctuation">.</span>EMPTY<span class="token punctuation">)</span>
+          <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>hardMaxBytesLimit <span class="token operator">&amp;&amp;</span> readInfo<span class="token punctuation">.</span>fetchedData<span class="token punctuation">.</span>firstEntryIncomplete<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// For FetchRequest version 3, we replace incomplete message sets with an empty one as consumers can make</span>
+            <span class="token comment">// progress in such cases and don't need to report a `RecordTooLargeException`</span>
+            FetchDataInfo<span class="token punctuation">(</span>readInfo<span class="token punctuation">.</span>fetchedData<span class="token punctuation">.</span>fetchOffsetMetadata<span class="token punctuation">,</span> MemoryRecords<span class="token punctuation">.</span>EMPTY<span class="token punctuation">)</span>
+          <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            readInfo<span class="token punctuation">.</span>fetchedData
+          <span class="token punctuation">}</span>
+   <span class="token comment">//此处省略若干代码       </span>
+ <span class="token keyword">def</span> shouldLeaderThrottle<span class="token punctuation">(</span>quota<span class="token operator">:</span> ReplicaQuota<span class="token punctuation">,</span> topicPartition<span class="token operator">:</span> TopicPartition<span class="token punctuation">,</span> replicaId<span class="token operator">:</span> <span class="token builtin">Int</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Boolean</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">val</span> isReplicaInSync <span class="token operator">=</span> nonOfflinePartition<span class="token punctuation">(</span>topicPartition<span class="token punctuation">)</span><span class="token punctuation">.</span>exists<span class="token punctuation">(</span>_<span class="token punctuation">.</span>inSyncReplicaIds<span class="token punctuation">.</span>contains<span class="token punctuation">(</span>replicaId<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token operator">!</span>isReplicaInSync <span class="token operator">&amp;&amp;</span> quota<span class="token punctuation">.</span>isThrottled<span class="token punctuation">(</span>topicPartition<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> quota<span class="token punctuation">.</span>isQuotaExceeded
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_121"></a>限流的实现</h2> 
+<p>从上面的代码分析我们知道了限流是在哪一步代码中控制的，却不知道是怎么实现的，这里我们单独来讲解一下，具体见图二</p> 
+<p><img src="https://images2.imgbox.com/dc/81/2sR7Jzk9_o.png" alt="在这里插入图片描述"></p> 
+<h3>
+<a id="MetricsKafkaMetric_126"></a>Metrics及KafkaMetric类说明</h3> 
+<p>这里我只画出了简单的组合关系，限流有关的是从Metrics类开始的，Metrics类相当于全局的限流工厂类，里面有两个ConcurrentMap分别装载KafkaMetric及Sensor，我们先来看看KafkaMetric<br> ，里面主要就是初始化一些参数，然后提供获取当前值的方法，KafkaMetric的作用就是对一种限流类型的封装。</p> 
+<pre><code class="prism language-scala">    double measurableValue<span class="token punctuation">(</span>long timeMs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        synchronized <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>metricValueProvider instanceof Measurable<span class="token punctuation">)</span>
+                <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>Measurable<span class="token punctuation">)</span> metricValueProvider<span class="token punctuation">)</span><span class="token punctuation">.</span>measure<span class="token punctuation">(</span>config<span class="token punctuation">,</span> timeMs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">else</span>
+                <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>在Kafka服务端启动时会初始化一个全局的Metrics及QuotaManagers限流信息管理类，可以看到QuotaFactory.instantiate中分别初始化了leader及follower的限流管理类，QuotaManagers或者是ReplicationQuotaManager对象就会一层一层作为入参传入到其他方法使用，是单例的。</p> 
+<pre><code class="prism language-scala"><span class="token keyword">def</span> startup<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">//省略若干代码</span>
+        metrics <span class="token operator">=</span> <span class="token keyword">new</span> Metrics<span class="token punctuation">(</span>metricConfig<span class="token punctuation">,</span> reporters<span class="token punctuation">,</span> time<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span>
+
+        <span class="token comment">/* register broker metrics */</span>
+        _brokerTopicStats <span class="token operator">=</span> <span class="token keyword">new</span> BrokerTopicStats
+
+        quotaManagers <span class="token operator">=</span> QuotaFactory<span class="token punctuation">.</span>instantiate<span class="token punctuation">(</span>config<span class="token punctuation">,</span> metrics<span class="token punctuation">,</span> time<span class="token punctuation">,</span> threadNamePrefix<span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span><span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token comment">//省略若干代码</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">catch</span> <span class="token punctuation">{<!-- --></span>
+     <span class="token comment">//省略若干代码</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token keyword">def</span> instantiate<span class="token punctuation">(</span>cfg<span class="token operator">:</span> KafkaConfig<span class="token punctuation">,</span> metrics<span class="token operator">:</span> Metrics<span class="token punctuation">,</span> time<span class="token operator">:</span> Time<span class="token punctuation">,</span> threadNamePrefix<span class="token operator">:</span> <span class="token builtin">String</span><span class="token punctuation">)</span><span class="token operator">:</span> QuotaManagers <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+  
+      <span class="token keyword">val</span> clientQuotaCallback <span class="token operator">=</span> Option<span class="token punctuation">(</span>cfg<span class="token punctuation">.</span>getConfiguredInstance<span class="token punctuation">(</span>KafkaConfig<span class="token punctuation">.</span>ClientQuotaCallbackClassProp<span class="token punctuation">,</span>
+        classOf<span class="token punctuation">[</span>ClientQuotaCallback<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+      QuotaManagers<span class="token punctuation">(</span>
+        <span class="token keyword">new</span> ClientQuotaManager<span class="token punctuation">(</span>clientFetchConfig<span class="token punctuation">(</span>cfg<span class="token punctuation">)</span><span class="token punctuation">,</span> metrics<span class="token punctuation">,</span> Fetch<span class="token punctuation">,</span> time<span class="token punctuation">,</span> threadNamePrefix<span class="token punctuation">,</span> clientQuotaCallback<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token keyword">new</span> ClientQuotaManager<span class="token punctuation">(</span>clientProduceConfig<span class="token punctuation">(</span>cfg<span class="token punctuation">)</span><span class="token punctuation">,</span> metrics<span class="token punctuation">,</span> Produce<span class="token punctuation">,</span> time<span class="token punctuation">,</span> threadNamePrefix<span class="token punctuation">,</span> clientQuotaCallback<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token keyword">new</span> ClientRequestQuotaManager<span class="token punctuation">(</span>clientRequestConfig<span class="token punctuation">(</span>cfg<span class="token punctuation">)</span><span class="token punctuation">,</span> metrics<span class="token punctuation">,</span> time<span class="token punctuation">,</span> threadNamePrefix<span class="token punctuation">,</span> clientQuotaCallback<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token keyword">new</span> ReplicationQuotaManager<span class="token punctuation">(</span>replicationConfig<span class="token punctuation">(</span>cfg<span class="token punctuation">)</span><span class="token punctuation">,</span> metrics<span class="token punctuation">,</span> LeaderReplication<span class="token punctuation">,</span> time<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token keyword">new</span> ReplicationQuotaManager<span class="token punctuation">(</span>replicationConfig<span class="token punctuation">(</span>cfg<span class="token punctuation">)</span><span class="token punctuation">,</span> metrics<span class="token punctuation">,</span> FollowerReplication<span class="token punctuation">,</span> time<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token keyword">new</span> ReplicationQuotaManager<span class="token punctuation">(</span>alterLogDirsReplicationConfig<span class="token punctuation">(</span>cfg<span class="token punctuation">)</span><span class="token punctuation">,</span> metrics<span class="token punctuation">,</span> AlterLogDirsReplication<span class="token punctuation">,</span> time<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        clientQuotaCallback
+      <span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="Sensor_172"></a>Sensor类说明</h3> 
+<p>对于Sensor，这个类的作用就比较多了，代码如下，由于篇幅的关系这里并没有放完整的代码，这里提供了两个重要的方法，一个是record，会在关键代码处调用此方法记录流量值，另一个是checkQuotas<br> ，判断是否达到阙值，这里可能会有小伙伴疑惑，为什么在Metrics类中装载了KafkaMetric，而Sensor又有个Map&lt;MetricName, KafkaMetric&gt;<br> metrics对象，可以这样理解，Metrics中装载的是所有的KafkaMetric对象，而在Sensor中是针对一种记录值特有的限制。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">Sensor</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Metrics</span> registry<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">String</span> name<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Sensor</span><span class="token punctuation">[</span><span class="token punctuation">]</span> parents<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Stat</span><span class="token punctuation">&gt;</span></span> stats<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">MetricName</span><span class="token punctuation">,</span> <span class="token class-name">KafkaMetric</span><span class="token punctuation">&gt;</span></span> metrics<span class="token punctuation">;</span>
+    <span class="token keyword">public</span> <span class="token keyword">final</span> <span class="token class-name">MetricConfig</span> config<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Time</span> time<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">long</span> lastRecordTime<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">long</span> inactiveSensorExpirationTimeMs<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Object</span> metricLock<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token keyword">record</span><span class="token punctuation">(</span><span class="token keyword">double</span> value<span class="token punctuation">,</span> <span class="token keyword">long</span> timeMs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">record</span><span class="token punctuation">(</span>value<span class="token punctuation">,</span> timeMs<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">checkQuotas</span><span class="token punctuation">(</span><span class="token keyword">long</span> timeMs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">KafkaMetric</span> metric <span class="token operator">:</span> <span class="token keyword">this</span><span class="token punctuation">.</span>metrics<span class="token punctuation">.</span><span class="token function">values</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">MetricConfig</span> config <span class="token operator">=</span> metric<span class="token punctuation">.</span><span class="token function">config</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>config <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">Quota</span> quota <span class="token operator">=</span> config<span class="token punctuation">.</span><span class="token function">quota</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>quota <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                     <span class="token comment">//获取当前计算的流量值</span>
+                    <span class="token keyword">double</span> value <span class="token operator">=</span> metric<span class="token punctuation">.</span><span class="token function">measurableValue</span><span class="token punctuation">(</span>timeMs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">//与配置的流量值比对，如果不满足则抛异常</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>quota<span class="token punctuation">.</span><span class="token function">acceptable</span><span class="token punctuation">(</span>value<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">QuotaViolationException</span><span class="token punctuation">(</span>metric<span class="token punctuation">.</span><span class="token function">metricName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> value<span class="token punctuation">,</span>
+                            quota<span class="token punctuation">.</span><span class="token function">bound</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="Sensorrecord_211"></a>Sensor#record的实现</h4> 
+<p>代码在SampledStat的record方法中，代码的逻辑我已注解，主要就是根据传入的时间获取当前样本对象，如果超出了config<br> 中配置的值，则增加样本，否则更新样本数据。这里要特别说明一下，样本的数量及是否增加样本的时间都是在MetricConfig初始化的时候传入的，样本数量是samples默认为11，可通过配置replication.quota.window<br> .num来修改，样本时间是timeWindow，默认为1秒，可以通过replication.quota.window.size.seconds配置来修改。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token keyword">record</span><span class="token punctuation">(</span><span class="token class-name">MetricConfig</span> config<span class="token punctuation">,</span> <span class="token keyword">double</span> value<span class="token punctuation">,</span> <span class="token keyword">long</span> timeMs<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//记录流量，获取当前的样本</span>
+        <span class="token class-name">Sample</span> sample <span class="token operator">=</span> <span class="token function">current</span><span class="token punctuation">(</span>timeMs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//如果过去了1秒，则增加样本</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>sample<span class="token punctuation">.</span><span class="token function">isComplete</span><span class="token punctuation">(</span>timeMs<span class="token punctuation">,</span> config<span class="token punctuation">)</span><span class="token punctuation">)</span>
+            sample <span class="token operator">=</span> <span class="token function">advance</span><span class="token punctuation">(</span>config<span class="token punctuation">,</span> timeMs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//否则，更新当前样本值</span>
+        <span class="token function">update</span><span class="token punctuation">(</span>sample<span class="token punctuation">,</span> config<span class="token punctuation">,</span> value<span class="token punctuation">,</span> timeMs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        sample<span class="token punctuation">.</span>eventCount <span class="token operator">+=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h4>
+<a id="SensorcheckQuotas_227"></a>Sensor#checkQuotas的实现</h4> 
+<p>前面我们知道在checkQuotas中主要就是获取当前的流量值与配置的比对，而计算当前流量值就是在Rate#measure方法中实现的，在measure方法里面主要是会调用SampledStat#measure，在SampledStat#measure方法中会调用purgeObsoleteSamples<br> 方法来重置过期的副本，然后再调用具体的combine方法，我们这里combine调用的是在WindowedSum中实现的，也就是循环各个样本累加在一起，回到Rate#measure<br> 中，发现逻辑无非就是统计各个样本中的流量相加，然后除以时间来计算平均流量。</p> 
+<pre><code class="prism language-java">    <span class="token comment">//Rate#measure</span>
+    <span class="token keyword">public</span> <span class="token keyword">double</span> <span class="token function">measure</span><span class="token punctuation">(</span><span class="token class-name">MetricConfig</span> config<span class="token punctuation">,</span> <span class="token keyword">long</span> now<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">double</span> value <span class="token operator">=</span> stat<span class="token punctuation">.</span><span class="token function">measure</span><span class="token punctuation">(</span>config<span class="token punctuation">,</span> now<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> value <span class="token operator">/</span> <span class="token function">convert</span><span class="token punctuation">(</span><span class="token function">windowSize</span><span class="token punctuation">(</span>config<span class="token punctuation">,</span> now<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//SampledStat#measure</span>
+    <span class="token keyword">public</span> <span class="token keyword">double</span> <span class="token function">measure</span><span class="token punctuation">(</span><span class="token class-name">MetricConfig</span> config<span class="token punctuation">,</span> <span class="token keyword">long</span> now<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">purgeObsoleteSamples</span><span class="token punctuation">(</span>config<span class="token punctuation">,</span> now<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token function">combine</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>samples<span class="token punctuation">,</span> config<span class="token punctuation">,</span> now<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">purgeObsoleteSamples</span><span class="token punctuation">(</span><span class="token class-name">MetricConfig</span> config<span class="token punctuation">,</span> <span class="token keyword">long</span> now<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">long</span> expireAge <span class="token operator">=</span> config<span class="token punctuation">.</span><span class="token function">samples</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">*</span> config<span class="token punctuation">.</span><span class="token function">timeWindowMs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//如果样本数据过去了11秒，则重置</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Sample</span> sample <span class="token operator">:</span> samples<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>now <span class="token operator">-</span> sample<span class="token punctuation">.</span>lastWindowMs <span class="token operator">&gt;=</span> expireAge<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">//即11秒reset一次</span>
+                    <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"reset===="</span> <span class="token operator">+</span> now <span class="token operator">+</span> <span class="token string">"----"</span> <span class="token operator">+</span> sample<span class="token punctuation">.</span>lastWindowMs <span class="token operator">+</span> <span class="token string">"---"</span> <span class="token operator">+</span> expireAge<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    sample<span class="token punctuation">.</span><span class="token function">reset</span><span class="token punctuation">(</span>now<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+     <span class="token comment">//WindowedSum#combine</span>
+    <span class="token keyword">public</span> <span class="token keyword">double</span> <span class="token function">combine</span><span class="token punctuation">(</span><span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Sample</span><span class="token punctuation">&gt;</span></span> samples<span class="token punctuation">,</span> <span class="token class-name">MetricConfig</span> config<span class="token punctuation">,</span> <span class="token keyword">long</span> now<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token keyword">double</span> total <span class="token operator">=</span> <span class="token number">0.0</span><span class="token punctuation">;</span>
+         <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Sample</span> sample <span class="token operator">:</span> samples<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+             total <span class="token operator">+=</span> sample<span class="token punctuation">.</span>value<span class="token punctuation">;</span>
+         <span class="token punctuation">}</span>
+         <span class="token keyword">return</span> total<span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_262"></a>流量是在哪儿记录的？</h2> 
+<p>相信读到这里很多人都有这个疑问，在followers端是在FetchResponse返回的时候记录的，代码见图三</p> 
+<p><img src="https://images2.imgbox.com/ca/21/gRwt4iT9_o.png" alt="在这里插入图片描述"></p> 
+<p>在leader端，是在读完日志文件之后会记录流量值</p> 
+<p><img src="https://images2.imgbox.com/13/e4/ZzRVU8b8_o.png" alt="在这里插入图片描述"></p> 
+<p>可以看到在follower端需要判断是否在限流副本中才记录流量值，而在leader端则没有这个限制，不知道这是不是kafka的bug？针对这个问题我也做了测试，的确是在leader端被同步副本时，不在限流配置中的topic<br> 也会被记录流量值，不太能猜到这样做的意图。<br> 在这里我们也可以梳理一下Kafka限流的实现原理：<br> 1、在broker启动的时候初始化限流管理类及全局的限流配置。<br> 2、如果在zk节点中写入了leader及follower的限流配置，则会在同步副本时调用方法isQuotaExceeded来判断是否达到限流值，在这里我还想说明一下为什么在zk中写入leader.replication<br> .throttled.replicas数据时为什么要包含原来所有的副本，因为在同步新副本的时候leader有可能会掉线然后重新选举leader，所以不如一次性全写入。<br> 3、如果没有达到限流值则会在对应的地方分别记录流量，leader与follower的流量值是分开记录的。<br> 4、判断是否达到限流值的方式就是记录最近一定数量的样本并计算平均值。</p> 
+<h2>
+<a id="_282"></a>对于限流的几点思考</h2> 
+<p>学到这里可能大家对限流代码逻辑有了一个基本的认识，我们下面就通过几个问题来让大家加深印象。</p> 
+<h3>
+<a id="1_284"></a>设置限流值为1是否永远都无法完成分区重分配任务？</h3> 
+<p>不完全是，可以设想一下，如果副本数据小于一次fetch的值，leader跟follower之前也完全没有流量记录，那一次同步之后就结束了，样本那也只能记录一下这次的流量，但达到完全没有流量记录是十分苛责的，只存在于demo<br> 版的kafka，在follower端还可以达到，而在leader端，根据我的测试，平常完全没有数据的一次fetch也会返回18k的流量，一秒大概是36k的数据，所以如果数据大于一次fetch的上限，那在之后fetch的时候都会被leader端限制。我们在设置限流值的时候一定要考虑副本的日常流量，这点在官方文档上也有提及，如果小于日常流量的话那将无法完成迁移。</p> 
+<h3>
+<a id="leader_287"></a>针对leader的测试</h3> 
+<ul>
+<li>准备3个broker，topic_1与topic_2，leader都在broker1上，topic_1迁移到broker2上，topic_2迁移到broker3上，副本数据为200M，限流值设置为300*1024b/s即300k/s</li>
+<li>结果如下,200M = 200<em>1024k,200</em>1024k/300k/60≈11.37min，因为有两个topic都需要迁移，且leader端限制了传输速率，所以最终迁移持续时间大概为19分钟</li>
+</ul> 
+<pre><code class="prism language-scala"><span class="token punctuation">[</span>controller<span class="token operator">-</span>event<span class="token operator">-</span>thread<span class="token punctuation">]</span> INFO kafka<span class="token punctuation">.</span>controller<span class="token punctuation">.</span>KafkaController <span class="token operator">-</span> <span class="token punctuation">[</span>Controller id<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">]</span> reassignment <span class="token operator">:</span>Map<span class="token punctuation">(</span>topic_1<span class="token operator">-</span><span class="token number">0</span> <span class="token operator">-&gt;</span> ReplicaAssignment<span class="token punctuation">(</span>replicas<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">,</span> addingReplicas<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> removingReplicas<span class="token operator">=</span><span class="token punctuation">)</span><span class="token punctuation">,</span> topic_2<span class="token operator">-</span><span class="token number">0</span> <span class="token operator">-&gt;</span> ReplicaAssignment<span class="token punctuation">(</span>replicas<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">,</span> addingReplicas<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> removingReplicas<span class="token operator">=</span><span class="token punctuation">)</span><span class="token punctuation">)</span> start at <span class="token number">2021</span><span class="token operator">-</span><span class="token number">11</span><span class="token operator">-</span><span class="token number">13</span> <span class="token number">13</span><span class="token operator">:</span><span class="token number">18</span><span class="token operator">:</span><span class="token number">20</span>
+ 
+   <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+<span class="token punctuation">[</span>controller<span class="token operator">-</span>event<span class="token operator">-</span>thread<span class="token punctuation">]</span> INFO kafka<span class="token punctuation">.</span>controller<span class="token punctuation">.</span>KafkaController <span class="token operator">-</span> <span class="token punctuation">[</span>Controller id<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">]</span> No more partitions need to <span class="token namespace">be</span> reassigned<span class="token punctuation">.</span> Deleting zk path <span class="token operator">/</span>admin<span class="token operator">/</span>reassign_partitions at <span class="token number">2021</span><span class="token operator">-</span><span class="token number">11</span><span class="token operator">-</span><span class="token number">13</span> <span class="token number">13</span><span class="token operator">:</span><span class="token number">37</span><span class="token operator">:</span><span class="token number">31</span>
+</code></pre> 
+<h3>
+<a id="follower_297"></a>针对follower的测试</h3> 
+<ul>
+<li>准备3个broker，topic_1与topic_2，topic_1的leader在broker1上，topic_2的leader在broker2上，均迁移到broker3，副本数据为200M，限流值设置为300*1024b/s</li>
+<li>结果如下，这里跟上一个例子一样，原本只需要11分钟左右的，因为有两个topic都需要迁移，follower端限制了传输速率，所以最终迁移持续时间有21分钟</li>
+</ul> 
+<pre><code class="prism language-scala"><span class="token punctuation">[</span>controller<span class="token operator">-</span>event<span class="token operator">-</span>thread<span class="token punctuation">]</span> INFO kafka<span class="token punctuation">.</span>controller<span class="token punctuation">.</span>KafkaController <span class="token operator">-</span> <span class="token punctuation">[</span>Controller id<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">]</span> reassignment <span class="token operator">:</span>Map<span class="token punctuation">(</span>topic_1<span class="token operator">-</span><span class="token number">0</span> <span class="token operator">-&gt;</span> ReplicaAssignment<span class="token punctuation">(</span>replicas<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">,</span> addingReplicas<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> removingReplicas<span class="token operator">=</span><span class="token punctuation">)</span><span class="token punctuation">,</span> topic_2<span class="token operator">-</span><span class="token number">0</span> <span class="token operator">-&gt;</span> ReplicaAssignment<span class="token punctuation">(</span>replicas<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">,</span> addingReplicas<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> removingReplicas<span class="token operator">=</span><span class="token punctuation">)</span><span class="token punctuation">)</span> start at <span class="token number">2021</span><span class="token operator">-</span><span class="token number">11</span><span class="token operator">-</span><span class="token number">13</span> <span class="token number">14</span><span class="token operator">:</span><span class="token number">22</span><span class="token operator">:</span><span class="token number">42</span>
+  
+  <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+<span class="token punctuation">[</span>controller<span class="token operator">-</span>event<span class="token operator">-</span>thread<span class="token punctuation">]</span> INFO kafka<span class="token punctuation">.</span>controller<span class="token punctuation">.</span>KafkaController <span class="token operator">-</span> <span class="token punctuation">[</span>Controller id<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">]</span> No more partitions need to <span class="token namespace">be</span> reassigned<span class="token punctuation">.</span> Deleting zk path <span class="token operator">/</span>admin<span class="token operator">/</span>reassign_partitions at <span class="token number">2021</span><span class="token operator">-</span><span class="token number">11</span><span class="token operator">-</span><span class="token number">13</span> <span class="token number">14</span><span class="token operator">:</span><span class="token number">43</span><span class="token operator">:</span><span class="token number">17</span>
+
+</code></pre> 
+<h3>
+<a id="_308"></a>限制互不影响的测试</h3> 
+<ul>
+<li>准备3个broker，topic_1与topic_2，topic_1的leader在broker1上，topic_2的leader在broker2上，topic_1迁移到broker2，topic_2迁移到broker3<br> 副本数据为200M，限流值设置为300*1024b/s</li>
+<li>结果如下，可以看到leader与follower的针对不同topic互不影响的情况下就是11分钟完成迁移。</li>
+</ul> 
+<pre><code class="prism language-scala"><span class="token punctuation">[</span>controller<span class="token operator">-</span>event<span class="token operator">-</span>thread<span class="token punctuation">]</span> INFO kafka<span class="token punctuation">.</span>controller<span class="token punctuation">.</span>KafkaController <span class="token operator">-</span> <span class="token punctuation">[</span>Controller id<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">]</span> reassignment <span class="token operator">:</span>Map<span class="token punctuation">(</span>topic_1<span class="token operator">-</span><span class="token number">0</span> <span class="token operator">-&gt;</span> ReplicaAssignment<span class="token punctuation">(</span>replicas<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span><span class="token number">2</span><span class="token punctuation">,</span> addingReplicas<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> removingReplicas<span class="token operator">=</span><span class="token punctuation">)</span><span class="token punctuation">,</span> topic_2<span class="token operator">-</span><span class="token number">0</span> <span class="token operator">-&gt;</span> ReplicaAssignment<span class="token punctuation">(</span>replicas<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span><span class="token number">3</span><span class="token punctuation">,</span> addingReplicas<span class="token operator">=</span><span class="token number">3</span><span class="token punctuation">,</span> removingReplicas<span class="token operator">=</span><span class="token punctuation">)</span><span class="token punctuation">)</span> start at <span class="token number">2021</span><span class="token operator">-</span><span class="token number">11</span><span class="token operator">-</span><span class="token number">13</span> <span class="token number">15</span><span class="token operator">:</span><span class="token number">04</span><span class="token operator">:</span><span class="token number">37</span>
+  
+  <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+  
+<span class="token punctuation">[</span>controller<span class="token operator">-</span>event<span class="token operator">-</span>thread<span class="token punctuation">]</span> INFO kafka<span class="token punctuation">.</span>controller<span class="token punctuation">.</span>KafkaController <span class="token operator">-</span> <span class="token punctuation">[</span>Controller id<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">]</span> No more partitions need to <span class="token namespace">be</span> reassigned<span class="token punctuation">.</span> Deleting zk path <span class="token operator">/</span>admin<span class="token operator">/</span>reassign_partitions at <span class="token number">2021</span><span class="token operator">-</span><span class="token number">11</span><span class="token operator">-</span><span class="token number">13</span> <span class="token number">15</span><span class="token operator">:</span><span class="token number">15</span><span class="token operator">:</span><span class="token number">40</span>
+</code></pre> 
+<h3>
+<a id="_319"></a>如何估算集群迁移总流量？</h3> 
+<p>我给出的意见是分别取所有leader跟follower的并集并去重计算个数，分别乘以限流值，然后取小值来估算。即sum = Math.min(leader,follower)*throttle。</p> 
+<h3>
+<a id="kafka_322"></a>关于kafka的限流实现机制是跟你设想的一样吗？</h3> 
+<p>我觉得kafka限流不仅是给了我们一种限流的实现方式，更是教会我们如何拆分功能，这套就完全是跟kafka主要功能分离的，对外只提供关键方法，然后在关键代码处记录流量值，这也是我们在平常开发与设计中需要学习的。</p> 
+<h2>
+<a id="kafka_325"></a>最后关于kafka源码学习的几点建议</h2> 
+<ul>
+<li>首先建议大家先了解scala的基本语法，虽然跟java比较像，但熟悉之后更容易读懂源码的意思。</li>
+<li>建议大家学习kafka服务通信及副本机相关代码，这是两个比较独立的模块，在很多地方都有用到。</li>
+<li>最后，kafka断点是非常难打的，很容易就会跟zk失联，所以要学会在关键处打上日志，并且耐心的分析源码。</li>
+</ul> 
+<hr> 
+<p><span id="jump99"></span></p> 
+ 
+ <font color="red" size="5"> <b> 再赠5本,欢度每周五 </b> </font>
+ 
+<hr> 
+<p>从开始决定送书到现在,已经送出去 「 <font color="red">100 </font> 」多本书了, 又快到周五啦,接着搞, 这次联合机械工业出版社送书, 周五一口气送<br> 「 <font color="red"> 5 </font> 」本, 提供1款书 (可直接点击链接购买)</p> 
+<ol><li>
+<a href="https://item.jd.com/12950924.html"><font color="blue" size="4"><b><u>《Flink内核原理与实现》</u></b></font></a> ,</li></ol> 
+<p>参与方式:<br> 2. 给本文<font color="red">「一键三连」</font> 支持博主<br> 3. 加抽奖群,参与抽奖 周五开奖！</p> 
+<hr> 
+<p>【编辑推荐】<br> 4. 作者团队权威：9位行业专家联袂推荐，带你参透Flink的内核原理。<br> 5. 内容全面详实：从Flink的基本思想、原理到其后期的技术实现与管理。<br> 6. 读者覆盖面广：从大数据开发、架构人员到性能优化运维工程师。</p> 
+ 
+ <img src="https://images2.imgbox.com/1f/4b/kg6AE8aZ_o.png" height="160" width="160"> 
+ 
+ 
+ <a href="https://www.szzdzhp.com/kafka/Source_code/source-create-topic.html"> <font size="5" color="red"><b> <u>进群参与抽奖</u> </b></font> </a> 
+ 
+ 
+ <img src="https://images2.imgbox.com/b9/cd/G0M4B5e6_o.png" height="200" width="160"> 
+ 
+<hr> 
+ 
+ <font size="5" color="red"> ?? <strong>扫描</strong> 下方 <strong>关注公众号</strong> 参与每周福利??</font> 
+
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

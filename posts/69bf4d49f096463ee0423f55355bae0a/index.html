@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>人脸识别实战：使用Opencv&#43;SVM实现人脸识别 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">人脸识别实战：使用Opencv&#43;SVM实现人脸识别</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atelier-sulphurpool-light">
+                    
+                        
+                    
+                    <p>在本文中，您将学习如何使用 OpenCV 进行人脸识别。文章分三部分介绍：</p> 
+<p>第一，将首先执行人脸检测，使用深度学习从每个人脸中提取人脸量化为128位的向量。</p> 
+<p>第二， 在嵌入基础上使用支持向量机（SVM）训练人脸识别模型。</p> 
+<p>第三，最后使用 OpenCV 识别图像和视频流中的人脸。</p> 
+<p><img src="https://images2.imgbox.com/98/79/xzgtGNBK_o.gif" alt="img"></p> 
+<h1>
+<a id="_11"></a>项目结构</h1> 
+<pre><code>facedetection
+├─dataset
+│  ├─Biden
+│  ├─chenglong
+│  ├─mayun
+│  ├─Trump
+│  ├─yangmi
+│  └─zhaoliying
+├─face_dete_model
+│  ├─deploy.proto.txt
+│  └─res10_300x300_ssd_iter_140000_fp16.caffemodel
+│
+├─output
+├─face_embeddings.py
+├─nn4.small2.v1.t7
+├─recognize_face.py
+├─recognize_video.py
+└─train_face.py
+</code></pre> 
+<h1>
+<a id="_34"></a>编码</h1> 
+<p>新建face_embeddings.py脚本，写入如下代码：</p> 
+<pre><code># import the necessary packages
+import numpy as np
+import pickle
+import cv2
+import os
+import os
+</code></pre> 
+<p>导入需要的包。然后定义几个函数：</p> 
+<pre><code>def list_images(basePath, contains=None):
+    # return the set of files that are valid
+    return list_files(basePath, validExts=image_types, contains=contains)
+
+
+def list_files(basePath, validExts=None, contains=None):
+    # loop over the directory structure
+    for (rootDir, dirNames, filenames) in os.walk(basePath):
+        # loop over the filenames in the current directory
+        for filename in filenames:
+            # if the contains string is not none and the filename does not contain
+            # the supplied string, then ignore the file
+            if contains is not None and filename.find(contains) == -1:
+                continue
+            # determine the file extension of the current file
+            ext = filename[filename.rfind("."):].lower()
+            # check to see if the file is an image and should be processed
+            if validExts is None or ext.endswith(validExts):
+                # construct the path to the image and yield it
+                imagePath = os.path.join(rootDir, filename)
+                yield imagePath
+
+def resize(image, width=None, height=None, inter=cv2.INTER_AREA):
+    dim = None
+    (h, w) = image.shape[:2]
+    # 如果高和宽为None则直接返回
+    if width is None and height is None:
+        return image
+    # 检查宽是否是None
+    if width is None:
+        # 计算高度的比例并并按照比例计算宽度
+        r = height / float(h)
+        dim = (int(w * r), height)
+    # 高为None
+    else:
+        # 计算宽度比例，并计算高度
+        r = width / float(w)
+        dim = (width, int(h * r))
+    resized = cv2.resize(image, dim, interpolation=inter)
+    # return the resized image
+    return resized
+</code></pre> 
+<p>list_images函数，读取数据集文件夹下面的图片。</p> 
+<p>resize函数，等比例resize图片。接下来定义一些变量：</p> 
+<pre><code>dataset_path='dataset'
+embeddings_path='output/embeddings.pickle'
+detector_path='face_dete_model'
+embedding_model='nn4.small2.v1.t7'
+confidence_low=0.5
+</code></pre> 
+<p>dataset_path：数据集路径</p> 
+<p>embeddings_path：输出编码文件的路径</p> 
+<p>detector_path：人脸检测模型的路径</p> 
+<p>embedding_model：编码模型</p> 
+<p>confidence_low：最低的置信度。</p> 
+<p>接下来就是代码的最重要的部分：</p> 
+<pre><code>print("loading face detector...")
+protoPath = os.path.sep.join([detector_path, "deploy.proto.txt"])
+modelPath = os.path.sep.join([detector_path,"res10_300x300_ssd_iter_140000_fp16.caffemodel"])
+detector = cv2.dnn.readNetFromCaffe(protoPath, modelPath)
+# 加载序列化的人脸编码模型
+print("loading face recognizer...")
+embedder = cv2.dnn.readNetFromTorch(embedding_model)
+# 获取数据集中输入图像的路径
+print("quantifying faces...")
+imagePaths = list(list_images(dataset_path))
+# 初始化我们提取的面部编码列表和相应的人名
+knownEmbeddings = []
+knownNames = []
+# 初始化处理的人脸总数
+total = 0
+# loop over the image paths
+for (i, imagePath) in enumerate(imagePaths):
+    # extract the person name from the image path
+    print("processing image {}/{}".format(i + 1,len(imagePaths)))
+    name = imagePath.split(os.path.sep)[-2]
+    # 加载图像，将其调整为宽度为 600 像素（同时保持纵横比），然后抓取图像尺寸
+    image = cv2.imread(imagePath)
+    image = resize(image, width=600)
+    (h, w) = image.shape[:2]
+    # 从图像构建一个 blob
+    imageBlob = cv2.dnn.blobFromImage(
+        cv2.resize(image, (300, 300)), 1.0, (300, 300),
+        (104.0, 177.0, 123.0), swapRB=False, crop=False)
+    # 使用 OpenCV 的基于深度学习的人脸检测器来定位输入图像中的人脸
+    detector.setInput(imageBlob)
+    detections = detector.forward()
+    # ensure at least one face was found
+    if len(detections) &gt; 0:
+        # 假设每个图像只有一张脸，所以找到概率最大的边界框
+        i = np.argmax(detections[0, 0, :, 2])
+        confidence = detections[0, 0, i, 2]
+        # 确保最大概率的检测也意味着我们的最小概率测试（从而帮助过滤掉弱检测）
+        if confidence &gt; confidence_low:
+            # 计算人脸边界框的 (x, y) 坐标
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
+            # 提取人脸ROI并抓取ROI维度
+            face = image[startY:endY, startX:endX]
+            (fH, fW) = face.shape[:2]
+            # 确保人脸宽度和高度足够大
+            if fW &lt; 20 or fH &lt; 20:
+                continue
+            # 为人脸 ROI 构造一个 blob，然后将 blob 通过我们的人脸嵌入模型来获得人脸的 128-d 量化
+            faceBlob = cv2.dnn.blobFromImage(face, 1.0 / 255,
+                                             (96, 96), (0, 0, 0), swapRB=True, crop=False)
+            embedder.setInput(faceBlob)
+            vec = embedder.forward()
+            # 将人名+对应的人脸嵌入添加到各自的列表中
+            knownNames.append(name)
+            knownEmbeddings.append(vec.flatten())
+            total += 1
+# 保存编码文件
+print("serializing {} encodings...".format(total))
+data = {"embeddings": knownEmbeddings, "names": knownNames}
+f = open(embeddings_path, "wb")
+f.write(pickle.dumps(data))
+f.close()
+</code></pre> 
+<p>加载人脸检测器和编码器：</p> 
+<p>检测器：使用基于Caffe的DL人脸检测器来定位图像中的人脸。</p> 
+<p>编码器：模型基于Torch，负责通过深度学习特征提取来提取人脸编码。</p> 
+<p>接下来，让我们抓取图像路径并执行初始化。</p> 
+<p>遍历 imagePaths。从路径中提取人名。</p> 
+<p>构造了一个 blob。</p> 
+<p>然后，通过将 imageBlob 通过检测器网络来检测图像中的人脸。</p> 
+<p>检测列表包含定位图像中人脸的概率和坐标。</p> 
+<p>假设我们至少有一个检测，将进入 if 语句的主体。</p> 
+<p>假设图像中只有一张脸，因此提取具有最高置信度的检测并检查以确保置信度满足用于过滤弱检测的最小概率阈值。</p> 
+<p>假设已经达到了这个阈值，提取面部 ROI 并抓取/检查尺寸以确保面部 ROI 足够大。</p> 
+<p>然后，我们将利用编码器 并提取人脸编码。</p> 
+<p>继续构建另一个 blob。</p> 
+<p>随后，将 faceBlob 通过编码器 。 这会生成一个 128 维向量 (vec) 来描述面部。</p> 
+<p>然后我们简单地将名称和嵌入 vec 分别添加到 knownNames 和 knownEmbeddings 中。</p> 
+<p>继续循环图像、检测人脸并为数据集中的每个图像提取人脸编码的过程。</p> 
+<p>循环结束后剩下的就是将数据转储到磁盘。</p> 
+<p>运行结果：</p> 
+<pre><code class="prism language-Python">loading face detector...
+loading face recognizer...
+quantifying faces...
+processing image 1/19
+processing image 2/19
+processing image 3/19
+processing image 4/19
+processing image 5/19
+processing image 6/19
+processing image 7/19
+processing image 8/19
+processing image 9/19
+processing image 10/19
+processing image 11/19
+processing image 12/19
+processing image 13/19
+processing image 14/19
+processing image 15/19
+processing image 16/19
+processing image 17/19
+processing image 18/19
+processing image 19/19
+serializing 19 encodings...
+
+Process finished with exit code 0
+</code></pre> 
+<h1>
+<a id="_246"></a>训练人脸识别模型</h1> 
+<p>已经为每张脸提取了 128 维编码——但是我们如何根据这些嵌入来识别一个人呢？</p> 
+<p>答案是我们需要在嵌入之上训练一个“标准”机器学习模型（例如 SVM、k-NN 分类器、随机森林等）。</p> 
+<p>今天我们使用SVM实现</p> 
+<p>打开 train_face.py 文件并插入以下代码：</p> 
+<pre><code>from sklearn.preprocessing import LabelEncoder
+from sklearn.svm import SVC
+import pickle
+
+embeddings_path='output/embeddings.pickle'
+recognizer_path='output/recognizer.pickle'
+lable_path='output/le.pickle'
+# 加载编码模型
+print("[INFO] loading face embeddings...")
+data = pickle.loads(open(embeddings_path, "rb").read())
+
+# 给label编码
+print("[INFO] encoding labels...")
+le = LabelEncoder()
+labels = le.fit_transform(data["names"])
+# 训练用于接受人脸 128-d 嵌入的模型，然后产生实际的人脸识别
+recognizer = SVC(C=1.0, kernel="linear", probability=True)
+recognizer.fit(data["embeddings"], labels)
+# 保存模型
+f = open(recognizer_path, "wb")
+f.write(pickle.dumps(recognizer))
+f.close()
+# 保存lable
+f = open(lable_path, "wb")
+f.write(pickle.dumps(le))
+f.close()
+</code></pre> 
+<p>导入包和模块。 我们将使用 scikit-learn 的支持向量机 (SVM) 实现，这是一种常见的机器学习模型。</p> 
+<p>定义变量。</p> 
+<ul>
+<li> <p>embeddings_path：序列化编码。</p> </li>
+<li> <p>recognizer_path：这将是我们识别人脸的输出模型。 它基于 SVM。</p> </li>
+<li> <p>lable_path：标签编码器输出文件路径</p> </li>
+</ul> 
+<p>加载编码。</p> 
+<p>然后初始化 scikit-learn LabelEncoder 并编码名称标签。</p> 
+<p>训练模型。本文使用的是线性支持向量机 (SVM)，但如果您愿意，您可以尝试使用其他机器学习模型进行试验。</p> 
+<p>训练模型后，我们将模型和标签编码器保存到电脑上。</p> 
+<p>运行train_face.py 脚本。</p> 
+<h1>
+<a id="_305"></a>识别图像中的人脸</h1> 
+<p>新建脚本文件recognize_face.py，插入一下代码：</p> 
+<pre><code>import numpy as np
+import pickle
+import cv2
+import os
+</code></pre> 
+<p>导入包，然后我们需要新增一个resize方法。</p> 
+<pre><code>def resize(image, width=None, height=None, inter=cv2.INTER_AREA):
+    dim = None
+    (h, w) = image.shape[:2]
+    # 如果高和宽为None则直接返回
+    if width is None and height is None:
+        return image
+    # 检查宽是否是None
+    if width is None:
+        # 计算高度的比例并并按照比例计算宽度
+        r = height / float(h)
+        dim = (int(w * r), height)
+    # 高为None
+    else:
+        # 计算宽度比例，并计算高度
+        r = width / float(w)
+        dim = (width, int(h * r))
+    resized = cv2.resize(image, dim, interpolation=inter)
+    # return the resized image
+    return resized
+</code></pre> 
+<p>等比例resize图像,定义变量：</p> 
+<pre><code>image_path = '11.jpg'
+detector_path = 'face_dete_model'
+embedding_path = 'nn4.small2.v1.t7'
+recognizer_path = 'output/recognizer.pickle'
+label_path = 'output/le.pickle'
+confidence_low = 0.5
+</code></pre> 
+<p>这六个变量的含义如下：</p> 
+<ul>
+<li> <p>image_path ：输入图像的路径。</p> </li>
+<li> <p>detector_path：OpenCV 深度学习人脸检测器的路径。 使用这个模型来检测人脸 ROI 在图像中的位置。</p> </li>
+<li> <p>embedding_path : OpenCV 深度学习人脸编码模型的路径。 我们将使用这个模型从人脸 ROI 中提取 128 维人脸嵌入——然后将把数据输入到识别器中。</p> </li>
+<li> <p>recognizer_path ：识别器模型的路径。</p> </li>
+<li> <p>label_path : 标签编码器的路径。</p> </li>
+<li> <p>confidence_low：过滤弱人脸检测的可选阈值。</p> </li>
+</ul> 
+<p>接下来是代码的主体部分：</p> 
+<pre><code class="prism language-python"><span class="token comment"># 加载序列化人脸检测器</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"[INFO] loading face detector..."</span><span class="token punctuation">)</span>
+protoPath <span class="token operator">=</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>sep<span class="token punctuation">.</span>join<span class="token punctuation">(</span><span class="token punctuation">[</span>detector_path<span class="token punctuation">,</span> <span class="token string">"deploy.proto.txt"</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+modelPath <span class="token operator">=</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>sep<span class="token punctuation">.</span>join<span class="token punctuation">(</span><span class="token punctuation">[</span>detector_path<span class="token punctuation">,</span><span class="token string">"res10_300x300_ssd_iter_140000_fp16.caffemodel"</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+detector <span class="token operator">=</span> cv2<span class="token punctuation">.</span>dnn<span class="token punctuation">.</span>readNetFromCaffe<span class="token punctuation">(</span>protoPath<span class="token punctuation">,</span> modelPath<span class="token punctuation">)</span>
+<span class="token comment"># 加载我们序列化的人脸编码模型</span>
+<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"[INFO] loading face recognizer..."</span><span class="token punctuation">)</span>
+embedder <span class="token operator">=</span> cv2<span class="token punctuation">.</span>dnn<span class="token punctuation">.</span>readNetFromTorch<span class="token punctuation">(</span>embedding_path<span class="token punctuation">)</span>
+<span class="token comment"># 加载实际的人脸识别模型和标签编码器</span>
+recognizer <span class="token operator">=</span> pickle<span class="token punctuation">.</span>loads<span class="token punctuation">(</span><span class="token builtin">open</span><span class="token punctuation">(</span>recognizer_path<span class="token punctuation">,</span> <span class="token string">"rb"</span><span class="token punctuation">)</span><span class="token punctuation">.</span>read<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+le <span class="token operator">=</span> pickle<span class="token punctuation">.</span>loads<span class="token punctuation">(</span><span class="token builtin">open</span><span class="token punctuation">(</span>label_path<span class="token punctuation">,</span> <span class="token string">"rb"</span><span class="token punctuation">)</span><span class="token punctuation">.</span>read<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token comment"># 加载图像，将其调整为宽度为 600 像素（同时保持纵横比），然后抓取图像尺寸</span>
+image <span class="token operator">=</span> cv2<span class="token punctuation">.</span>imread<span class="token punctuation">(</span>image_path<span class="token punctuation">)</span>
+image <span class="token operator">=</span> resize<span class="token punctuation">(</span>image<span class="token punctuation">,</span> width<span class="token operator">=</span><span class="token number">600</span><span class="token punctuation">)</span>
+<span class="token punctuation">(</span>h<span class="token punctuation">,</span> w<span class="token punctuation">)</span> <span class="token operator">=</span> image<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">]</span>
+<span class="token comment"># 从图像构建一个 blob</span>
+imageBlob <span class="token operator">=</span> cv2<span class="token punctuation">.</span>dnn<span class="token punctuation">.</span>blobFromImage<span class="token punctuation">(</span>
+    cv2<span class="token punctuation">.</span>resize<span class="token punctuation">(</span>image<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">300</span><span class="token punctuation">,</span> <span class="token number">300</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">1.0</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">300</span><span class="token punctuation">,</span> <span class="token number">300</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+    <span class="token punctuation">(</span><span class="token number">104.0</span><span class="token punctuation">,</span> <span class="token number">177.0</span><span class="token punctuation">,</span> <span class="token number">123.0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> swapRB<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> crop<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+
+<span class="token comment"># 应用 OpenCV 的基于深度学习的人脸检测器来定位输入图像中的人脸</span>
+detector<span class="token punctuation">.</span>setInput<span class="token punctuation">(</span>imageBlob<span class="token punctuation">)</span>
+detections <span class="token operator">=</span> detector<span class="token punctuation">.</span>forward<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+<span class="token comment"># loop over the detections</span>
+<span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> detections<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># 提取与预测相关的置信度（即概率）</span>
+    confidence <span class="token operator">=</span> detections<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> i<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">]</span>
+    <span class="token comment"># filter out weak detections</span>
+    <span class="token keyword">if</span> confidence <span class="token operator">&gt;</span> confidence_low<span class="token punctuation">:</span>
+        <span class="token comment"># 计算人脸边界框的 (x, y) 坐标</span>
+        box <span class="token operator">=</span> detections<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> i<span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">:</span><span class="token number">7</span><span class="token punctuation">]</span> <span class="token operator">*</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>w<span class="token punctuation">,</span> h<span class="token punctuation">,</span> w<span class="token punctuation">,</span> h<span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token punctuation">(</span>startX<span class="token punctuation">,</span> startY<span class="token punctuation">,</span> endX<span class="token punctuation">,</span> endY<span class="token punctuation">)</span> <span class="token operator">=</span> box<span class="token punctuation">.</span>astype<span class="token punctuation">(</span><span class="token string">"int"</span><span class="token punctuation">)</span>
+        <span class="token comment"># 提取人脸ROI</span>
+        face <span class="token operator">=</span> image<span class="token punctuation">[</span>startY<span class="token punctuation">:</span>endY<span class="token punctuation">,</span> startX<span class="token punctuation">:</span>endX<span class="token punctuation">]</span>
+        <span class="token punctuation">(</span>fH<span class="token punctuation">,</span> fW<span class="token punctuation">)</span> <span class="token operator">=</span> face<span class="token punctuation">.</span>shape<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token number">2</span><span class="token punctuation">]</span>
+        <span class="token comment"># 确保人脸宽度和高度足够大</span>
+        <span class="token keyword">if</span> fW <span class="token operator">&lt;</span> <span class="token number">20</span> <span class="token keyword">or</span> fH <span class="token operator">&lt;</span> <span class="token number">20</span><span class="token punctuation">:</span>
+            <span class="token keyword">continue</span>
+
+        <span class="token comment"># 为人脸 ROI 构造一个 blob，然后将 blob 通过我们的人脸嵌入模型来获得人脸的 128-d 量化</span>
+        faceBlob <span class="token operator">=</span> cv2<span class="token punctuation">.</span>dnn<span class="token punctuation">.</span>blobFromImage<span class="token punctuation">(</span>face<span class="token punctuation">,</span> <span class="token number">1.0</span> <span class="token operator">/</span> <span class="token number">255</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">96</span><span class="token punctuation">,</span> <span class="token number">96</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                         <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">,</span> swapRB<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">,</span> crop<span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">)</span>
+        embedder<span class="token punctuation">.</span>setInput<span class="token punctuation">(</span>faceBlob<span class="token punctuation">)</span>
+        vec <span class="token operator">=</span> embedder<span class="token punctuation">.</span>forward<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment"># 执行分类以识别人脸</span>
+        preds <span class="token operator">=</span> recognizer<span class="token punctuation">.</span>predict_proba<span class="token punctuation">(</span>vec<span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+        j <span class="token operator">=</span> np<span class="token punctuation">.</span>argmax<span class="token punctuation">(</span>preds<span class="token punctuation">)</span>
+        proba <span class="token operator">=</span> preds<span class="token punctuation">[</span>j<span class="token punctuation">]</span>
+        name <span class="token operator">=</span> le<span class="token punctuation">.</span>classes_<span class="token punctuation">[</span>j<span class="token punctuation">]</span>
+        <span class="token comment"># 绘制人脸的边界框以及相关的概率</span>
+        text <span class="token operator">=</span> <span class="token string">"{}: {:.2f}%"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>name<span class="token punctuation">,</span> proba <span class="token operator">*</span> <span class="token number">100</span><span class="token punctuation">)</span>
+        y <span class="token operator">=</span> startY <span class="token operator">-</span> <span class="token number">10</span> <span class="token keyword">if</span> startY <span class="token operator">-</span> <span class="token number">10</span> <span class="token operator">&gt;</span> <span class="token number">10</span> <span class="token keyword">else</span> startY <span class="token operator">+</span> <span class="token number">10</span>
+        cv2<span class="token punctuation">.</span>rectangle<span class="token punctuation">(</span>image<span class="token punctuation">,</span> <span class="token punctuation">(</span>startX<span class="token punctuation">,</span> startY<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">(</span>endX<span class="token punctuation">,</span> endY<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                      <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+        cv2<span class="token punctuation">.</span>putText<span class="token punctuation">(</span>image<span class="token punctuation">,</span> text<span class="token punctuation">,</span> <span class="token punctuation">(</span>startX<span class="token punctuation">,</span> y<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    cv2<span class="token punctuation">.</span>FONT_HERSHEY_SIMPLEX<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">255</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>
+
+<span class="token comment"># 展示结果</span>
+cv2<span class="token punctuation">.</span>imshow<span class="token punctuation">(</span><span class="token string">"Image"</span><span class="token punctuation">,</span> image<span class="token punctuation">)</span>
+cv2<span class="token punctuation">.</span>waitKey<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>我们在这个块中加载三个模型。 冒着冗余的风险，我想明确提醒您模型之间的差异：</p> 
+<ul>
+<li> <p>检测器：一个预训练的 Caffe DL 模型，用于检测人脸在图像中的位置。</p> </li>
+<li> <p>embedder：一个预训练的 Torch DL 模型，用于计算我们的 128-D 人脸嵌入。</p> </li>
+<li> <p>识别器：线性 SVM 人脸识别模型。<br> 1 和 2 都是预先训练好的，这意味着它们是由 OpenCV 按原样提供给您的</p> </li>
+</ul> 
+<p>加载标签编码器，其中包含我们的模型可以识别的人的姓名。</p> 
+<p>将图像加载到内存中并构建一个 blob。</p> 
+<p>通过我们的检测器定位图像中的人脸。</p> 
+<p>您将从步骤 1 中识别出此块。 我在这里再解释一遍：</p> 
+<p>遍历检测并提取每个检测的置信度。</p> 
+<p>然后将置信度与命令行 最小概率检测阈值进行比较，确保计算出的概率大于最小概率。</p> 
+<p>我们提取人脸 ROI并确保它的空间维度足够大。<br> <strong>下面是识别人脸 ROI代码：</strong></p> 
+<p>首先，构建一个 faceBlob）并将其通过编码器以生成描述面部的 128 维向量</p> 
+<p>然后，我们将 vec 通过我们的 SVM 识别器模型，其结果是我们对面部 ROI 中的人的预测。</p> 
+<p>我们取最高概率指数并查询我们的标签编码器以找到名称。</p> 
+<p>循环中识别每一张脸（包括“未知”）人：</p> 
+<p>在构造了一个包含名称和概率的文本字符串。</p> 
+<p>然后在脸部周围绘制一个矩形并将文本放在框上方。</p> 
+<p>最后我们在屏幕上可视化结果，直到按下某个键。</p> 
+<p><img src="https://images2.imgbox.com/81/64/7sJCzYvO_o.png" alt="image-20211216141212409"></p> 
+<p>可以看出使用机器学习的方式准确率还是比较低的，但是优点是速度快。</p> 
+<h1>
+<a id="_473"></a>摄像头识别人脸</h1> 
+<p>这里我用视频代替，代码和图像中识别人脸的步骤一致，直接上代码。</p> 
+<p>新建recognize_video.py脚本，插入一下代码：</p> 
+<pre><code>import numpy as np
+import pickle
+import time
+import cv2
+import os
+
+
+def resize(image, width=None, height=None, inter=cv2.INTER_AREA):
+    dim = None
+    (h, w) = image.shape[:2]
+    # 如果高和宽为None则直接返回
+    if width is None and height is None:
+        return image
+    # 检查宽是否是None
+    if width is None:
+        # 计算高度的比例并并按照比例计算宽度
+        r = height / float(h)
+        dim = (int(w * r), height)
+    # 高为None
+    else:
+        # 计算宽度比例，并计算高度
+        r = width / float(w)
+        dim = (width, int(h * r))
+    resized = cv2.resize(image, dim, interpolation=inter)
+    # return the resized image
+    return resized
+
+out_put='output.avi'
+video_path = '1.mp4'
+detector_path = 'face_dete_model'
+embedding_path = 'nn4.small2.v1.t7'
+recognizer_path = 'output/recognizer.pickle'
+label_path = 'output/le.pickle'
+confidence_low = 0.5
+# load our serialized face detector from disk
+print("[INFO] loading face detector...")
+protoPath = os.path.sep.join([detector_path, "deploy.proto.txt"])
+modelPath = os.path.sep.join([detector_path,"res10_300x300_ssd_iter_140000_fp16.caffemodel"])
+detector = cv2.dnn.readNetFromCaffe(protoPath, modelPath)
+
+# load our serialized face embedding model from disk
+print("[INFO] loading face recognizer...")
+embedder = cv2.dnn.readNetFromTorch(embedding_path)
+
+# load the actual face recognition model along with the label encoder
+recognizer = pickle.loads(open(recognizer_path, "rb").read())
+le = pickle.loads(open(label_path, "rb").read())
+
+# initialize the video stream, then allow the camera sensor to warm up
+print("[INFO] starting video stream...")
+#vs = cv2.VideoCapture(0) #摄像头
+vs=cv2.VideoCapture(video_path)# 视频
+time.sleep(2.0)
+
+# start the FPS throughput estimator
+
+writer=None
+# loop over frames from the video file stream
+while True:
+    # grab the frame from the threaded video stream
+    ret_val, frame = vs.read()
+
+    if ret_val is False:
+        break
+    # resize the frame to have a width of 600 pixels (while
+    # maintaining the aspect ratio), and then grab the image
+    # dimensions
+    frame = resize(frame, width=600)
+    (h, w) = frame.shape[:2]
+
+    # construct a blob from the image
+    imageBlob = cv2.dnn.blobFromImage(
+        cv2.resize(frame, (300, 300)), 1.0, (300, 300),
+        (104.0, 177.0, 123.0), swapRB=False, crop=False)
+
+    # apply OpenCV's deep learning-based face detector to localize
+    # faces in the input image
+    detector.setInput(imageBlob)
+    detections = detector.forward()
+
+    # loop over the detections
+    for i in range(0, detections.shape[2]):
+        # extract the confidence (i.e., probability) associated with
+        # the prediction
+        confidence = detections[0, 0, i, 2]
+
+        # filter out weak detections
+        if confidence &gt;confidence_low:
+            # compute the (x, y)-coordinates of the bounding box for
+            # the face
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
+            # extract the face ROI
+            face = frame[startY:endY, startX:endX]
+            (fH, fW) = face.shape[:2]
+
+            # ensure the face width and height are sufficiently large
+            if fW &lt; 20 or fH &lt; 20:
+                continue
+
+            # construct a blob for the face ROI, then pass the blob
+            # through our face embedding model to obtain the 128-d
+            # quantification of the face
+            faceBlob = cv2.dnn.blobFromImage(face, 1.0 / 255,
+                                             (96, 96), (0, 0, 0), swapRB=True, crop=False)
+            embedder.setInput(faceBlob)
+            vec = embedder.forward()
+
+            # perform classification to recognize the face
+            preds = recognizer.predict_proba(vec)[0]
+            j = np.argmax(preds)
+            proba = preds[j]
+            name = le.classes_[j]
+
+            # draw the bounding box of the face along with the
+            # associated probability
+            text = "{}: {:.2f}%".format(name, proba * 100)
+            y = startY - 10 if startY - 10 &gt; 10 else startY + 10
+            cv2.rectangle(frame, (startX, startY), (endX, endY),
+                          (0, 0, 255), 2)
+            cv2.putText(frame, text, (startX, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 2)
+
+            if writer is None and out_put is not None:
+                fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+                writer = cv2.VideoWriter(out_put, fourcc, 20,
+                                         (frame.shape[1], frame.shape[0]), True)
+                # 如果 writer 不是 None，则将识别出人脸的帧写入磁盘
+            if writer is not None:
+                writer.write(frame)
+    # show the output frame
+    cv2.imshow("Frame", frame)
+    key = cv2.waitKey(1) &amp; 0xFF
+    # if the `q` key was pressed, break from the loop
+    if key == ord("q"):
+        break
+
+# do a bit of cleanup
+cv2.destroyAllWindows()
+vs.release()
+if writer is not None:
+    writer.release()
+</code></pre> 
+<p>运行结果：</p> 
+<p><img src="https://images2.imgbox.com/48/cd/1DmVDDwt_o.gif" alt="请添加图片描述"><br> 完整的代码：<br> https://download.csdn.net/download/hhhhhhhhhhwwwwwwwwww/64761335</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>链下签名实现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">链下签名实现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_0"></a>什么是签名</h2> 
+<p>比如我们在使用 opensea 的时候，经常会提示我们进行数字签名，如下图：<br> <img src="https://images2.imgbox.com/81/c3/dWHZUXhk_o.png" alt="在这里插入图片描述"><br> 用户进行 sign 确认，即用自己的私钥对一段数据进行签名，得到一个 signature，其他人可以使用你私钥对应的公钥，对 signature 进行验证，从而证明你是私钥的持有者。签名后的数据有如下作用：</p> 
+<ul>
+<li>验证身份：验证私钥持有人</li>
+<li>完整性：防止数据被篡改</li>
+<li>不可否认：持有人无法否认签名</li>
+</ul> 
+<p>我们在区块链中发起的每一笔交易（转账、对合约写操作）都是使用私钥签名过的，矿工会在打包前对每笔交易进行校验。具体逻辑如图：<br> <img src="https://images2.imgbox.com/2e/b4/wx4Trfb3_o.png" alt="在这里插入图片描述"><br> 签名的核心：</p> 
+<ul>
+<li>使用私钥进行签名，公钥进行验证</li>
+<li>不对原文进行签名，而是对原文的hash进行签名（为什么这样做呢？主要是因为 hash 计算的不可逆可以防篡改，如果是对原文签名，中间人攻击可以将密文和原文都改了，最后解密出来数据还是一致的，但其实数据已经被篡改了）</li>
+</ul> 
+<h2>
+<a id="ECDSA__13"></a>ECDSA 合约</h2> 
+<p>我们将对 openzeppelin 中的 ECDSA 标准合约进行拆解学习，整个签名验证过程可分为四个阶段：</p> 
+<ul>
+<li>阶段一：打包原始消息，生成 hash</li>
+<li>阶段二：添加前缀，生成以太坊签名 hash，用于最终校验</li>
+<li>阶段三：解析签名，获得解析的地址 1</li>
+<li>阶段四：校验地址 1 与实际签名的地址是否一致<br> <img src="https://images2.imgbox.com/bc/a8/msnENysF_o.png" alt="在这里插入图片描述">
+</li>
+</ul> 
+<h3>
+<a id="_20"></a>阶段一：打包原始消息</h3> 
+<p>在以太坊的 ECDSA 标准中，被签名的消息为一组数据的 hash 值（由 keccak256 算法生成的 byte32 类型的数据），我们可以使用abi.encodePacked（打包函数）将任意多个参数进行打包，此处为：address 和uint256 类型</p> 
+<pre><code>function getMessageHash(address _to, uint _amount) public pure returns(bytes32) {
+    return keccak256(abi.encodePacked(_to, _amount));
+}
+</code></pre> 
+<p>输入参数：0xc783df8a850f42e7f7e57013759c285caa701eb6, 100<br> 输出：0xcfb170482914a76ca8521405f52699df67c7ebb8e3899f27cc8265ebdab98a36<br> <img src="https://images2.imgbox.com/ec/ae/gEHqVNDa_o.png" alt="在这里插入图片描述"></p> 
+<h3>
+<a id="_hash_30"></a>阶段二：生成以太坊签名 hash</h3> 
+<p>原始的消息可以是能被执行的交易，也可以是其他任何形式。为避免用户误签了恶意交易，EIP191 提倡在消息前加上前缀 prefix：“x19Ethereum Signed Message:n32” 字符，并再做一次 keccak256 哈希，作为以太坊签名消息。经过 getEthSignedMessageHash() 函数处理后的消息，不能被用于执行交易</p> 
+<pre><code>function getEthSignedMessageHash(bytes32 _messageHash) public pure returns(bytes32) {
+        return keccak256(
+            // 这是标准字符串: x19Ethereum Signed Message:n
+            // 32 表示后面的哈希内容长度
+            abi.encodePacked("x19Ethereum Signed Message:n32", _messageHash)
+        );
+}
+</code></pre> 
+<p>输入参数：0xcfb170482914a76ca8521405f52699df67c7ebb8e3899f27cc8265ebdab98a36<br> 输出：0x60a7e355f6d1a5885594e145ce67bd165a3e63337806f576b7b417d31cdb20da<br> <img src="https://images2.imgbox.com/c0/75/GCgdmc0a_o.png" alt="在这里插入图片描述"><br> 接着生成签名，这里有两种方式：</p> 
+<ol><li>metamask 生成签名<br> 复制 metamask 账户地址，F12 打开控制台 -&gt; console，输入如下内容然后回车（注意这里的 hash 使用的是“消息 hash”）：</li></ol> 
+<pre><code>ethereum.send('eth_requestAccounts')
+account = "0xFA172d92bC2A12bD780757927B31E3B2CEdE9950"
+hash = "0xcfb170482914a76ca8521405f52699df67c7ebb8e3899f27cc8265ebdab98a36"
+ethereum.request({method: "personal_sign", params: [account, hash]})
+</code></pre> 
+<p>点击签名<br> <img src="https://images2.imgbox.com/2e/57/Z3latF4U_o.png" alt="在这里插入图片描述"><br> 签名成功后，得到签名：<br> <img src="https://images2.imgbox.com/dd/c8/4gR1JPCK_o.png" alt="在这里插入图片描述"><br> 2. etherjs 生成签名<br> 在hardhat的test文件夹下创建sign.ts</p> 
+<pre><code>const { expect } = require("chai")
+const { ethers } = require("hardhat")
+
+describe("Signature", function () {
+  it("signature", async function () {
+    // 0xc783df8a850f42e7f7e57013759c285caa701eb6
+    let privateKey = '0xc5e8f61d1ab959b397eecc0a37a6517b8e67a0e7cf1f4bce5591f3ed80199122'
+    console.log('private:', privateKey);
+
+    const signer = new ethers.Wallet(privateKey);
+    console.log('address :', signer.address);
+
+    const amount = 100
+
+    let msgHash = ethers.utils.solidityKeccak256(
+      ["address", "uint256"], [signer.address, amount]
+    )
+
+    console.log('msgHash:', msgHash);
+    const sig = await signer.signMessage(ethers.utils.arrayify(msgHash))
+
+    console.log('signature:', sig);
+  })
+})
+</code></pre> 
+<p>运行单元测试：npx hardhat test，可以得到相同的签名</p> 
+<h3>
+<a id="_86"></a>阶段三：恢复地址</h3> 
+<p>先对 signature 签名分割得到 r, s, v ，然后结合以太坊签名消息，利用内联汇编得出公钥（即 metamask 账户地址），下面的 recoverSigner() 函数实现了上述步骤：</p> 
+<pre><code>function recoverSigner(bytes32 _ethSignedMessageHash, bytes memory _signature) public pure returns (address) {
+        (bytes32 r, bytes32 s, uint8 v) = splitSignature(_signature);
+
+        // 返回解析出来的签名地址
+        return ecrecover(_ethSignedMessageHash, v, r, s);
+    }
+
+    // 分割签名
+    function splitSignature(bytes memory sig) public pure returns(bytes32 r, bytes32 s, uint8 v) {
+        require(sig.length == 65, "invalid signature length");
+
+        // 通过读取内存数据 根据规则进行截取 返回 r, s, v 数据
+        assembly {
+            r := mload(add(sig, 32))
+            s := mload(add(sig, 64))
+            v := byte(0, mload(add(sig, 96)))
+        }
+    }
+</code></pre> 
+<h3>
+<a id="_108"></a>阶段四：验证</h3> 
+<p>接下来，我们只需要比对恢复的公钥与签名者公钥 _signer 是否相等。若相等，则签名有效；否则，签名无效</p> 
+<pre><code>function verify(bytes32 _ethSignedMessageHash, bytes memory _signature, address _signer) public pure returns(bool) {
+        return recoverSigner(_ethSignedMessageHash, _signature) == _signer;
+    }
+</code></pre> 
+<h2>
+<a id="_115"></a>链下签名实现白名单</h2> 
+<p>核心逻辑</p> 
+<ul>
+<li>将白名单用户地址和 tokenId 签名入库</li>
+<li>用户 mint 铸造时，传入签名，在 mint 中进行校验，只有校验为 true 的用户才可以 mint，从而完成白名单功能</li>
+</ul> 
+<pre><code>function mint(uint256 _tokenId, bytes memory _signature) external {
+        // 将用户地址和_tokenId打包消息
+        bytes32 _msgHash = getMessageHash(msg.sener, _tokenId); 
+
+        // 计算以太坊签名消息
+        bytes32 _ethSignedMessageHash = getEthSignedMessageHash(_msgHash);
+
+        // ECDSA检验通过
+        require(verify(_ethSignedMessageHash, _signature), "Invalid signature");
+
+        // 地址没有mint过
+        require(!mintedAddress[_account], "Already minted!"); 
+        // 铸造
+        _mint(_account, _tokenId);
+        // 铸造记录
+        mintedAddress[_account] = true;
+}
+</code></pre>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

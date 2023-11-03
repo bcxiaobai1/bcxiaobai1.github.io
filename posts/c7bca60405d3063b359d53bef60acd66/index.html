@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>pytorch FX模型静态量化 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">pytorch FX模型静态量化</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul>
+<li><a href="#_7">前言</a></li>
+<li><a href="#pytorch_12">一、pytorch静态量化（手动版）</a></li>
+<li>
+<ul><li><a href="#_14">踩坑：</a></li></ul>
+  </li>
+<li><a href="#FX_46">二、使用FX量化</a></li>
+<li>
+<ul>
+<li><a href="#1_47">1.版本</a></li>
+<li><a href="#2_49">2.代码如下：</a></li>
+</ul>
+  </li>
+<li><a href="#_147">总结</a></li>
+</ul>
+</div>
+<p></p> 
+<hr> 
+<h1>
+<a id="_7"></a>前言</h1> 
+<p>以前面文章写到的mobilenet图像分类为例，本文主要记录一下pytorchh训练后静态量化的过程。</p> 
+<hr> 
+<h1>
+<a id="pytorch_12"></a>一、pytorch静态量化（手动版）</h1> 
+<p>静态量化是最常用的量化形式，float32的模型量化成int8，模型大小大概变为原来的1/4，推理速度我在intel 8700k CPU上测试速度正好快4倍，但是在AMD的5800h CPU 上测试速度反而慢了两倍，应该是AMD不支持某些指令集加速。</p> 
+<h2>
+<a id="_14"></a>踩坑：</h2> 
+<p>之前手动添加量化节点的方式搞了好几天，最后模型是出来了，但是推理时候报错，大多数时候是RuntimeError: Could not run ‘--------’ with arguments from the ‘CPU’ backend，网上是说推理的时候没有安插QuantStub()和DeQuantStub()，可能是用的这个MobilenetV3网络结构复杂，某些地方没有手动添加到，这种方式肯定是可以成功的，只是比较麻烦容易出错。</p> 
+<pre><code class="prism language-c"># 加载模型
+model <span class="token operator">=</span> <span class="token function">MobileNetV3_Large</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">to</span><span class="token punctuation">(</span>device<span class="token punctuation">)</span>  # 加载一个网络，我这边是二分类传了一个<span class="token number">2</span>
+checkpoint <span class="token operator">=</span> torch<span class="token punctuation">.</span><span class="token function">load</span><span class="token punctuation">(</span>weights<span class="token punctuation">,</span> map_location<span class="token operator">=</span>device<span class="token punctuation">)</span>
+model<span class="token punctuation">.</span><span class="token function">load_state_dict</span><span class="token punctuation">(</span>checkpoint<span class="token punctuation">)</span>
+model<span class="token punctuation">.</span><span class="token function">to</span><span class="token punctuation">(</span><span class="token char">'cpu'</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>合并层对于一些重复使用的Block和nn.Sequential要打印出来看，然后append到mix_list 里面<br> 比如</p> 
+<pre><code class="prism language-c"># 打印model
+<span class="token keyword">for</span> name<span class="token punctuation">,</span> module in model<span class="token punctuation">.</span><span class="token function">named_children</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span>
+	<span class="token function">print</span><span class="token punctuation">(</span>name<span class="token punctuation">,</span> module<span class="token punctuation">)</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/a4/ab/XozHa6V2_o.jpg" alt="">比如这里Sequential里面存在conv+bn+relu，append进去的应该是[‘bneck.0.conv1’, ‘bneck.0.bn1’,‘nolinear1’]，但是nolinear1是个变量，也就是说某些时候是relu某些时候又不是，这种时候就要一个个分析判断好然后写代码，稍微复杂点就容易出错或者遗漏。</p> 
+<pre><code class="prism language-c">backend <span class="token operator">=</span> <span class="token string">"fbgemm"</span>  # x86平台
+model<span class="token punctuation">.</span>qconfig <span class="token operator">=</span> torch<span class="token punctuation">.</span>quantization<span class="token punctuation">.</span><span class="token function">get_default_qconfig</span><span class="token punctuation">(</span>backend<span class="token punctuation">)</span>
+mix_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">[</span><span class="token char">'conv1'</span><span class="token punctuation">,</span><span class="token char">'bn1'</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token char">'conv2'</span><span class="token punctuation">,</span><span class="token char">'bn2'</span><span class="token punctuation">]</span><span class="token punctuation">]</span> # 合并层只支持conv<span class="token operator">+</span>bn conv<span class="token operator">+</span>relu conv<span class="token operator">+</span>bn<span class="token operator">+</span>relu等操作，具体可以查一下<span class="token punctuation">,</span>网络中存在的这些操作都append到mix_list里面
+model <span class="token operator">=</span> torch<span class="token punctuation">.</span>quantization<span class="token punctuation">.</span><span class="token function">fuse_modules</span><span class="token punctuation">(</span>model<span class="token punctuation">,</span>listmix<span class="token punctuation">)</span> # 合并某些层
+model_fp32_prepared <span class="token operator">=</span> torch<span class="token punctuation">.</span>quantization<span class="token punctuation">.</span><span class="token function">prepare</span><span class="token punctuation">(</span>model<span class="token punctuation">)</span>
+model_int8 <span class="token operator">=</span> torch<span class="token punctuation">.</span>quantization<span class="token punctuation">.</span><span class="token function">convert</span><span class="token punctuation">(</span>model_fp32_prepared<span class="token punctuation">)</span>
+</code></pre> 
+<p>有时候存在不支持的操作relu6这些要替换成relu，加法操作也要替换，最后还要输入一批图像校准模型等</p> 
+<pre><code class="prism language-c">self<span class="token punctuation">.</span>skip_add <span class="token operator">=</span> nn<span class="token punctuation">.</span>quantized<span class="token punctuation">.</span><span class="token function">FloatFunctional</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token macro property"><span class="token directive-hash">#</span> <span class="token directive keyword">forward</span><span class="token expression">的时候比如<span class="token keyword">return</span> a<span class="token operator">+</span>b 改为<span class="token keyword">return</span> self<span class="token punctuation">.</span>skip_add<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>a<span class="token punctuation">,</span> b<span class="token punctuation">)</span></span></span>
+</code></pre> 
+<p>一系列注意事项操作完毕，最后推理各种报错，放弃了</p> 
+<h1>
+<a id="FX_46"></a>二、使用FX量化</h1> 
+<h2>
+<a id="1_47"></a>1.版本</h2> 
+<p>fx量化版本也有坑，之前在torch 1.7版本操作总是报错搞不定，换成1.12.0版本就正常了，这一点非常重要。</p> 
+<h2>
+<a id="2_49"></a>2.代码如下：</h2> 
+<pre><code class="prism language-c">import torch
+import torch<span class="token punctuation">.</span>nn as nn
+import torch<span class="token punctuation">.</span>nn<span class="token punctuation">.</span>functional as F
+import copy
+import torchvision
+from torchvision import transforms
+from torch<span class="token punctuation">.</span>quantization<span class="token punctuation">.</span>quantize_fx import prepare_fx<span class="token punctuation">,</span> convert_fx
+from torch<span class="token punctuation">.</span>quantization import get_default_qconfig
+from torch import optim
+import os
+import time
+from utils import load_data
+from models<span class="token punctuation">.</span>mobilenetv3copy import MobileNetV3_Large
+
+
+def <span class="token function">evaluate_model</span><span class="token punctuation">(</span>model<span class="token punctuation">,</span> test_loader<span class="token punctuation">,</span> device<span class="token punctuation">,</span> criterion<span class="token operator">=</span>None<span class="token punctuation">)</span><span class="token operator">:</span>
+    model<span class="token punctuation">.</span><span class="token function">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    model<span class="token punctuation">.</span><span class="token function">to</span><span class="token punctuation">(</span>device<span class="token punctuation">)</span>
+    running_loss <span class="token operator">=</span> <span class="token number">0</span>
+    running_corrects <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">for</span> inputs<span class="token punctuation">,</span> labels in test_loader<span class="token operator">:</span>
+        inputs <span class="token operator">=</span> inputs<span class="token punctuation">.</span><span class="token function">to</span><span class="token punctuation">(</span>device<span class="token punctuation">)</span>
+        labels <span class="token operator">=</span> labels<span class="token punctuation">.</span><span class="token function">to</span><span class="token punctuation">(</span>device<span class="token punctuation">)</span>
+
+        outputs <span class="token operator">=</span> <span class="token function">model</span><span class="token punctuation">(</span>inputs<span class="token punctuation">)</span>
+        _<span class="token punctuation">,</span> preds <span class="token operator">=</span> torch<span class="token punctuation">.</span><span class="token function">max</span><span class="token punctuation">(</span>outputs<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span>
+        <span class="token keyword">if</span> criterion is not None<span class="token operator">:</span>
+            loss <span class="token operator">=</span> <span class="token function">criterion</span><span class="token punctuation">(</span>outputs<span class="token punctuation">,</span> labels<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">item</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token operator">:</span>
+            loss <span class="token operator">=</span> <span class="token number">0</span>
+        <span class="token macro property"><span class="token directive-hash">#</span> <span class="token directive keyword">statistics</span></span>
+        running_loss <span class="token operator">+=</span> loss <span class="token operator">*</span> inputs<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+        running_corrects <span class="token operator">+=</span> torch<span class="token punctuation">.</span><span class="token function">sum</span><span class="token punctuation">(</span>preds <span class="token operator">==</span> labels<span class="token punctuation">.</span>data<span class="token punctuation">)</span>
+    eval_loss <span class="token operator">=</span> running_loss <span class="token operator">/</span> <span class="token function">len</span><span class="token punctuation">(</span>test_loader<span class="token punctuation">.</span>dataset<span class="token punctuation">)</span>
+    eval_accuracy <span class="token operator">=</span> running_corrects <span class="token operator">/</span> <span class="token function">len</span><span class="token punctuation">(</span>test_loader<span class="token punctuation">.</span>dataset<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> eval_loss<span class="token punctuation">,</span> eval_accuracy
+
+
+def <span class="token function">quant_fx</span><span class="token punctuation">(</span>model<span class="token punctuation">,</span> data_loader<span class="token punctuation">)</span><span class="token operator">:</span>
+    model_to_quantize <span class="token operator">=</span> copy<span class="token punctuation">.</span><span class="token function">deepcopy</span><span class="token punctuation">(</span>model<span class="token punctuation">)</span>
+    model_to_quantize<span class="token punctuation">.</span><span class="token function">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    qconfig <span class="token operator">=</span> <span class="token function">get_default_qconfig</span><span class="token punctuation">(</span><span class="token string">"fbgemm"</span><span class="token punctuation">)</span>
+    qconfig_dict <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token string">""</span><span class="token operator">:</span> qconfig<span class="token punctuation">}</span>
+    prepared_model <span class="token operator">=</span> <span class="token function">prepare_fx</span><span class="token punctuation">(</span>model_to_quantize<span class="token punctuation">,</span> qconfig_dict<span class="token punctuation">)</span>
+    <span class="token function">print</span><span class="token punctuation">(</span><span class="token string">"开始校准"</span><span class="token punctuation">)</span>
+    <span class="token function">calibrate</span><span class="token punctuation">(</span>prepared_model<span class="token punctuation">,</span> data_loader<span class="token punctuation">)</span>  # 这是输入一批有代表性的数据来校准
+    <span class="token function">print</span><span class="token punctuation">(</span><span class="token string">"校准完毕"</span><span class="token punctuation">)</span>
+    quantized_model <span class="token operator">=</span> <span class="token function">convert_fx</span><span class="token punctuation">(</span>prepared_model<span class="token punctuation">)</span>  # 转换
+    <span class="token keyword">return</span> quantized_model
+
+
+def <span class="token function">calibrate</span><span class="token punctuation">(</span>model<span class="token punctuation">,</span> data_loader<span class="token punctuation">)</span><span class="token operator">:</span>
+    model<span class="token punctuation">.</span><span class="token function">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    with torch<span class="token punctuation">.</span><span class="token function">no_grad</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span>
+        <span class="token keyword">for</span> image<span class="token punctuation">,</span> target in train_loader<span class="token operator">:</span>
+            <span class="token function">model</span><span class="token punctuation">(</span>image<span class="token punctuation">)</span>
+
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">"__main__"</span><span class="token operator">:</span>
+    cuda_device <span class="token operator">=</span> torch<span class="token punctuation">.</span><span class="token function">device</span><span class="token punctuation">(</span><span class="token string">"cuda:0"</span><span class="token punctuation">)</span>
+    cpu_device <span class="token operator">=</span> torch<span class="token punctuation">.</span><span class="token function">device</span><span class="token punctuation">(</span><span class="token string">"cpu:0"</span><span class="token punctuation">)</span>
+    model <span class="token operator">=</span> <span class="token function">MobileNetV3_Large</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span>  # 加载自己的网络
+    train_loader<span class="token punctuation">,</span> test_loader <span class="token operator">=</span> <span class="token function">load_data</span><span class="token punctuation">(</span><span class="token number">64</span><span class="token punctuation">,</span> <span class="token number">8</span><span class="token punctuation">)</span>  # 自己写一个pytorch加载数据的方法
+    
+    <span class="token macro property"><span class="token directive-hash">#</span> <span class="token directive keyword">quantization</span></span>
+    state_dict <span class="token operator">=</span> torch<span class="token punctuation">.</span><span class="token function">load</span><span class="token punctuation">(</span><span class="token char">'./mymodel.pth'</span><span class="token punctuation">)</span>  # 加载一个正常训练好的模型
+    model<span class="token punctuation">.</span><span class="token function">load_state_dict</span><span class="token punctuation">(</span>state_dict<span class="token punctuation">)</span>
+    model<span class="token punctuation">.</span><span class="token function">to</span><span class="token punctuation">(</span><span class="token char">'cpu'</span><span class="token punctuation">)</span>
+    model<span class="token punctuation">.</span><span class="token function">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    quant_model <span class="token operator">=</span> <span class="token function">quant_fx</span><span class="token punctuation">(</span>model<span class="token punctuation">,</span> train_loader<span class="token punctuation">)</span>  # 执行量化代码
+    quant_model<span class="token punctuation">.</span><span class="token function">eval</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token function">print</span><span class="token punctuation">(</span><span class="token string">"开始验证"</span><span class="token punctuation">)</span>
+    eval_loss<span class="token punctuation">,</span> eval_accuracy <span class="token operator">=</span> <span class="token function">evaluate_model</span><span class="token punctuation">(</span>model<span class="token operator">=</span>quant_model<span class="token punctuation">,</span>
+                                              test_loader<span class="token operator">=</span>test_loader<span class="token punctuation">,</span>
+                                              device<span class="token operator">=</span>cpu_device<span class="token punctuation">,</span>
+                                              criterion<span class="token operator">=</span>nn<span class="token punctuation">.</span><span class="token function">CrossEntropyLoss</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token function">print</span><span class="token punctuation">(</span><span class="token string">"Epoch: {:02d} Eval Loss: {:.3f} Eval Acc: {:.3f}"</span><span class="token punctuation">.</span><span class="token function">format</span><span class="token punctuation">(</span>
+        <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> eval_loss<span class="token punctuation">,</span> eval_accuracy<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    torch<span class="token punctuation">.</span>jit<span class="token punctuation">.</span><span class="token function">save</span><span class="token punctuation">(</span>torch<span class="token punctuation">.</span>jit<span class="token punctuation">.</span><span class="token function">script</span><span class="token punctuation">(</span>quant_model<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token char">'outQuant.pth'</span><span class="token punctuation">)</span>  # 保存量化后的模型
+    
+    # 加载量化模型推理
+    loaded_quantized_model <span class="token operator">=</span> torch<span class="token punctuation">.</span>jit<span class="token punctuation">.</span><span class="token function">load</span><span class="token punctuation">(</span><span class="token char">'outQuant.pth'</span><span class="token punctuation">)</span>
+    eval_loss<span class="token punctuation">,</span> eval_accuracy <span class="token operator">=</span> <span class="token function">evaluate_model</span><span class="token punctuation">(</span>model<span class="token operator">=</span>quant_model<span class="token punctuation">,</span>
+                                              test_loader<span class="token operator">=</span>test_loader<span class="token punctuation">,</span>
+                                              device<span class="token operator">=</span>cpu_device<span class="token punctuation">,</span>
+                                              criterion<span class="token operator">=</span>nn<span class="token punctuation">.</span><span class="token function">CrossEntropyLoss</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token function">print</span><span class="token punctuation">(</span><span class="token string">"Epoch: {:02d} Eval Loss: {:.3f} Eval Acc: {:.3f}"</span><span class="token punctuation">.</span><span class="token function">format</span><span class="token punctuation">(</span>
+        <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span> eval_loss<span class="token punctuation">,</span> eval_accuracy<span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>fx量化也不用管里面什么算子不支持之类的，开箱即用，以上代码参考pytorch官网https://pytorch.org/docs/stable/fx.html<br> 最后验证模型精度下降0.02%可以忽略不计，pytorch量化的模型是不支持gpu推理的，只能在arm或者x86平台实现压缩提速。要用cuda的话要上tensorrt+onnx，以后完成了再讲。完整的训练模型量化模型的代码后面会放到github上面。<br> 完整代码:https://github.com/Ysnower/pytorch-static-quant</p> 
+<hr> 
+<h1>
+<a id="_147"></a>总结</h1> 
+<p>刚开始搞量化坑比较多，一个是某些操作不支持，合并层麻烦，另外有版本问题导致的报错可能搞很久，觉得有用的各位吴彦祖麻烦送个免费三连</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

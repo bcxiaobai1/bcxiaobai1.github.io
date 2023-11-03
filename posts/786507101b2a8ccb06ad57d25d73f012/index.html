@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>实战：k8s持久化存储pv和pvc-2021.11.16 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">实战：k8s持久化存储pv和pvc-2021.11.16</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p><img src="https://images2.imgbox.com/8a/d1/MMHu7loU_o.png" alt="image-20211116160051628"></p> 
+<h2>
+<a id="_2"></a>目录</h2> 
+<p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul><li>
+<ul>
+<li><a href="#_2">目录</a></li>
+<li><a href="#_5">实验环境</a></li>
+<li><a href="#_15">实验软件(无)</a></li>
+<li><a href="#1_17">1、理论基础</a></li>
+<li>
+<ul>
+<li><a href="#1_19">1.数据持久化的目的</a></li>
+<li><a href="#2_24">2.生命周期</a></li>
+<li><a href="#3pvpvc_30">3.pv和pvc</a></li>
+</ul>
+   </li>
+<li><a href="#2_54">2、实践演练</a></li>
+<li>
+<ul>
+<li><a href="#0nfs_56">0.搭建一个nfs存储</a></li>
+<li><a href="#1NFSPV_142">1.创建基于NFS的PV</a></li>
+<li><a href="#2NFSPVC_236">2.创建基于NFS的PVC</a></li>
+<li><a href="#3Podpvc_293">3.创建Pod应用挂载pvc</a></li>
+<li><a href="#4_344">4.创建对应存储上面的资源</a></li>
+<li><a href="#5nginxpodservice_354">5.创建nginx的pod和service</a></li>
+<li><a href="#6_640">6.模拟容器意外退出</a></li>
+<li><a href="#7PVCPV_673">7.回收PVC和PV</a></li>
+<li><a href="#8_718">8.排错异常</a></li>
+<li><a href="#9_744">9.面试题</a></li>
+</ul>
+   </li>
+<li><a href="#3_755">3、总结</a></li>
+<li><a href="#_763">关于我</a></li>
+<li><a href="#_787">最后</a></li>
+</ul>
+ </li></ul>
+</div>
+<p></p> 
+<h2>
+<a id="_5"></a>实验环境</h2> 
+<pre><code class="prism language-bash">实验环境：
+<span class="token number">1</span>、win10,vmwrokstation虚机；
+<span class="token number">2</span>、k8s集群：3台centos7.6 <span class="token number">1810</span>虚机，1个master节点,2个node节点
+   k8s version：v1.21
+   CONTAINER-RUNTIME：docker://20.10.7
+</code></pre> 
+<h2>
+<a id="_15"></a>实验软件(无)</h2> 
+<h2>
+<a id="1_17"></a>1、理论基础</h2> 
+<h3>
+<a id="1_19"></a>1.数据持久化的目的</h3> 
+<ul>
+<li>通常情况下，容器运行起来后，写入到其容器内部的文件是暂时性的。当容器崩溃后，k8s将这个容器kill掉，然后生成一个新的容器，此时，新运行的容器将没有原来容器内的文件，因为容器是从镜像重新创建的。 （<strong>容器一旦重启或者被删除了，里面存放的数据是会被销毁的</strong>）</li>
+<li>数据共享：同一个pod中运行的容器之间，经常会存在共享文件或目录的需求，比如<strong>采集容器和主容器</strong>
+</li>
+</ul> 
+<h3>
+<a id="2_24"></a>2.生命周期</h3> 
+<p><em><u>k8s里面的volume数据卷存在明确的生命周期，并且volume的生命周期比同一容器组pod中的任意容器的生命周期都要长</u></em>。不管容器本身重启了多少次，数据都被保留下来。<strong>当然，pod如果不存在了，数据卷自然就退出了。</strong></p> 
+<blockquote> 
+ <p>注意：可以定义pod所使用的数据卷类型不同，数据可能随着数据卷的退出而删除，也可能被真正的持久化，即使后期重新使用容器时仍然可以使用该数据卷，下面有例子。</p> 
+</blockquote> 
+<h3>
+<a id="3pvpvc_30"></a>3.pv和pvc</h3> 
+<p>数据卷在k8s生产中用的最多的还是PV和PVC (PersistentVolume和PersistentVolumeClaim)。在企业里面，<strong>PV由运维工程师来进行维护（存储工程师）</strong>，而<strong>PVC则是由开发人员自己申请使用即可</strong>。其中PV是具有持久性的，生命周期独立于Pod，研发人员需要进行一个容器的数据卷挂载，<strong>那么写一个PVC来绑定PV就可以了，k8s自身会查找符合条件的PV。</strong></p> 
+<p>有了pvc，我们在K8s进行卷挂载就只需要考虑要多少容量了，而不用关心真正的空间是用什么存储系统做的等一些底层细节信息，pv这些只有存储管理员才应用去关心它。</p> 
+<p>K8s支持多种类型的pv，我们这里就以生产中常用的NFS来作演示（<strong>在云上的话就用NAS，我们使用了阿里云的NAS</strong>），<strong>生产中如果对存储要求不是太高的话，建议就用NFS，这样出问题也比较容易解决，如果有性能需求，可以看看rook的ceph。</strong></p> 
+<p>这里列出了阿里云的NAS相关的性能，价格信息，供大家参考</p> 
+<p>1.通用型NAS存储(性价比高，可以存放<strong>web内容管理，数据库备份，日志存储等</strong>。)：</p> 
+<ul>
+<li>通用型：容量是1~10PB，读带宽150MBps/TiB，最大IOPS是15K。价格是0.35元/GiB/月</li>
+<li>性能型：容量是1PB，读带宽600MBps/TiB，最大IOPS是30K。价格是1.85元/GiB/月</li>
+</ul> 
+<p>2.极速型NAS(低时延，<strong>高性能WEB服务，数据库</strong>)：</p> 
+<ul><li>容量：100GiB<sub>256TiB，带宽150MB/s</sub> 1200MB/s，最大IOPS是200K，时延0.2ms。价格是1.8元/GiB/月</li></ul> 
+<p><img src="https://images2.imgbox.com/e4/8d/wFM44YHR_o.png" alt="image-20211114205202923"></p> 
+<h2>
+<a id="2_54"></a>2、实践演练</h2> 
+<h3>
+<a id="0nfs_56"></a>0.搭建一个nfs存储</h3> 
+<blockquote> 
+ <p>注意：本次复用k8s-master节点作为nfs server端来提供nfs服务。</p> 
+</blockquote> 
+<p>（1）在nfs server端安装nfs服务</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 在nfs server服务端节点(k8s-master)安装</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#yum install nfs-utils -y</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#mkdir /nfs</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#echo "/nfs *(rw,insecure,sync,no_root_squash)" &gt; /etc/exports</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#systemctl enable rpcbind nfs-utils nfs-server --now</span>
+
+<span class="token comment"># 检测一下</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#showmount -e 172.29.9.31</span>
+Export list <span class="token keyword">for</span> <span class="token number">172.29</span>.9.31:
+/nfs *
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>（2）nfs server端配置完成后，可以在其他的机器上挂在检测一下</p> 
+<pre><code class="prism language-bash"><span class="token comment">#本次在k8s-node1上验证下nfs server提供的nfs服务是否正常</span>
+用下面这个命令验证下：
+<span class="token function">mount</span> -t nfs -o <span class="token assign-left variable">vers</span><span class="token operator">=</span><span class="token number">3</span>,nolock,proto<span class="token operator">=</span>tcp,rsize<span class="token operator">=</span><span class="token number">1048576</span>,wsize<span class="token operator">=</span><span class="token number">1048576</span>,hard,timeo<span class="token operator">=</span><span class="token number">600</span>,retrans<span class="token operator">=</span><span class="token number">2</span>,noresvport <span class="token number">172.29</span>.9.31:/nfs /opt
+
+<span class="token comment">#如果是报下面这个错误的话，是因为nfs client也是需要安装nfs-utils包的，要不这个测试命令用不了的。</span>
+<span class="token comment">#最后，特别注意：无论nfs客户端还是服务端均要安装nfs-utils软件包的，否则后期pod创建会报错的！！！</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#mount -t nfs -o vers=3,nolock,proto=tcp,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 172.29.9.31:/nfs /opt</span>
+mount: wrong fs type, bad option, bad superblock on <span class="token number">172.29</span>.9.31:/nfs,
+       missing codepage or helper program, or other error
+       <span class="token punctuation">(</span>for several filesystems <span class="token punctuation">(</span>e.g. nfs, cifs<span class="token punctuation">)</span> you might
+       need a /sbin/mount.<span class="token operator">&lt;</span>type<span class="token operator">&gt;</span> helper program<span class="token punctuation">)</span>
+
+       In some cases useful info is found <span class="token keyword">in</span> syslog - try
+       <span class="token function">dmesg</span> <span class="token operator">|</span> <span class="token function">tail</span> or so.
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+
+<span class="token comment">#安装nfs-utils</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#yum install -y nfs-utils</span>
+
+<span class="token comment">#再次用命令测试nfs 服务是否正常</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#mount -t nfs -o vers=3,nolock,proto=tcp,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 172.29.9.31:/nfs /opt</span>
+<span class="token comment">#可以看到nfs服务一切正常</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#df|grep nfs </span>
+<span class="token number">172.29</span>.9.31:/nfs         <span class="token number">17811456</span> <span class="token number">6279424</span>  <span class="token number">11532032</span>  <span class="token number">36</span>% /opt
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#mount|grep nfs</span>
+sunrpc on /var/lib/nfs/rpc_pipefs <span class="token builtin class-name">type</span> rpc_pipefs <span class="token punctuation">(</span>rw,relatime<span class="token punctuation">)</span>
+<span class="token number">172.29</span>.9.31:/nfs on /opt <span class="token builtin class-name">type</span> nfs <span class="token punctuation">(</span>rw,relatime,vers<span class="token operator">=</span><span class="token number">3</span>,rsize<span class="token operator">=</span><span class="token number">262144</span>,wsize<span class="token operator">=</span><span class="token number">262144</span>,namlen<span class="token operator">=</span><span class="token number">255</span>,hard,nolock,noresvport,proto<span class="token operator">=</span>tcp,timeo<span class="token operator">=</span><span class="token number">600</span>,retrans<span class="token operator">=</span><span class="token number">2</span>,sec<span class="token operator">=</span>sys,mountaddr<span class="token operator">=</span><span class="token number">172.29</span>.9.31,mountvers<span class="token operator">=</span><span class="token number">3</span>,mountport<span class="token operator">=</span><span class="token number">20048</span>,mountproto<span class="token operator">=</span>tcp,local_lock<span class="token operator">=</span>all,addr<span class="token operator">=</span><span class="token number">172.29</span>.9.31<span class="token punctuation">)</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#</span>
+
+
+<span class="token comment">#我们可以顺便写几个文件测测下效果：</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#df -hT|grep nfs</span>
+<span class="token number">172.29</span>.9.31:/nfs        nfs        17G  <span class="token number">6</span>.0G   11G  <span class="token number">36</span>% /opt
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#cd /opt/</span>
+<span class="token punctuation">[</span>root@k8s-node1 opt<span class="token punctuation">]</span><span class="token comment">#ls</span>
+<span class="token punctuation">[</span>root@k8s-node1 opt<span class="token punctuation">]</span><span class="token comment">#echo node2 &gt; node2.txt #在node2 nfs client的nfs目录下写一个文件</span>
+<span class="token punctuation">[</span>root@k8s-node1 opt<span class="token punctuation">]</span><span class="token comment">#</span>
+<span class="token punctuation">[</span>root@k8s-node1 opt<span class="token punctuation">]</span><span class="token comment">#exit</span>
+<span class="token builtin class-name">logout</span>
+Connection to k8s-node1 closed.
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#cd /nfs/ #然后再nfs serrver端的nfs目录下就可以看见这个文件了，说明我们的nfs服务时没有问题的</span>
+<span class="token punctuation">[</span>root@k8s-master nfs<span class="token punctuation">]</span><span class="token comment">#ls</span>
+node2.txt
+<span class="token punctuation">[</span>root@k8s-master nfs<span class="token punctuation">]</span><span class="token comment">#cat node2.txt</span>
+node2
+<span class="token punctuation">[</span>root@k8s-master nfs<span class="token punctuation">]</span><span class="token comment">#</span>
+
+
+<span class="token comment">#测试nfs正常后，我们这里把刚挂载的nfs给卸载掉</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#df -hT|grep nfs</span>
+<span class="token number">172.29</span>.9.31:/nfs        nfs        17G  <span class="token number">6</span>.0G   11G  <span class="token number">36</span>% /opt
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#umount /opt/</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#df -hT|grep nfs</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>nfs服务搭建成功后，我们就可以来测试pv、pvc的实验了。</p> 
+<blockquote> 
+ <p>问题：测试pv,pvc实验时，需要把刚才测试nfs服务可用性时挂载的目录给卸载吗？<br> 答案：可以去掉，也可以不去掉。一般情况是需要去掉的，当时我们只是测试下nfs服务的可用性而已。并且我们只要保证k8s节点均能使用nfs服务即可。记得，节点上要安装<code>nfs-utils</code>软件包哦。</p> 
+</blockquote> 
+<h3>
+<a id="1NFSPV_142"></a>1.创建基于NFS的PV</h3> 
+<p>我们先来查看下当前k8s集群环境，保证本次实验环境纯净：</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get po,deploy,svc,pv,pvc #可以看到，当前k8s集群环境是ok的</span>
+NAME                 TYPE        CLUSTER-IP   EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>   AGE
+service/kubernetes   ClusterIP   <span class="token number">10.96</span>.0.1    <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        <span class="token number">443</span>/TCP   166d
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>1、创建pv的yaml文件</p> 
+<p>运维工程师准备好PV的配置文件，如下所示：</p> 
+<p>vim pv.yaml</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> PersistentVolume
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> pv1
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">type</span><span class="token punctuation">:</span> k8s<span class="token punctuation">-</span>claim <span class="token comment"># &lt;----------  0	</span>
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">capacity</span><span class="token punctuation">:</span>
+    <span class="token key atrule">storage</span><span class="token punctuation">:</span> 1Gi <span class="token comment"># &lt;----------  1</span>
+  <span class="token key atrule">accessModes</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"ReadWriteOnce"</span><span class="token punctuation">]</span> <span class="token comment"># &lt;----------  2</span>
+  <span class="token key atrule">persistentVolumeReclaimPolicy</span><span class="token punctuation">:</span> Recycle <span class="token comment"># &lt;----------  3</span>
+  <span class="token key atrule">storageClassName</span><span class="token punctuation">:</span> nfs <span class="token comment"># &lt;----------  4</span>
+  <span class="token key atrule">nfs</span><span class="token punctuation">:</span>
+    <span class="token key atrule">path</span><span class="token punctuation">:</span> /nfs/pv1 <span class="token comment"># &lt;----------  5</span>
+    <span class="token key atrule">server</span><span class="token punctuation">:</span> 172.29.9.31    
+</code></pre> 
+<p>对上面的yaml文件我们做个说明：</p> 
+<pre><code class="prism language-bash"><span class="token number">0</span>、labels:
+      type: k8s-claim    <span class="token comment"># 这里建议打上一个独有的标签，在多个pv的时候方便提供pvc选择挂载，工作中一般上打标签格式是：项目组-团队名-pv名</span>
+<span class="token number">1</span>、capacity是指定pv的容量是1G
+<span class="token number">2</span>、accessModes是指定的访问模式，支持的访问模式有: 
+	ReadWriteOnce表示PV能以read-write模式mount到单个节点
+	ReadOnlyMany表示pv有read-only只读模式mount到多个节点
+	ReadWriteMany表示pv以read-write模式mount到多个节点
+
+<span class="token number">3</span>、persistentVolumeReclaimPolicy 指定当PV的回收策略，有三种方式:<span class="token comment">#研发使用完后，就会删除pvc，删除pvc后就会有3个动作</span>
+	Retain: 删除容器之后，但是pv由管理员手工回收，安全级别比较高 <span class="token comment">#工作环境中一般常用的是`retain`</span>
+	Recycle：删除容器之后，清除PV中的数据，效果相当于执行了rm -rf /nfs/pv1/*
+	Delete：删除容器之后，删除整个PV对应的存储资源，不推荐<span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span>
+
+<span class="token number">4</span>、storageClassName是指定PV的class为我们这里定义的nfs，相当于为PV设置了一个分类，<span class="token variable"><span class="token variable">`</span>pvc可以指定class申请相应class的pv<span class="token variable">`</span></span>。举个例子：开发去申请2G大小的pvc，那么符合pvc条件的pv有两种。一种是高速存储Gclass，一种是低速存储Lclass，开发申请的2G是用于数据库，那么需要高速存储，此时定义storageClassName为Gclass，所以pvc会自动去找Gclass。
+
+这里有个坑，<span class="token variable"><span class="token variable">`</span>就是PVC里面的storageClassName必须和PV里面的storageClassName保持一致<span class="token variable">`</span></span>。
+<span class="token comment">#我们可以看到，pvC的限制非常多，都要符合pv的条件才行；</span>
+</code></pre> 
+<p>另外：这里需要先指定PV在NFS服务器上对应的目录，这里注意，需要手动提前创建好这个目录并授权，否则后面挂载会提示目录不存在。授权的用户及用户组是nobody #这里需要注意下。</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#cat /etc/passwd|grep nobody</span>
+nobody:x:99:99:Nobody:/:/sbin/nologin
+nfsnobody:x:65534:65534:Anonymous NFS User:/var/lib/nfs:/sbin/nologin
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#mkdir /nfs/pv1</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#chown -R nobody.nobody /nfs/pv1/</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#chown -R nobody.nobody /nfs/</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#ll -d /nfs/ /nfs/pv1/</span>
+drwxr-xr-x <span class="token number">3</span> nobody nobody <span class="token number">34</span> Nov <span class="token number">16</span> <span class="token number">14</span>:29 /nfs/
+drwxr-xr-x <span class="token number">2</span> nobody nobody  <span class="token number">6</span> Nov <span class="token number">16</span> <span class="token number">14</span>:29 /nfs/pv1/
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>2、创建PV</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 部署pv</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl apply -f pv.yaml</span>
+persistentvolume/pv1 created
+
+<span class="token comment"># 查看pv的状态</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get pv</span>
+NAME   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM   STORAGECLASS   REASON   AGE
+pv1    1Gi        RWO            Recycle          Available           nfs                     5s
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+
+<span class="token comment"># 注意：查看STATUS字段，只有为Available字段才可以正常使用，被pvc申请</span>
+</code></pre> 
+<h3>
+<a id="2NFSPVC_236"></a>2.创建基于NFS的PVC</h3> 
+<p>1、接下来创建pvc</p> 
+<p>vim pvc.yaml</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> PersistentVolumeClaim
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> pvc1	<span class="token comment">#  &lt;----------4</span>
+
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">accessModes</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"ReadWriteOnce"</span><span class="token punctuation">]</span>	<span class="token comment"># &lt;----------0</span>
+  <span class="token key atrule">resources</span><span class="token punctuation">:</span>
+    <span class="token key atrule">requests</span><span class="token punctuation">:</span>
+      <span class="token key atrule">storage</span><span class="token punctuation">:</span> 1Gi	<span class="token comment"># &lt;----------1</span>
+  <span class="token key atrule">storageClassName</span><span class="token punctuation">:</span> nfs	<span class="token comment"># &lt;----------2</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">type</span><span class="token punctuation">:</span> k8s<span class="token punctuation">-</span>claim    <span class="token comment"># &lt;----------3   </span>
+</code></pre> 
+<p>接下来我们对上面的参数做一个说明</p> 
+<pre><code class="prism language-bash"><span class="token number">0</span>、accessModes是指定的访问模式，跟我们上面解释的一个道理，需要注意，<span class="token variable"><span class="token variable">`</span>pv里面是什么模式，这里也要写对应的模式<span class="token variable">`</span></span>
+<span class="token number">1</span>、storage存储大小，与pv里面保持一致
+<span class="token number">2</span>、storageClassName名字，至少和某个pv的storageClassName保持一致，否则找不到对应的分类
+<span class="token number">3</span>、matchLabels: 这是匹配的pv的标签，标签在k8s里面非常重要的一个概念
+<span class="token number">4</span>、metadata：pvc的标签，后面挂载成功后会用到
+</code></pre> 
+<p>2、创建pvc</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 应用pvc.yaml配置文件</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl apply -f pvc.yaml</span>
+persistentvolumeclaim/pvc1 created
+
+<span class="token comment"># 获取pvc状态</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get pvc</span>
+NAME   STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+pvc1   Bound    pv1      1Gi        RWO            nfs            53s
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+<span class="token comment"># 主要是看STATUS字段，当表示Bound代表成功找到pv并成功绑定</span>
+
+<span class="token comment"># 此时再去看pv的状态</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get pv</span>
+NAME   CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM          STORAGECLASS   REASON   AGE
+pv1    1Gi        RWO            Recycle          Bound    default/pvc1   nfs                     12m
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+<span class="token comment"># 可以看到pv的STATUS字段显示Bound，而且CLAIM字段提示被default/pvc所消费</span>
+</code></pre> 
+<h3>
+<a id="3Podpvc_293"></a>3.创建Pod应用挂载pvc</h3> 
+<p><strong>pvc与pv绑定成功后就可以使用pvc了，使用pvc其实就是挂载pvc，当目录挂载了pvc之后，应用就可以正常工作了</strong>，比如将pvc挂载到nginx的web根目录/usr/share/www/html上，如下例子所示：</p> 
+<p>vim nginx.yaml</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Service
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">80</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+    <span class="token key atrule">targetPort</span><span class="token punctuation">:</span> <span class="token number">80</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> apps/v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Deployment
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">replicas</span><span class="token punctuation">:</span> <span class="token number">1</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+  <span class="token key atrule">template</span><span class="token punctuation">:</span>
+    <span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+      <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+        <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+    <span class="token key atrule">spec</span><span class="token punctuation">:</span>
+      <span class="token key atrule">containers</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx
+        <span class="token key atrule">image</span><span class="token punctuation">:</span> nginx
+        <span class="token key atrule">volumeMounts</span><span class="token punctuation">:</span> <span class="token comment"># 我们这里将nginx容器默认的页面目录挂载</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> html<span class="token punctuation">-</span>files <span class="token comment"># 与下面的volumes的name保持一致</span>
+          <span class="token key atrule">mountPath</span><span class="token punctuation">:</span> <span class="token string">"usr/share/nginx/html"</span>
+
+      <span class="token key atrule">volumes</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> html<span class="token punctuation">-</span>files
+        <span class="token key atrule">persistentVolumeClaim</span><span class="token punctuation">:</span>  <span class="token comment"># 卷类型使用pvc,同时下面名称处填先创建好的pvc1</span>
+          <span class="token key atrule">claimName</span><span class="token punctuation">:</span> pvc1
+</code></pre> 
+<h3>
+<a id="4_344"></a>4.创建对应存储上面的资源</h3> 
+<p>在实际的工作环境当中，创建一个相对应的web服务之前已经准备好了访问的资源，等容器创建完毕，就可以立马访问了。</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 先在对应的存储上创建访问的资源</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#cd /nfs/pv1/</span>
+<span class="token punctuation">[</span>root@k8s-master pv1<span class="token punctuation">]</span><span class="token comment">#echo 'HelloWorld' &gt; index.html</span>
+</code></pre> 
+<h3>
+<a id="5nginxpodservice_354"></a>5.创建nginx的pod和service</h3> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl apply -f nginx.yaml</span>
+service/nginx created
+deployment.apps/nginx created
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>等待这个pod资源创建完毕</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get po,deploy,svc</span>
+NAME                       READY   STATUS    RESTARTS   AGE
+pod/nginx-ffc5548d-48zwj   <span class="token number">1</span>/1     Running   <span class="token number">0</span>          30s
+
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/nginx   <span class="token number">1</span>/1     <span class="token number">1</span>            <span class="token number">1</span>           30s
+
+NAME                 TYPE        CLUSTER-IP    EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>   AGE
+service/kubernetes   ClusterIP   <span class="token number">10.96</span>.0.1     <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        <span class="token number">443</span>/TCP   167d
+service/nginx        ClusterIP   <span class="token number">10.97</span>.70.55   <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        <span class="token number">80</span>/TCP    30s
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>访问一下</p> 
+<pre><code class="prism language-bash">~<span class="token punctuation">]</span><span class="token comment"># curl http://svc地址</span>
+
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#curl 10.97.70.55</span>
+HelloWorld
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>进入容器内部修改index.html文件(<strong>不建议</strong>)，再次访问查看效果：</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get po</span>
+NAME                   READY   STATUS    RESTARTS   AGE
+nginx-ffc5548d-48zwj   <span class="token number">1</span>/1     Running   <span class="token number">0</span>          3m13s
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl exec -it nginx-ffc5548d-48zwj -- bash</span>
+root@nginx-ffc5548d-48zwj:/<span class="token comment"># echo 222222 &gt;&gt; /usr/share/nginx/html/index.html</span>
+root@nginx-ffc5548d-48zwj:/<span class="token comment"># exit</span>
+<span class="token builtin class-name">exit</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#cat /nfs/pv1/index.html</span>
+HelloWorld
+<span class="token number">222222</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+<span class="token comment">#以上符合预期效果。</span>
+</code></pre> 
+<p>看的出来容器里面的修改都会保存到nfs存储上。</p> 
+<blockquote> 
+ <p>有的同学访问403的原因和解决方法</p> 
+ <p>没有在nfs存储创建相应的资源导致的。主要是容器里面的/usr/share/nginx/html目录下的内容挂载后被覆盖了，所以没有index.html文件</p> 
+</blockquote> 
+<p>在nginx的pod所在的节点执行下面的命令可以查看相关的挂载信息</p> 
+<pre><code class="prism language-bash"><span class="token comment">#查看次pod被调度在了k8s-node1节点上了</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get po -owide</span>
+NAME                   READY   STATUS    RESTARTS   AGE     IP              NODE        NOMINATED NODE   READINESS GATES
+nginx-ffc5548d-48zwj   <span class="token number">1</span>/1     Running   <span class="token number">0</span>          4m56s   <span class="token number">10.244</span>.36.122   k8s-node1   <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>           <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+
+<span class="token comment">#到k8s-node1节点上可以看到次pod的挂载信息的</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#mount -l|grep nfs</span>
+sunrpc on /var/lib/nfs/rpc_pipefs <span class="token builtin class-name">type</span> rpc_pipefs <span class="token punctuation">(</span>rw,relatime<span class="token punctuation">)</span>
+<span class="token number">172.29</span>.9.31:/nfs/pv1 on /var/lib/kubelet/pods/91246cf2-5a69-4e93-999b-5166be2a12b6/volumes/kubernetes.io~nfs/pv1 <span class="token builtin class-name">type</span> nfs4 <span class="token punctuation">(</span>rw,relatime,vers<span class="token operator">=</span><span class="token number">4.1</span>,rsize<span class="token operator">=</span><span class="token number">262144</span>,wsize<span class="token operator">=</span><span class="token number">262144</span>,namlen<span class="token operator">=</span><span class="token number">255</span>,hard,proto<span class="token operator">=</span>tcp,timeo<span class="token operator">=</span><span class="token number">600</span>,retrans<span class="token operator">=</span><span class="token number">2</span>,sec<span class="token operator">=</span>sys,clientaddr<span class="token operator">=</span><span class="token number">172.29</span>.9.32,local_lock<span class="token operator">=</span>none,addr<span class="token operator">=</span><span class="token number">172.29</span>.9.31<span class="token punctuation">)</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#</span>
+
+<span class="token comment">#是可以看到index.html文件的内容的</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#ls /var/lib/kubelet/pods/91246cf2-5a69-4e93-999b-5166be2a12b6/volumes/kubernetes.io~nfs/pv1/</span>
+index.html
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#cat  /var/lib/kubelet/pods/91246cf2-5a69-4e93-999b-5166be2a12b6/volumes/kubernetes.io~nfs/pv1/index.html</span>
+HelloWorld
+<span class="token number">222222</span>
+<span class="token punctuation">[</span>root@k8s-node1 ~<span class="token punctuation">]</span><span class="token comment">#</span>
+
+<span class="token comment"># 在nfs-server端执行，也是可以查看存储目录相关信息的</span>
+<span class="token function">fuser</span> -mv  /nfs/pv1 <span class="token comment">#注意：这个fuser命令需要安装psmisc-22.20-17.el7.x86_64软件包</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#yum install -y psmisc-22.20-17.el7.x86_64</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#fuser -mv  /nfs/pv1|grep nfs</span>
+                     <span class="token environment constant">USER</span>        PID ACCESS COMMAND
+/nfs/pv1:            root      <span class="token function">mount</span> /
+                     root      knfsd /nfs
+                     root      .rce. systemd
+                     root      .rc<span class="token punctuation">..</span> kthreadd
+                     root      .rc<span class="token punctuation">..</span> ksoftirqd/0
+                     root      .rc<span class="token punctuation">..</span> kworker/0:0H
+                     root      .rc<span class="token punctuation">..</span> migration/0
+                     root      .rc<span class="token punctuation">..</span> rcu_bh
+                     root      .rc<span class="token punctuation">..</span> rcu_sched
+                     root      .rc<span class="token punctuation">..</span> lru-add-drain
+                     root      .rc<span class="token punctuation">..</span> watchdog/0
+                     root      .rc<span class="token punctuation">..</span> watchdog/1
+                     root      .rc<span class="token punctuation">..</span> migration/1
+                     root      .rc<span class="token punctuation">..</span> ksoftirqd/1
+                     root      .rc<span class="token punctuation">..</span> kworker/1:0H
+                     root      .rc<span class="token punctuation">..</span> netns
+                     root      .rc<span class="token punctuation">..</span> khungtaskd
+                     root      .rc<span class="token punctuation">..</span> writeback
+                     root      .rc<span class="token punctuation">..</span> kintegrityd
+                     root      .rc<span class="token punctuation">..</span> bioset
+                     root      .rc<span class="token punctuation">..</span> bioset
+                     root      .rc<span class="token punctuation">..</span> bioset
+                     root      .rc<span class="token punctuation">..</span> kblockd
+                     root      .rc<span class="token punctuation">..</span> md
+                     root      .rc<span class="token punctuation">..</span> edac-poller
+                     root      .rc<span class="token punctuation">..</span> watchdogd
+                     root      .rc<span class="token punctuation">..</span> kswapd0
+                     root      .rc<span class="token punctuation">..</span> ksmd
+                     root      .rc<span class="token punctuation">..</span> khugepaged
+                     root      .rc<span class="token punctuation">..</span> crypto
+                     root      .rc<span class="token punctuation">..</span> kthrotld
+                     root      .rc<span class="token punctuation">..</span> kmpath_rdacd
+                     root      .rc<span class="token punctuation">..</span> kaluad
+                     root      .rc<span class="token punctuation">..</span> kpsmoused
+                     root      .rc<span class="token punctuation">..</span> ipv6_addrconf
+                     root      .rc<span class="token punctuation">..</span> deferwq
+                     root      .rc<span class="token punctuation">..</span> kauditd
+                     root      .rc<span class="token punctuation">..</span> nfit
+                     root      .rc<span class="token punctuation">..</span> ata_sff
+                     root      .rc<span class="token punctuation">..</span> mpt_poll_0
+                     root      .rc<span class="token punctuation">..</span> mpt/0
+                     root      .rc<span class="token punctuation">..</span> scsi_eh_0
+                     root      .rc<span class="token punctuation">..</span> scsi_tmf_0
+                     root      .rc<span class="token punctuation">..</span> scsi_eh_1
+                     root      .rc<span class="token punctuation">..</span> scsi_tmf_1
+                     root      .rc<span class="token punctuation">..</span> scsi_eh_2
+                     root      .rc<span class="token punctuation">..</span> scsi_tmf_2
+                     root      .rc<span class="token punctuation">..</span> ttm_swap
+                     root      .rc<span class="token punctuation">..</span> irq/16-vmwgfx
+                     root      .rc<span class="token punctuation">..</span> kworker/1:0
+                     root      .rc<span class="token punctuation">..</span> kdmflush
+                     root      .rc<span class="token punctuation">..</span> bioset
+                     root      .rc<span class="token punctuation">..</span> kdmflush
+                     root      .rc<span class="token punctuation">..</span> bioset
+                     root      .rc<span class="token punctuation">..</span> bioset
+                     root      .rc<span class="token punctuation">..</span> xfsalloc
+                     root      .rc<span class="token punctuation">..</span> xfs_mru_cache
+                     root      .rc<span class="token punctuation">..</span> xfs-buf/dm-0
+                     root      .rc<span class="token punctuation">..</span> xfs-data/dm-0
+                     root      .rc<span class="token punctuation">..</span> xfs-conv/dm-0
+                     root      .rc<span class="token punctuation">..</span> xfs-cil/dm-0
+                     root      .rc<span class="token punctuation">..</span> xfs-reclaim/dm-
+                     root      .rc<span class="token punctuation">..</span> xfs-log/dm-0
+                     root      .rc<span class="token punctuation">..</span> xfs-eofblocks/d
+                     root      .rc<span class="token punctuation">..</span> xfsaild/dm-0
+                     root      .rc<span class="token punctuation">..</span> kworker/1:1H
+                     root      .rce. systemd-journal
+                     root      .rce. lvmetad
+                     root      frce. systemd-udevd
+                     root      .rc<span class="token punctuation">..</span> kworker/0:1H
+                     root      .rc<span class="token punctuation">..</span> xfs-buf/sda1
+                     root      .rc<span class="token punctuation">..</span> xfs-data/sda1
+                     root      .rc<span class="token punctuation">..</span> xfs-conv/sda1
+                     root      .rc<span class="token punctuation">..</span> xfs-cil/sda1
+                     root      .rc<span class="token punctuation">..</span> xfs-reclaim/sda
+                     root      .rc<span class="token punctuation">..</span> xfs-log/sda1
+                     root      .rc<span class="token punctuation">..</span> xfs-eofblocks/s
+                     root      .rc<span class="token punctuation">..</span> xfsaild/sda1
+                     root      .rc<span class="token punctuation">..</span> rpciod
+                     root      .rc<span class="token punctuation">..</span> xprtiod
+                     root      Frce. auditd
+                     root      .rce. systemd-logind
+                     root      .rce. irqbalance
+                     root      Frce. VGAuthService
+                     root      Frce. vmtoolsd
+                     dbus      .rce. dbus-daemon
+                     root      Frce. gssproxy
+                     polkitd   .rce. polkitd
+                     root      .rce. crond
+                     root      .rce. login
+                     root      .rc<span class="token punctuation">..</span> kworker/1:2
+                     root      .rce. sshd
+                     root      Frce. tuned
+                     root      Frce. rsyslogd
+                     root      Frce. kubelet
+                     root      Frce. containerd
+                     root      Frce. dockerd
+                     root      Frce. master
+                     postfix   .rce. qmgr
+                     root      .rce. <span class="token function">ssh</span>
+                     root      .rc<span class="token punctuation">..</span> kworker/1:1
+                     root      .r.e. containerd-shim
+                     root      .r.e. containerd-shim
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      .rce. <span class="token function">grep</span>
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      .r.e. containerd-shim
+                     root      F<span class="token punctuation">..</span>.m etcd
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m kube-proxy
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      .r.e. containerd-shim
+                     polkitd   <span class="token punctuation">..</span><span class="token punctuation">..</span>m kube-controller
+                     root      .r.e. containerd-shim
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      .r.e. containerd-shim
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m pause
+                     root      .rc<span class="token punctuation">..</span> kworker/0:1
+                     rpc       .rce. rpcbind
+                     rpcuser   .rce. rpc.statd
+                     root      .rce. rpc.idmapd
+                     root      frce. rpc.mountd
+                     root      .rc<span class="token punctuation">..</span> nfsd4_callbacks
+                     root      .rc<span class="token punctuation">..</span> lockd
+                     root      .rc<span class="token punctuation">..</span> nfsd
+                     root      .rc<span class="token punctuation">..</span> nfsd
+                     root      .rc<span class="token punctuation">..</span> nfsd
+                     root      .rc<span class="token punctuation">..</span> nfsd
+                     root      .rc<span class="token punctuation">..</span> nfsd
+                     root      .rc<span class="token punctuation">..</span> nfsd
+                     root      .rc<span class="token punctuation">..</span> nfsd
+                     root      .rc<span class="token punctuation">..</span> nfsd
+                     root      .rc<span class="token punctuation">..</span> kworker/u256:0
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m kube-controller
+                     root      .r.e. containerd-shim
+                     root      .r.e. containerd-shim
+                     <span class="token punctuation">(</span>unknown<span class="token punctuation">)</span>  F<span class="token punctuation">..</span>.m metrics-sidecar
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m kube-scheduler
+                     root      .r.e. containerd-shim
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m coredns
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m coredns
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m kube-apiserver
+                     root      .r.e. containerd-shim
+                     <span class="token punctuation">(</span>unknown<span class="token punctuation">)</span>  F<span class="token punctuation">..</span>.m dashboard
+                     root      .r.e. containerd-shim
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m runsvdir
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m runsv
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m runsv
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m runsv
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m runsv
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m runsv
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m runsv
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m calico-node
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m calico-node
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m calico-node
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m calico-node
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m bird6
+                     root      <span class="token punctuation">..</span><span class="token punctuation">..</span>m bird
+                     root      .rc<span class="token punctuation">..</span> kworker/u256:1
+                     root      .rc<span class="token punctuation">..</span> kworker/0:0
+                     root      .rc<span class="token punctuation">..</span> kworker/u257:0
+                     root      .rc<span class="token punctuation">..</span> hci0
+                     root      .rc<span class="token punctuation">..</span> hci0
+                     root      .rc<span class="token punctuation">..</span> kworker/u257:2
+                     root      .rce. sshd
+                     root      .rce. sshd
+                     root      .rce. sftp-server
+                     root      .rce. <span class="token function">bash</span>
+                     postfix   .rce. pickup
+                     root      .rce. sshd
+                     root      .rce. sshd
+                     root      .rce. sftp-server
+                     root      .rce. <span class="token function">bash</span>
+                     root      .rc<span class="token punctuation">..</span> nfsiod
+                     root      .rce. <span class="token function">bash</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<h3>
+<a id="6_640"></a>6.模拟容器意外退出</h3> 
+<p>手动删除pod，查看容器里面的修改是否持久化了</p> 
+<pre><code class="prism language-bash">kubectl delete pod xxxxx
+<span class="token function">curl</span> http://svc地址
+
+<span class="token comment">#测试过程</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get po,svc</span>
+NAME                       READY   STATUS    RESTARTS   AGE
+pod/nginx-ffc5548d-dj9t7   <span class="token number">1</span>/1     Running   <span class="token number">0</span>          2m8s
+
+NAME                 TYPE        CLUSTER-IP    EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>   AGE
+service/kubernetes   ClusterIP   <span class="token number">10.96</span>.0.1     <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        <span class="token number">443</span>/TCP   167d
+service/nginx        ClusterIP   <span class="token number">10.97</span>.70.55   <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        <span class="token number">80</span>/TCP    16m
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl delete pod nginx-ffc5548d-dj9t7</span>
+pod <span class="token string">"nginx-ffc5548d-dj9t7"</span> deleted
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get po,svc</span>
+NAME                       READY   STATUS    RESTARTS   AGE
+pod/nginx-ffc5548d-f78lf   <span class="token number">1</span>/1     Running   <span class="token number">0</span>          31s
+
+NAME                 TYPE        CLUSTER-IP    EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>   AGE
+service/kubernetes   ClusterIP   <span class="token number">10.96</span>.0.1     <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        <span class="token number">443</span>/TCP   167d
+service/nginx        ClusterIP   <span class="token number">10.97</span>.70.55   <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        <span class="token number">80</span>/TCP    17m
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#curl 10.97.70.55</span>
+HelloWorld
+<span class="token number">222222</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>此时会发现我们之前修改的内容依然保存着，这就是容器由于某些原因意外退出后，数据依然持久化的目的。</p> 
+<h3>
+<a id="7PVCPV_673"></a>7.回收PVC和PV</h3> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get pvc</span>
+NAME   STATUS   VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+pvc1   Bound    pv1      1Gi        RWO            nfs            56m
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl delete pvc pvc1</span>
+persistentvolumeclaim <span class="token string">"pvc1"</span> deleted <span class="token comment"># 一直卡在这里</span>
+
+<span class="token comment"># 卡着的原因就是因为我们的pod应用正在使用pvc，所以删除不了</span>
+<span class="token comment"># 看下pvc发现STATUS是Terminating删除中的状态，这是因为服务pod还在占用这个pvc使用中</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get pvc</span>
+NAME   STATUS        VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+pvc1   Terminating   pv1      1Gi        RWO            nfs            57m
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+</code></pre> 
+<p>接下来我们先删除pod</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 先访问一把</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#curl 10.97.70.55</span>
+HelloWorld
+<span class="token number">222222</span>
+
+<span class="token comment"># 删除nginx资源</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl delete -f nginx.yaml</span>
+<span class="token function">service</span> <span class="token string">"nginx"</span> deleted
+deployment.apps <span class="token string">"nginx"</span> deleted
+
+<span class="token comment">#再次查看pvc</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#kubectl get pvc</span>
+No resources found <span class="token keyword">in</span> default namespace.
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+<span class="token comment"># 会发现，删除了nginx资源，pvc这个资源立马就消失了，</span>
+
+<span class="token comment"># 根据先前创建pv时的数据回收策略为Recycle – 清除 PV 中的数据，这时果然先创建的index.html已经被删除了，在生产中要尤其注意这里的模式，注意及时备份数据</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#ls /nfs/pv1/</span>
+<span class="token punctuation">[</span>root@k8s-master ~<span class="token punctuation">]</span><span class="token comment">#</span>
+
+<span class="token comment"># 注意：虽然此时pv是可以再次被pvc来消费的，但根据生产的经验，建议在删除pvc时，也同时把它消费的pv一并删除，然后再重启创建都是可以的</span>
+</code></pre> 
+<p>至此，以上实验结束，感谢阅读。</p> 
+<h3>
+<a id="8_718"></a>8.排错异常</h3> 
+<p>1、创建pvc的时候<code>STATUS</code>状态一直是<code>Pending</code></p> 
+<p>a、查看PV里面的<code>accessModes</code>字段和PVC里面的<code>accessModes</code>是否对应上面，如果不对应则会是这种错误</p> 
+<p>b、PVC的<code>accessModes</code>是否是PV的子集，比如：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># PV里面的`accessModes`字段如果是集合的写法</span>
+accessModes: <span class="token punctuation">[</span><span class="token string">"ReadWriteMany"</span>,<span class="token string">"ReadWriteOnce"</span>,<span class="token string">"ReadOnlyMany"</span><span class="token punctuation">]</span>
+
+<span class="token comment"># 此时PVC的写法如下是正确的：</span>
+accessModes: <span class="token punctuation">[</span><span class="token string">"ReadWriteOnce"</span><span class="token punctuation">]</span>
+
+<span class="token comment"># 如果不在集合里面，则会报错。</span>
+</code></pre> 
+<p>2、创建pvc之后，发现pv的<code>CLAIM</code>字段为空</p> 
+<p>正常情况下pvc绑定到pv之后，pv的CLAIM字段显示的是对应的PVC的名称，但是现在出现异常，CLAIM字段为空，这可能是pvc和pv的<code>storage</code>字段的大小不一致导致的。</p> 
+<blockquote> 
+ <p>注意：可能是selector 的label等内容是符合的，但就这个storage的大小不一致，像是绑定成功了，又像是绑定失败了。</p> 
+</blockquote> 
+<h3>
+<a id="9_744"></a>9.面试题</h3> 
+<p>k8s挂载pv、pvc的流程</p> 
+<pre><code class="prism language-bash"><span class="token number">1</span>. 调度器把根据各种调度算法把该POD分配到某个节点，比如node01
+<span class="token number">2</span>. Node01上的kubelet等待Volume Manager准备存储设备
+<span class="token number">3</span>. PV控制器调用存储插件创建PV并与PVC进行绑定
+<span class="token number">4</span>、Kubelet被告知卷已经准备好，开始启动POD，通过映射方式挂载到容器中
+</code></pre> 
+<h2>
+<a id="3_755"></a>3、总结</h2> 
+<p>以上就是一个完整的基于nfs的pv/pvc实验，是老师实际工作经验拿来的，很经典。</p> 
+<p>需要再学习下<code>nfs</code>服务知识。</p> 
+<p>也需要学习下<code>ceph</code>等存储知识。</p> 
+<h2>
+<a id="_763"></a>关于我</h2> 
+<p>我的博客主旨：我希望每一个人拿着我的博客都可以做出实验现象，先把实验做出来，然后再结合理论知识更深层次去理解技术点，这样学习起来才有乐趣和动力。并且，我的博客内容步骤是很完整的，也分享源码和实验用到的软件，希望能和大家一起共同进步！</p> 
+<p>各位小伙伴在实际操作过程中如有什么疑问，可随时联系本人免费帮您解决问题：</p> 
+<ol>
+<li> <p>个人微信二维码：x2675263825 （舍得）， qq：2675263825。</p> <p><img src="https://images2.imgbox.com/b2/c1/RgDLdSg8_o.png" alt="image-20211002091450217"></p> </li>
+<li> <p>个人博客地址：www.onlyonexl.cn</p> <p><img src="https://images2.imgbox.com/b3/2e/iXjgPZC5_o.png" alt="image-20211002092057988"></p> </li>
+<li> <p>个人微信公众号：云原生架构师实战</p> <p><img src="https://images2.imgbox.com/1e/e2/XiKgXrDU_o.png" alt="image-20211002141739664"></p> </li>
+<li> <p>个人csdn</p> <p>https://blog.csdn.net/weixin_39246554?spm=1010.2135.3001.5421</p> <p><img src="https://images2.imgbox.com/5c/23/YSc9gaNW_o.png" alt="image-20211002092344616"></p> </li>
+</ol> 
+<h2>
+<a id="_787"></a>最后</h2> 
+<p>​ 好了，关于k8s持久化存储pv和pvc实验就到这里了，感谢大家阅读，最后贴上我女神的photo，祝大家生活快乐，每天都过的有意义哦，我们下期见！</p> 
+<p><img src="https://images2.imgbox.com/8a/f7/B44AFyG2_o.png" alt="image-20211115215718919"></p> 
+<p>备好，开始启动POD，通过映射方式挂载到容器中</p> 
+<pre><code>
+## 3、总结
+
+以上就是一个完整的基于nfs的pv/pvc实验，是老师实际工作经验拿来的，很经典。
+
+需要再学习下`nfs`服务知识。
+
+也需要学习下`ceph`等存储知识。
+
+## 关于我
+
+我的博客主旨：我希望每一个人拿着我的博客都可以做出实验现象，先把实验做出来，然后再结合理论知识更深层次去理解技术点，这样学习起来才有乐趣和动力。并且，我的博客内容步骤是很完整的，也分享源码和实验用到的软件，希望能和大家一起共同进步！
+
+各位小伙伴在实际操作过程中如有什么疑问，可随时联系本人免费帮您解决问题：
+
+1. 个人微信二维码：x2675263825 （舍得）， qq：2675263825。
+
+    [外链图片转存中...(img-n9ppvXii-1637050189435)]
+
+2. 个人博客地址：www.onlyonexl.cn
+
+    [外链图片转存中...(img-RHeOaM63-1637050189438)]
+
+3. 个人微信公众号：云原生架构师实战
+
+    [外链图片转存中...(img-hWn7pzRn-1637050189442)]
+
+4. 个人csdn
+
+    https://blog.csdn.net/weixin_39246554?spm=1010.2135.3001.5421
+
+    [外链图片转存中...(img-s47zBLK9-1637050189444)]
+
+## 最后
+
+​	好了，关于k8s持久化存储pv和pvc实验就到这里了，感谢大家阅读，最后贴上我女神的photo，祝大家生活快乐，每天都过的有意义哦，我们下期见！
+
+[外链图片转存中...(img-Ud84yMXr-1637050189445)]
+
+</code></pre>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

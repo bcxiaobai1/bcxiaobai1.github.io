@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>这可能是最详细的分布式锁设计方案了 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">这可能是最详细的分布式锁设计方案了</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p>本文涉及内容：</p> 
+<ul>
+<li>分布式锁介绍；</li>
+<li>用数据表做分布式锁原理介绍 &amp; 数据表设计；</li>
+<li>用redis做分布式锁原理介绍 &amp; 代码实操；</li>
+<li>用redisson做分布式锁原理介绍 &amp; 代码实操；</li>
+<li>用zookeeper做分布式锁原理介绍；</li>
+<li>用curator做分布式锁代码实操；</li>
+<li>实现分布式锁的各方案比较；</li>
+<li>完整项目的GitHub地址</li>
+</ul> 
+<h1>
+<a id="_9"></a>一、是什么？</h1> 
+<p><strong>1、锁的应用场景：</strong><br> 在单体应用中，我们会使用ReentrantLock或Synchronized来应对并发场景。<br> 比如最常见的卖票场景，假如总共有100张票，线程A和线程B同时操作，如下图：</p> 
+<p><img src="https://images2.imgbox.com/8b/2f/19cAOBpb_o.png" alt="JMM内存模型"></p> 
+<p>这时有一个共享变量100，线程A和B将100拷贝到自己的工作内存中，当线程A抢到执行权的时候，此时A工作内存中的值是100，然后售票，进行自减操作，将自己工作内存中的值变成了99。当A还没来得及将99刷回到主内存的时候，线程B进来了，此时B拿到的主内存的值还是100，然后售票，进行自减，也是99。这就出现了同一张票出售了两次的情况。所以我们会加锁加volatile保证原子性保证可见性。</p> 
+<p><strong>2、分布式锁是什么？</strong><br> 上面的场景中，我们可以通过ReentrantLock或者Synchronized搞定，因为你的项目只运行在一台服务器上，只有一个JVM，所有的共享变量都加载到同一个主内存中。而分布式应用中，一个项目部署在多台服务器上，最基本的架构如下图：</p> 
+<p><img src="https://images2.imgbox.com/f3/b9/Dj7whH75_o.png" alt="最简单的分布式架构"></p> 
+<p>比如现在server1、server2和server3读取到数据库的票数都是100，在每一个server中，我们可以用JDK的锁来保证多个用户同时访问我这台server时不会出问题。但问题是，如果client1访问到的是server1，票数是100，然后购票，还没来得及将数据库票数改为99，client2也开始访问系统购票了，client2如果访问的是server1，自然不会出问题，如果访问的是server2，这时server2读取到数据库的票数还是100，那么就出问题了，又出现了同一张票卖了两次的情况。在分布式应用中，JDK的锁机制就无法满足需求了，所以就出现了分布式锁。</p> 
+<p><strong>3、分布式锁应该满足的条件：</strong></p> 
+<ul>
+<li>四个一：同一个方法在同一时刻只能被一台机器的一个线程执行</li>
+<li>三个具备：具备可重入特性；具备锁失效机制，防止死锁；具备非阻塞锁特性，即没获取到锁返回获取锁失败，而不是一直等待</li>
+<li>两个高：高性能地获取与释放锁；高可用的获取与释放锁</li>
+</ul> 
+<p><strong>4、分布式锁的实现方式：</strong></p> 
+<ul>
+<li>基于数据库：用数据库的排他锁实现</li>
+<li>基于redis：利用redis的<code>set key value NX EX 30000</code>；也可以用redis的第三方库比如Redisson</li>
+<li>基于zookeeper：利用zookeeper的临时顺序节点实现；也可以用zookeeper的第三方库比如Curator</li>
+</ul> 
+<h1>
+<a id="_37"></a>二、基于数据库实现</h1> 
+<p><strong>1、建表：</strong></p> 
+<pre><code>CREATE TABLE `tb_distributed_lock` (
+	`dl_id` INT NOT NULL auto_increment COMMENT '主键，自增',
+	`dl_method_name` VARCHAR (64) NOT NULL DEFAULT '' COMMENT '方法名',
+	`dl_device_info` VARCHAR (100) NOT NULL DEFAULT '' COMMENT 'ip+线程id',
+	`dl_operate_time` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '数据被操作的时间',
+	PRIMARY KEY (`dl_id`),
+	UNIQUE KEY `uq_method_name` (`dl_method_name`) USING BTREE
+) ENGINE = INNODB DEFAULT charset = utf8 COMMENT = '分布式锁表';
+</code></pre> 
+<p><strong>2、思路：</strong><br> 当执行一个方法的时候，我们首先尝试往表中插入一条数据。如果插入成功，则占锁成功，继续往下执行，执行完删除该记录。如果插入失败，我们再以<code>当前方法名、当前机器ip+线程id、数据被操作时间为5分钟内(5分钟表示锁失效的时间)</code>为条件去查询，如果有记录，表示该机器的该线程在5分钟内占有过锁了，直接往下执行最后删除记录；如果没有记录，占有锁失败。<br> 一个用户就是一个线程，所以我们可以把机器ip和用户id组合一起当成<code>dl_device_info</code>。</p> 
+<p><strong>3、占有锁和释放锁：</strong></p> 
+<ul><li>占有锁：</li></ul> 
+<pre><code>INSERT INTO tb_distributed_lock (
+	dl_method_name,
+	dl_device_info
+)
+VALUES
+	('方法名', 'ip&amp;用户id');
+</code></pre> 
+<p>如果insert失败，则：</p> 
+<pre><code>SELECT
+	count(*)
+FROM
+	tb_distributed_lock
+WHERE
+	dl_method_name = '方法名'
+AND dl_device_info = 'ip&amp;用户id'
+AND dl_operate_time &lt; SYSDATE() - 5;
+</code></pre> 
+<ul><li>释放锁：</li></ul> 
+<pre><code>DELETE
+FROM
+	tb_distributed_lock
+WHERE
+	dl_method_name = '方法名'
+AND dl_device_info = 'ip&amp;用户id';
+</code></pre> 
+<p><strong>4、小总结：</strong><br> 以上表结构可能并不是很好，只是提供了这么一个思路。下面说它的优缺点：</p> 
+<ul>
+<li>优点：成本低，不需要引入其他的技术</li>
+<li>缺点：对数据库依赖性强，如果数据库挂了，那就凉凉了，所以数据库最好也是高可用的</li>
+</ul> 
+<h1>
+<a id="redis_88"></a>三、基于redis实现</h1> 
+<p><strong>1、原理：</strong><br> 基于redis的<code>set key value nx ex 30</code>，这条语句的意思就是如果key不存在就设置，并且过期时间为30s，如果key已经存在就会返回false。如果要以毫秒为单位，把<code>ex</code>换成<code>px</code>就好了。我们执行方法前，先将方法名当成key，执行这条语句，如果执行成功就是获取锁成功，执行失败就是获取锁失败。</p> 
+<p><strong>2、代码实现：</strong></p> 
+<ul><li>RedisUtil的部分代码：</li></ul> 
+<pre><code>/**
+* key不存在时就设置，返回true，key已存在就返回false
+* @param key
+* @param value
+* @param timeout
+* @return
+*/
+public static boolean setIfAbsent(String key, String value, Long timeout) {
+	return redisTemplate.opsForValue().setIfAbsent(key, value, timeout, TimeUnit.SECONDS);
+}
+/**
+* 获取key-value
+* @param key
+* @return
+*/
+public static String getString(String key) {
+	return (String) redisTemplate.opsForValue().get(key);
+}
+/**
+* 删除key
+* @param key
+* @return
+*/
+public static boolean delKey(String key) {
+	return redisTemplate.delete(key);
+}
+</code></pre> 
+<ul><li>业务方法中使用：</li></ul> 
+<pre><code>public String hello() {
+	// 方法名当作key
+	String key = "hello";
+	String value = "hellolock";
+	if (RedisUtil.setIfAbsent(key, value, 60 * 2L)) {
+		System.out.println("成功获取到锁，开始执行业务逻辑……");
+		// 假如执行业务逻辑需要1分钟
+		try {TimeUnit.MINUTES.sleep(1L); } catch (Exception e) { e.printStackTrace();};
+		// 释放锁先校验value，避免释放错
+		if (value.equals(RedisUtil.getString(key))) {
+			RedisUtil.delKey(key);
+			System.out.println("执行完业务逻辑，释放锁成功");
+		}
+		return "success";
+	} else {
+		System.out.println("锁被别的线程占有，获取锁失败");
+		return "acquire lock failed";
+	}
+}
+</code></pre> 
+<p><strong>3、小总结：</strong></p> 
+<ul>
+<li> <p>优点：简单易用，一条redis命令就搞定。可以设置过期时间，避免释放锁失败造成其他线程长时间无法获取锁的问题。</p> </li>
+<li> <p>缺点：这种做法只适合redis是单机的时候，如果redis有集群，这样做就会出问题。假如一个线程在master上获取锁成功了，在master还没来得及将数据同步到slave上的时候，master挂了，slave升级为master。第二个线程进来尝试获取锁，因为新的master上并没有这个key，所以，也能成功获取到锁。</p> </li>
+<li> <p>解决办法：针对上面的缺点，我们可以采用redis的<strong>RedLock算法</strong>。假如集群中有<code>n个redis</code>，我们先从这n个redis中尝试获取锁（锁的<code>过期时间为x</code>），并记录获取锁的消耗的<code>总时间t</code>，获取锁<code>成功数量为s</code>，当且仅当<code>t &lt; x 并且 s &gt;= (n/2 + 1)</code>时，认为获取锁成功。</p> </li>
+</ul> 
+<h1>
+<a id="Redisson_151"></a>四、基于Redisson实现</h1> 
+<p><strong>1、是什么？</strong><br> 官网地址：https://github.com/redisson/redisson/wiki/Table-of-Content<br> Redisson是一个功能十分强大的redis客户端，封装了很多分布式操作，比如分布式对象、分布式集合、分布式锁等。它的分布式锁也很多，什么公平锁、可重入锁、redlock等一应俱全，下面来看看如何在springboot项目中使用它。</p> 
+<p><strong>2、使用redisson做分布式锁：</strong></p> 
+<ul><li>添加依赖：</li></ul> 
+<pre><code>&lt;!-- redisson-springboot-starter --&gt;
+&lt;dependency&gt;
+	&lt;groupId&gt;org.redisson&lt;/groupId&gt;
+	&lt;artifactId&gt;redisson-spring-boot-starter&lt;/artifactId&gt;
+	&lt;version&gt;3.12.3&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;!-- io.netty/netty-all  --&gt;
+&lt;dependency&gt;
+	&lt;groupId&gt;io.netty&lt;/groupId&gt;
+	&lt;artifactId&gt;netty-all&lt;/artifactId&gt;
+&lt;/dependency&gt;
+</code></pre> 
+<ul><li>application.yml：</li></ul> 
+<pre><code>spring:
+  application:
+    name: distributed-lock
+  redis:
+    # redis单机版的写法
+    host: 192.168.2.43
+    port: 6379
+    # 集群的写法
+    #cluster:
+      #nodes:
+      #- 192.168.0.106,192.168.0.107
+    #哨兵的写法
+    #sentinel:
+      #master: 192.168.0.106
+      #nodes:
+      #- 192.168.0.107,192.168.0.108
+</code></pre> 
+<ul><li>用法：直接注入RedissonClient，然后用它获取锁，得到锁之后就可以进行占锁和释放锁了。有阻塞式锁，也有非阻塞式锁，具体用法如下：</li></ul> 
+<pre><code>@Autowired
+private RedissonClient redisson;
+
+/**
+ * 未设置过期时间，没获取到就会一直阻塞着
+ * @return
+ */
+@GetMapping("/testLock")
+public String testLock() {
+	log.info("进入testLock方法，开始获取锁");
+	String key = "testLock";
+	RLock lock = redisson.getLock(key);
+	lock.lock();
+	log.info("获取锁成功，开始执行业务逻辑……");
+	try {TimeUnit.SECONDS.sleep(10L); } catch (Exception e) { e.printStackTrace();};
+	log.info("执行完业务逻辑，释放锁");
+	lock.unlock();
+	return "success";
+}
+	
+/**
+ * 尝试获取锁，没获取到就直接失败，不会阻塞
+ * @return
+ */
+@GetMapping("/testTryLock")
+public String testTryLock() {
+	log.info("进入testTryLock方法，开始获取锁");
+	String key = "testTryLock";
+	RLock lock = redisson.getLock(key);
+	boolean res = lock.tryLock();
+	if (!res) {
+		log.error("尝试获取锁失败");
+		return "fail";
+	} else {
+		log.info("获取锁成功，开始执行业务逻辑……");
+		try {TimeUnit.SECONDS.sleep(30L); } catch (Exception e) { e.printStackTrace();};
+		log.info("执行完业务逻辑，释放锁");
+		lock.unlock();
+		return "success";
+	}
+}
+	
+/**
+ * 锁设置了过期时间，即使最后面的unlock失败，20秒后也会自动释放锁
+ * @return
+ */
+@GetMapping("/testLockTimeout")
+public String testLockTimeout() {
+	log.info("进入testLockTimeout方法，开始获取锁");
+	String key = "testLockTimeout";
+	RLock lock = redisson.getLock(key);
+	// 20秒后自动释放锁
+	lock.lock(20, TimeUnit.SECONDS);
+	log.info("获取锁成功，开始执行业务逻辑……");
+	try {TimeUnit.SECONDS.sleep(10L); } catch (Exception e) { e.printStackTrace();};
+	lock.unlock();
+	return "success";
+}
+	
+/**
+ * 尝试获取锁，15秒还没获取到就获取锁失败；获取到了会持有20秒，20秒后自动释放锁
+ * @return
+ */
+@GetMapping("/testTryLockTimeout")
+public String testTryLockTimeout() {
+	log.info("进入testTryLockTimeout方法，开始获取锁");
+	String key = "testTryLockTimeout";
+	RLock lock = redisson.getLock(key);
+	boolean res = false;
+	try {
+		res = lock.tryLock(15, 20, TimeUnit.SECONDS);
+	} catch (InterruptedException e1) {
+		e1.printStackTrace();
+	}
+	if (!res) {
+		log.error("尝试获取锁失败");
+		return "fail";
+	} else {
+		log.info("获取锁成功，开始执行业务逻辑……");
+		try {TimeUnit.SECONDS.sleep(10L); } catch (Exception e) { e.printStackTrace();};
+		log.info("执行完业务逻辑，释放锁");
+		lock.unlock();
+		return "success";
+	}
+}
+</code></pre> 
+<p><strong>3、小总结：</strong><br> 以上就是使用redisson做分布式锁的简单demo，用起来十分的方便。上面是与springboot项目集成，直接用它提供的springboot的starter就好了。用它来做分布式锁的更多用法请移步至官网：<a href="https://github.com/redisson/redisson/wiki/8.-%E5%88%86%E5%B8%83%E5%BC%8F%E9%94%81%E5%92%8C%E5%90%8C%E6%AD%A5%E5%99%A8">redisson分布式锁</a>。</p> 
+<h1>
+<a id="zookeeper_281"></a>五、基于zookeeper实现</h1> 
+<p><strong>1、zookeeper知识点回顾：</strong></p> 
+<p>zookeeper有四种类型的节点：</p> 
+<ul>
+<li> <p>持久节点：默认的节点类型，客户端与zookeeper断开连接后，节点依然存在</p> </li>
+<li> <p>持久顺序节点：首先是持久节点，顺序的意思是，zookeeper会根据节点创建的顺序编号</p> </li>
+<li> <p>临时节点：客户端与zookeeper断开连接后节点不复存在</p> </li>
+<li> <p>临时顺序节点：客户端与zookeeper断开连接后节点不复存在，zookeeper会根据节点创建的顺序编号</p> </li>
+</ul> 
+<p><strong>2、基于zookeeper实现分布式锁的原理：</strong><br> 我们正是利用了zookeeper的临时顺序节点来实现分布式锁。首先我们创建一个名为<code>lock</code>(节点名称随意)的持久节点。线程1获取锁时，就在<code>lock</code>下面创建一个名为<code>lock1</code>的临时顺序节点，然后查找<code>lock</code>下所有的节点，判断自己的<code>lock1</code>是不是第一个，如果是，获取锁成功，继续执行业务逻辑，执行完后删除<code>lock1</code>节点；如果不是第一个，获取锁失败，就watch排在自己前面一位的节点，当排在自己前一位的节点被干掉时，再检查自己是不是排第一了，如果是，获取锁成功。图解过程如下：</p> 
+<p><img src="https://images2.imgbox.com/cd/0a/Ta053PJv_o.png" alt="zookeeper分布式锁原理"></p> 
+<p>线程1创建了一个lock1，发现lock1的第一个节点，占锁成功；在线程1还没释放锁的时候，线程2来了，创建了一个lock2，发现lock2不是第一个，便监控lock1，线程3此时进行就监控lock2。直到自己是第一个节点时才占锁成功。假如某个线程释放锁的时候zookeeper崩了也没关系，因为是临时节点，断开连接节点就没了，其他线程还是可以正常获取锁，这就是要用临时节点的原因。</p> 
+<p>说清楚了原理，用代码实现也就不难了，可以引入zookeeper的客户端<code>zkClient</code>，自己写代码实现(偷个懒，自己就不写了，有兴趣的可以参考我zookeeper的文章，肯定可以自己写出来的)。不过有非常优秀的开源解决方案比如curator，下面就看看curator怎么用。</p> 
+<h1>
+<a id="curator_303"></a>六、基于curator实现</h1> 
+<p><strong>1、springboot整合curator：</strong></p> 
+<ul><li>pom.xml：</li></ul> 
+<pre><code>&lt;!-- curator start--&gt;
+&lt;dependency&gt;
+	&lt;groupId&gt;org.apache.zookeeper&lt;/groupId&gt;
+	&lt;artifactId&gt;zookeeper&lt;/artifactId&gt;
+	&lt;version&gt;3.4.14&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+	&lt;groupId&gt;org.apache.curator&lt;/groupId&gt;
+	&lt;artifactId&gt;curator-framework&lt;/artifactId&gt;
+	&lt;version&gt;4.2.0&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+	&lt;groupId&gt;org.apache.curator&lt;/groupId&gt;
+	&lt;artifactId&gt;curator-recipes&lt;/artifactId&gt;
+	&lt;version&gt;4.2.0&lt;/version&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+	&lt;groupId&gt;org.seleniumhq.selenium&lt;/groupId&gt;
+	&lt;artifactId&gt;selenium-java&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;!-- curator end--&gt;
+</code></pre> 
+<ul><li>application.yml：注意，curator下面这些属性spring是没有集成的，也就是说写的时候不会有提示</li></ul> 
+<pre><code>curator:
+  retryCount: 5 # 连接失败的重试次数
+  retryTimeInterval: 5000 # 每隔5秒重试一次
+  url: 192.168.2.43:2181 # zookeeper连接地址
+  sessionTimeout: 60000 # session超时时间1分钟
+  connectionTimeout: 5000 # 连接超时时间5秒钟
+</code></pre> 
+<ul><li>配置类：读取application.yml中的属性，创建CuratorFramework实例</li></ul> 
+<pre><code>@Configuration
+public class CutatorConfig {
+
+	@Value("${curator.retryCount}")
+	private Integer retryCount;
+
+	@Value("${curator.retryTimeInterval}")
+	private Integer retryTimeInterval;
+
+	@Value("${curator.url}")
+	private String url;
+
+	@Value("${curator.sessionTimeout}")
+	private Integer sessionTimeout;
+
+	@Value("${curator.connectionTimeout}")
+	private Integer connectionTimeout;
+
+	@Bean
+	public CuratorFramework curatorFramework() {
+		return CuratorFrameworkFactory.newClient(url, sessionTimeout, connectionTimeout,
+				new RetryNTimes(retryCount, retryTimeInterval));
+	}
+}
+</code></pre> 
+<ul><li>测试类：测试整合curator框架是否成功</li></ul> 
+<pre><code>@SpringBootTest(classes = {DistributedLockApplication.class})
+@RunWith(SpringRunner.class)
+public class DistributedLockApplicationTests {
+	
+	@Autowired
+	private CuratorFramework curatorFramework;
+
+	@Test
+	public void contextLoads() {
+		curatorFramework.start();
+		try {
+			curatorFramework.create().creatingParentContainersIfNeeded().withMode(CreateMode.PERSISTENT).forPath("/zhusl", "test".getBytes());
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+}
+</code></pre> 
+<p>在确保zookeeper成功启动了的情况下，执行这个单元测试，最后回到linux中，用zkCli.sh连接，查看是否成功创建节点。</p> 
+<p><strong>2、使用Curator做分布式锁：</strong><br> Curator封装了很多锁，比如可重入共享锁、不可重入共享锁、可重入读写锁、联锁等。具体可以参考官网：<a href="http://curator.apache.org/curator-recipes/index.html">curator分布式锁的用法</a>。</p> 
+<ul><li>ZookeeperUtil.java：工具类，封装获取锁，释放锁等方法。这里主要简单地封装了上面说的四种锁，仅供参考。</li></ul> 
+<pre><code>@Component
+@Slf4j
+public class ZookeeperUtil {
+
+	private static CuratorFramework curatorFramework;
+	
+	private static InterProcessLock lock;
+
+	/** 持久节点 */
+	private final static String ROOT_PATH = "/lock/";
+	
+	/** 可重入共享锁 */
+	private static InterProcessMutex interProcessMutex;
+	/** 不可重入共享锁 */
+	private static InterProcessSemaphoreMutex interProcessSemaphoreMutex;
+	/** 可重入读写锁 */
+	private static InterProcessReadWriteLock interProcessReadWriteLock;
+	/** 多共享锁(将多把锁当成一把来用) */
+	private static InterProcessMultiLock interProcessMultiLock;
+
+	@Autowired
+	private void setCuratorFramework(CuratorFramework curatorFramework) {
+		ZookeeperUtil.curatorFramework = curatorFramework;
+		ZookeeperUtil.curatorFramework.start();
+	}
+
+	/**
+	 * 获取可重入排他锁
+	 * 
+	 * @param lockName
+	 * @return
+	 */
+	public static boolean interProcessMutex(String lockName) {
+		interProcessMutex = new InterProcessMutex(curatorFramework, ROOT_PATH + lockName);
+		lock = interProcessMutex;
+		return acquireLock(lockName, lock);
+	}
+
+	/**
+	 * 获取不可重入排他锁
+	 * 
+	 * @param lockName
+	 * @return
+	 */
+	public static boolean interProcessSemaphoreMutex(String lockName) {
+		interProcessSemaphoreMutex = new InterProcessSemaphoreMutex(curatorFramework, ROOT_PATH + lockName);
+		lock = interProcessSemaphoreMutex;
+		return acquireLock(lockName, lock);
+	}
+
+	/**
+	 * 获取可重入读锁
+	 * 
+	 * @param lockName
+	 * @return
+	 */
+	public static boolean interProcessReadLock(String lockName) {
+		interProcessReadWriteLock = new InterProcessReadWriteLock(curatorFramework, ROOT_PATH + lockName);
+		lock = interProcessReadWriteLock.readLock();
+		return acquireLock(lockName, lock);
+	}
+
+	/**
+	 * 获取可重入写锁
+	 * 
+	 * @param lockName
+	 * @return
+	 */
+	public static boolean interProcessWriteLock(String lockName) {
+		interProcessReadWriteLock = new InterProcessReadWriteLock(curatorFramework, ROOT_PATH + lockName);
+		lock = interProcessReadWriteLock.writeLock();
+		return acquireLock(lockName, lock);
+	}
+
+	/**
+	 * 获取联锁(多把锁当成一把来用)
+	 * @param lockNames
+	 * @return
+	 */
+	public static boolean interProcessMultiLock(List&lt;String&gt; lockNames) {
+		if (lockNames == null || lockNames.isEmpty()) {
+			log.error("no lockNames found");
+			return false;
+		}
+		interProcessMultiLock = new InterProcessMultiLock(curatorFramework, lockNames);
+		try {
+			if (!interProcessMultiLock.acquire(10, TimeUnit.SECONDS)) {
+				log.info("Thread:" + Thread.currentThread().getId() + " acquire distributed lock fail");
+				return false;
+			} else {
+				log.info("Thread:" + Thread.currentThread().getId() + " acquire distributed lock success");
+				return true;
+			}
+		} catch (Exception e) {
+			log.info("Thread:" + Thread.currentThread().getId() + " release lock occured an exception = " + e);
+			return false;
+		}
+	}
+
+	/**
+	 * 释放锁
+	 * 
+	 * @param lockName
+	 */
+	public static void releaseLock(String lockName) {
+		try {
+			if (lock != null &amp;&amp; lock.isAcquiredInThisProcess()) {
+				lock.release();
+				curatorFramework.delete().inBackground().forPath(ROOT_PATH + lockName);
+				log.info("Thread:" + Thread.currentThread().getId() + " release lock success");
+			}
+		} catch (Exception e) {
+			log.info("Thread:" + Thread.currentThread().getId() + " release lock occured an exception = " + e);
+		}
+	}
+	
+	/**
+	 * 释放联锁
+	 */
+	public static void releaseMultiLock(List&lt;String&gt; lockNames) {
+		try {
+			if (lockNames == null || lockNames.isEmpty()) {
+				log.error("no no lockNames found to release");
+				return;
+			}
+			if (interProcessMultiLock != null &amp;&amp; interProcessMultiLock.isAcquiredInThisProcess()) {
+				interProcessMultiLock.release();
+				for (String lockName : lockNames) {
+					curatorFramework.delete().inBackground().forPath(ROOT_PATH + lockName);
+				}
+				log.info("Thread:" + Thread.currentThread().getId() + " release lock success");
+			}
+		} catch (Exception e) {
+			log.info("Thread:" + Thread.currentThread().getId() + " release lock occured an exception = " + e);
+		}
+	}
+	
+
+	/**
+	 * 获取锁
+	 * 
+	 * @param lockName
+	 * @param interProcessLock
+	 * @return
+	 */
+	private static boolean acquireLock(String lockName, InterProcessLock interProcessLock) {
+		int flag = 0;
+		try {
+			while (!interProcessLock.acquire(2, TimeUnit.SECONDS)) {
+				flag++;
+				if (flag &gt; 1) {
+					break;
+				}
+			}
+		} catch (Exception e) {
+			log.error("acquire lock occured an exception = " + e);
+			return false;
+		}
+		if (flag &gt; 1) {
+			log.info("Thread:" + Thread.currentThread().getId() + " acquire distributed lock fail");
+			return false;
+		} else {
+			log.info("Thread:" + Thread.currentThread().getId() + " acquire distributed lock success");
+			return true;
+		}
+	}
+}
+</code></pre> 
+<ul><li>ZookeeperLockController.java：写一个接口，用Curator加锁，然后用浏览器进行访问</li></ul> 
+<pre><code>@RestController
+@RequestMapping("/zookeeper-lock")
+public class ZookeeperLockController {
+	
+	@GetMapping("/testLock")
+	public String testLock() {
+		// 获取锁
+		boolean lockResult = ZookeeperUtil.interProcessMutex("testLock");
+		if (lockResult) {
+			try {
+				// 模拟执行业务逻辑
+				TimeUnit.MINUTES.sleep(1L);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+			// 释放锁
+			ZookeeperUtil.releaseLock("testLock");
+			return "success";
+		} else {
+			return "fail";
+		}
+	}
+}
+</code></pre> 
+<p>打开一个浏览器窗口访问，后台打印出获取锁成功的日志，在1分钟之内，开启另一个窗口再次访问，打印出获取锁失败的日志，说明分布式锁生效了。</p> 
+<h1>
+<a id="_588"></a>七、实现分布式锁的各方案比较</h1> 
+<ul>
+<li>基于数据库实现最简单，不需要引入第三方应用。但是因为每次加锁和解锁都要进行IO操作，性能不是很好。</li>
+<li>基于redis实现比较均衡，性能很好，也不是很难，比较可靠。</li>
+<li>基于zookeeper实现难度较大，因为需要维护一个zookeeper集群，如果项目原本没有用到zookeeper，还是用redis比较好。</li>
+</ul> 
+<p>本文项目地址：<a href="https://github.com/zsllsz/distributed-lock">分布式锁</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Hive调优及原理分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Hive调优及原理分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h3>一、Fetch 抓取                </h3> 
+<p>        Fetch 抓取是指， Hive 中对某些情况的查询可以不必使用 MapReduce 计算。 Hive 可以简单地读取 employee 对应的存储目录下的文件，然后输出查询结果到控制台。可以在配置文件里面修改，也可以通过参数设置</p> 
+<p>        在 hive-default.xml.template 文件中 hive.fetch.task.conversion 默认是 more，老版本 hive默认是 minimal，</p> 
+<p><span style="color:#fe2c24">more：在全局查找、字段查找、 limit 查找等都不走MR</span></p> 
+<p><span style="color:#fe2c24">minimal：仅在分区表分区字段过滤情况下不走MR</span></p> 
+<p><span style="color:#fe2c24">none：全部查询都走MR</span></p> 
+<p><strong>配置文件修改：</strong></p> 
+<pre><code class="language-XML">&lt;property&gt;
+    &lt;name&gt;hive.fetch.task.conversion&lt;/name&gt;
+    &lt;value&gt;more&lt;/value&gt;
+    &lt;description&gt;
+        Expects one of [none, minimal, more].
+        Some select queries can be converted to single FETCH task minimizing latency.
+        Currently the query should be single sourced not having any subquery and should not have
+        any aggregations or distincts (which incurs RS), lateral views and joins.
+        0. none : disable hive.fetch.task.conversion
+        1. minimal : SELECT STAR, FILTER on partition columns, LIMIT only
+        2. more : SELECT, FILTER, LIMIT only (support TABLESAMPLE and virtual columns)
+    &lt;/description&gt;
+&lt;/property&gt;</code></pre> 
+<p>        直接修改参数，<span style="color:#fe2c24"><strong>执行查询sql前执行参数设置，只对当前session有用</strong></span></p> 
+<pre><code class="language-sql">set hive.fetch.task.conversion=none;
+set hive.fetch.task.conversion=more;
+select *  from test;</code></pre> 
+<h3><strong>二、本地模式</strong></h3> 
+<p>        当 Hive 的输入数据量是非常小，Hive 可以通过本地模式在单台机器上处理所有的任务，执行时间可以明显被缩短。</p> 
+<p>       <strong> 参数设置：</strong></p> 
+<pre><code class="language-sql">//开启本地 mr
+set hive.exec.mode.local.auto=true; 
+//设置 local mr 的最大输入数据量，当输入数据量小于这个值时采用 local mr 的方式，默认为134217728，即 128M
+set hive.exec.mode.local.auto.inputbytes.max=50000000;
+//设置 local mr 的最大输入文件个数，当输入文件个数小于这个值时采用 local mr的方式，默认为 4
+set hive.exec.mode.local.auto.input.files.max=10;</code></pre> 
+<h3>三、MapJoin</h3> 
+<p>        在 Reduce 阶段完成 join。容易发生数据倾斜。<span style="color:#fe2c24">可以用 MapJoin 把小表全部加载到内存在 map 端进行 join，避免 reducer 处理。如果开启了hive会通过读取的文件大小(根据集群内存资源来确定)来判断是否是小表，如果不是则转成reduce join</span></p> 
+<p><strong>        参数设置：</strong></p> 
+<pre><code class="language-sql">//设置自动选择 MapJoin,默认为 true
+set hive.auto.convert.join = true; 
+//大表小表的阈值设置（默认 25M 一下认为是小表）
+set hive.mapjoin.smalltable.filesize=25000000;</code></pre> 
+<p>      <strong>  MapJoin 工作机制</strong></p> 
+<p><img alt="" height="341" src="https://images2.imgbox.com/00/65/EeJf2oWV_o.png" width="733"></p> 
+<h3> 四、合并小文件</h3> 
+<p>        合并小文件有三个地方，</p> 
+<p>                <strong><span style="color:#fe2c24">map输入，避免每一个小文件启一个mapTask</span></strong></p> 
+<p><strong><span style="color:#fe2c24">                map输出，reduce输出</span></strong></p> 
+<p>        <strong>参数设置：</strong></p> 
+<pre><code class="language-sql">1) 设置map输入的小文件合并
+set mapred.max.split.size=256000000;  
+//一个节点上split的至少的大小(这个值决定了多个DataNode上的文件是否需要合并)
+set mapred.min.split.size.per.node=100000000;
+//一个交换机下split的至少的大小(这个值决定了多个交换机上的文件是否需要合并)  
+set mapred.min.split.size.per.rack=100000000;
+//执行Map前进行小文件合并
+set hive.input.format=org.apache.hadoop.hive.ql.io.CombineHiveInputFormat;
+
+
+2) 设置map输出和reduce输出进行合并的相关参数：
+//设置map端输出进行合并，默认为true
+set hive.merge.mapfiles = true
+//设置reduce端输出进行合并，默认为false
+set hive.merge.mapredfiles = true
+//设置合并文件的大小
+set hive.merge.size.per.task = 256*1000*1000
+//当输出文件的平均大小小于该值时，启动一个独立的MapReduce任务进行文件merge。
+set hive.merge.smallfiles.avgsize=16000000</code></pre> 
+<h3>五、并行执行</h3> 
+<p>        某个 job 可能包含众多的阶段，而这些阶段可能并非完全互相依赖的，也就是说有些阶段是可以并行执行的，这样可能使得整个 job 的执行时间缩短</p> 
+<p>     <strong>   参数设置：</strong></p> 
+<pre><code class="language-sql">//打开任务并行执行
+set hive.exec.parallel=true; 
+//同一个 sql 允许最大并行度，默认为 8
+set hive.exec.parallel.thread.number=16; </code></pre> 
+<h3>六、动态分区</h3> 
+<p>        分区表实际上就是对应一个 HDFS 文件系统上的独立的文件夹，该文件夹下是该分区所有的数据文件。 Hive 中的分区就是分目录，把一个大的数据集根据业务需要分割成小的数据集。</p> 
+<p>       <strong> 参数设置：</strong></p> 
+<pre><code class="language-sql">//开启动态分区功能
+set hive.exec.dynamic.partition=true;
+//设置分严格模式(允许不指定至少一个静态分区)
+set hive.exec.dynamic.partition.mode=nonstrict;
+//在所有执行 MR 的节点上，最大一共可以创建多少个动态分区。默认 1000
+set hive.exec.max.dynamic.partitions=1000;
+//在每个执行 MR 的节点上，最大可以创建多少个动态分区
+set hive.exec.max.dynamic.partitions.pernode=100
+//整个 MR Job 中，最大可以创建多少个 HDFS 文件。默认 100000
+set hive.exec.max.created.files=100000
+//当有空分区生成时，是否抛出异常。一般不需要设置。默认 false
+set hive.error.on.empty.partition=false</code></pre> 
+<h3>七、推测执行</h3> 
+<p>        推测执行（Speculative Execution）机制就是根据一定的法则推测出执行慢的任务，并为这样的任务启动一个备份任务，让该任务与原始任务同时处理同一份数据，并最终选用最先成功运行完成任务的计算结果作为最终结果。</p> 
+<p><strong>        设置开启推测执行参数： Hadoop 的 mapred-site.xml 文件中进行配置</strong></p> 
+<pre><code class="language-XML">&lt;property&gt;
+    &lt;name&gt;mapreduce.map.speculative&lt;/name&gt;
+    &lt;value&gt;true&lt;/value&gt;
+    &lt;description&gt;
+        If true, then multiple instances of some map tasks may be executed in parallel.
+    &lt;/description&gt;
+&lt;/property&gt;
+&lt;property&gt;
+    &lt;name&gt;mapreduce.reduce.speculative&lt;/name&gt;
+    &lt;value&gt;true&lt;/value&gt;
+    &lt;description&gt;
+        If true, then multiple instances of some reduce tasks may be executed in parallel.
+    &lt;/description&gt;
+&lt;/property&gt;</code></pre> 
+<p>       <strong> hive 提供的推测执行配置(默认是true)，永久生效</strong></p> 
+<pre><code class="language-XML">&lt;property&gt;
+    &lt;name&gt;hive.mapred.reduce.tasks.speculative.execution&lt;/name&gt;
+    &lt;value&gt;true&lt;/value&gt;
+    &lt;description&gt;
+        Whether speculative execution for reducers should be turned on. 
+    &lt;/description&gt;
+&lt;/property&gt;</code></pre> 
+<p>        当前session生效</p> 
+<pre><code>set hive.mapred.reduce.tasks.speculative.execution=true</code></pre> 
+<h3>八、压缩</h3> 
+<p>       <strong> Map输出阶段压缩</strong></p> 
+<pre><code class="language-sql">//开启hive中间传输数据压缩功能
+set hive.exec.compress.intermediate=true;
+//开启mapreduce中map输出压缩功能
+set mapreduce.map.output.compress=true;
+//设置mapreduce中map输出数据的压缩方式
+set mapreduce.map.output.compress.codec=org.apache.hadoop.io.compress.SnappyCodec;</code></pre> 
+<p>        <strong>Reduce输出阶段压缩</strong></p> 
+<pre><code class="language-sql">//开启hive最终输出数据压缩功能
+set hive.exec.compress.output=true;
+//开启mapreduce最终输出数据压缩
+set mapreduce.output.fileoutputformat.compress=true;
+//设置mapreduce最终数据输出压缩方式
+set mapreduce.output.fileoutputformat.compress.codec=org.apache.hadoop.io.compress.SnappyCodec;
+//设置mapreduce最终数据输出压缩为块压缩
+set mapreduce.output.fileoutputformat.compress.type=BLOCK;
+</code></pre> 
+<h3>九、Group by 倾斜优化</h3> 
+<p>        1、我们可以在map中会做部分聚集(combiner)操作，效率更高但需要更多的内存。</p> 
+<pre><code class="language-sql">//开启map端聚合
+set hive.map.aggr=true;
+//(默认)执行聚合的条数
+set hive.groupby.mapaggr.checkinterval=100000;
+//#如果hash表的容量与输入行数之比超过这个数，那么map端的hash聚合将被关闭，默认是0.5，设置为1可以保证hash聚合永不被关闭；
+set hive.map.aggr.hash.min.reduction=0.5;</code></pre> 
+<p>        2、通过两个MRJob来进行，<span style="color:#fe2c24"><strong>第一个MRJob 中，Map的输出结果集合会随机分布到Reduce中，每个Reduce做部分聚合操作，并输出结果，这样处理的结果是相同的GroupBy Key有可能被分发到不同的Reduce中，从而达到负载均衡的目的；第二个MRJob再根据预处理的数据结果按照GroupBy Key分布到Reduce中（这个过程可以保证相同的GroupBy Key被分布到同一个Reduce中），最后完成最终的聚合操作</strong></span>。</p> 
+<p>     <strong>   参数设置：</strong></p> 
+<pre><code class="language-sql">//如果是group by过程出现倾斜 应该设置为true
+set hive.groupby.skewindata=true;
+//这个是group的键对应的记录条数超过这个值则会进行分拆,值根据具体数据量设置
+set hive.groupby.mapaggr.checkinterval=1000000;</code></pre> 
+<p>        <strong>MR的执行原理</strong></p> 
+<p style="text-align:center"><img alt="" src="https://images2.imgbox.com/71/40/mKvhxLmR_o.png"></p> 
+<p>         <span style="color:#fe2c24"><strong>我们直接通过sql来实现set hive.groupby.skewindata=true;</strong></span></p> 
+<pre><code class="language-sql">select
+   t1.id,
+   count(t1.cnt) cnt
+from (
+    select
+        id, 
+        if(id = '1001',cast(rand() * 10 as int ),0), 
+        count(1) as cnt
+    from test
+    group by id,if(id = '1001',cast(rand() * 10 as int ),0)
+)t1
+group by t1.id;</code></pre> 
+<h3>十、join 倾斜优化</h3> 
+<p>        如果是小表join大表我们可以转换成MapJoin来优化，如上</p> 
+<p>        如果是大表join大表我们使用skewjoin</p> 
+<p>   <strong>     参数设置：</strong></p> 
+<pre><code class="language-sql">//如果是join 过程出现倾斜 应该设置为true
+set hive.optimize.skewjoin=true;
+//这个是join的键对应的记录条数超过这个值则会进行分拆,值根据具体数据量设置
+set hive.skewjoin.key=1000000;
+//处理数据倾斜的MapJoin的Map任务数
+set hive.skewjoin.mapjoin.map.tasks=10000;
+//处理数据倾斜的MapJoin的最小数据切分大小，以字节为单位，默认为32M
+set hive.skewjoin.mapjoin.min.split=33554432;</code></pre> 
+<p>  <strong>      skewjoin原理</strong></p> 
+<p>                1、对于skewjoin.key，在执行job时，将它们存入临时的HDFS目录。其它数据正常执行</p> 
+<p>                2、对倾斜数据开启map join操作，对非倾斜值采取普通join操作</p> 
+<p>                3、将倾斜数据集和非倾斜数据及进行合并操作</p> 
+<p><img alt="" height="382" src="https://images2.imgbox.com/1a/f4/izDmC0ti_o.png" width="707"></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

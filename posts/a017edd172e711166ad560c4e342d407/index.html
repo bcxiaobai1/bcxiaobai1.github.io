@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>COLMAP简明教程 重建 转化深度图 导出相机参数 导入相机参数 命令行 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">COLMAP简明教程 重建 转化深度图 导出相机参数 导入相机参数 命令行</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    
+                        
+                    
+                    <h2>
+<a id="COLMAP____0"></a>COLMAP简明教程 导入指定参数 命令行 导出深度图</h2> 
+<p>COLMAP是经典的3D重建、SfM、深度估计开源工作，配置和安装按下不表，本文主要从命令行的角度，对COLMAP的基本用法做教程，并备收藏和笔记。</p> 
+<h3>
+<a id="_3"></a>对指定图像进行重建和深度估计</h3> 
+<p>准备好一些多视角图像，放入一个文件夹中，如下所示：</p> 
+<pre><code class="prism language-txt">├── images/
+    ├── 0.png
+    ├── 1.png
+    ......
+    ├── 12.png
+</code></pre> 
+<p>如果图像是针孔相机拍摄的，就在根目录下执行以下命令：</p> 
+<pre><code class="prism language-shell">colmap feature_extractor --database_path database.db --image_path images --ImageReader.camera_model PINHOLE
+colmap exhaustive_matcher --database_path database.db
+<span class="token function">mkdir</span> sparse
+colmap mapper --database_path database.db --image_path images --output_path sparse
+<span class="token function">mkdir</span> dense
+colmap image_undistorter --image_path images --input_path sparse/0 --output_path dense --output_type COLMAP
+colmap patch_match_stereo --workspace_path dense --workspace_format COLMAP --PatchMatchStereo.geom_consistency <span class="token boolean">true</span>
+colmap stereo_fusion --workspace_path dense --workspace_format COLMAP --input_type geometric --output_path dense/fused.ply
+colmap poisson_mesher --input_path dense/fused.ply --output_path dense/meshed-poisson.ply
+colmap delaunay_mesher --input_path dense --output_path dense/meshed-delaunay.ply
+</code></pre> 
+<p>这些命令分别用于提取图片特征、特征匹配、稀疏重建、去畸变、稠密重建、点云构建、<code>mesh</code>文件构建。如果图像不是针孔相机拍摄的，请自行更改<code>colmap feature_extractor</code>命令。<br> 在执行完这些命令后，可以得到如下目录结构：</p> 
+<pre><code class="prism language-txt">├── dense/
+	├── images/
+	├── sparse/
+	├── stereo/
+├── images/
+├── sparse/
+	├── 0/
+</code></pre> 
+<p>其中在<code>dense</code>文件夹下还有几个<code>.ply</code>文件，是COLMAP得到的<code>mesh</code>场景重建结果，可以用<code>MeshLab</code>等软件打开观看重建结果。</p> 
+<h3>
+<a id="_37"></a>转化深度图格式</h3> 
+<p>在<code>densestereodepth_maps</code>文件夹下有很多<code>.bin</code>文件，这些文件是COLMAP得到的深度图，COLMAP官方代码库提供了多种方式将其转化为彩色的可视的深度图，如<a href="https://github.com/colmap/colmap/blob/dev/scripts/python/read_write_dense.py">这份代码</a>。<br> 基于此代码，我提供一份代码，用于将<code>.bin</code>文件转化为灰度的单通道图像，符合大家一般对深度图的认知：</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> argparse
+<span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> os
+<span class="token keyword">import</span> struct
+<span class="token keyword">from</span> PIL <span class="token keyword">import</span> Image
+<span class="token keyword">import</span> warnings
+<span class="token keyword">import</span> os
+
+warnings<span class="token punctuation">.</span>filterwarnings<span class="token punctuation">(</span><span class="token string">'ignore'</span><span class="token punctuation">)</span> <span class="token comment"># 屏蔽nan与min_depth比较时产生的警告</span>
+
+camnum <span class="token operator">=</span> <span class="token number">12</span>
+fB <span class="token operator">=</span> <span class="token number">32504</span><span class="token punctuation">;</span>
+min_depth_percentile <span class="token operator">=</span> <span class="token number">2</span>
+max_depth_percentile <span class="token operator">=</span> <span class="token number">98</span>
+depthmapsdir <span class="token operator">=</span> <span class="token string">'.\dense\stereo\depth_maps\'</span>
+outputdir <span class="token operator">=</span> <span class="token string">'.\dense\stereo\depth_maps\'</span>
+
+<span class="token keyword">def</span> <span class="token function">read_array</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">with</span> <span class="token builtin">open</span><span class="token punctuation">(</span>path<span class="token punctuation">,</span> <span class="token string">"rb"</span><span class="token punctuation">)</span> <span class="token keyword">as</span> fid<span class="token punctuation">:</span>
+        width<span class="token punctuation">,</span> height<span class="token punctuation">,</span> channels <span class="token operator">=</span> np<span class="token punctuation">.</span>genfromtxt<span class="token punctuation">(</span>fid<span class="token punctuation">,</span> delimiter<span class="token operator">=</span><span class="token string">"&amp;"</span><span class="token punctuation">,</span> max_rows<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span>
+                                                usecols<span class="token operator">=</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">,</span> dtype<span class="token operator">=</span><span class="token builtin">int</span><span class="token punctuation">)</span>
+        fid<span class="token punctuation">.</span>seek<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+        num_delimiter <span class="token operator">=</span> <span class="token number">0</span>
+        byte <span class="token operator">=</span> fid<span class="token punctuation">.</span>read<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+        <span class="token keyword">while</span> <span class="token boolean">True</span><span class="token punctuation">:</span>
+            <span class="token keyword">if</span> byte <span class="token operator">==</span> <span class="token string">b"&amp;"</span><span class="token punctuation">:</span>
+                num_delimiter <span class="token operator">+=</span> <span class="token number">1</span>
+                <span class="token keyword">if</span> num_delimiter <span class="token operator">&gt;=</span> <span class="token number">3</span><span class="token punctuation">:</span>
+                    <span class="token keyword">break</span>
+            byte <span class="token operator">=</span> fid<span class="token punctuation">.</span>read<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+        array <span class="token operator">=</span> np<span class="token punctuation">.</span>fromfile<span class="token punctuation">(</span>fid<span class="token punctuation">,</span> np<span class="token punctuation">.</span>float32<span class="token punctuation">)</span>
+    array <span class="token operator">=</span> array<span class="token punctuation">.</span>reshape<span class="token punctuation">(</span><span class="token punctuation">(</span>width<span class="token punctuation">,</span> height<span class="token punctuation">,</span> channels<span class="token punctuation">)</span><span class="token punctuation">,</span> order<span class="token operator">=</span><span class="token string">"F"</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> np<span class="token punctuation">.</span>transpose<span class="token punctuation">(</span>array<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>squeeze<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">bin2depth</span><span class="token punctuation">(</span>i<span class="token punctuation">,</span> depth_map<span class="token punctuation">,</span> depthdir<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment"># depth_map = '0.png.geometric.bin'</span>
+    <span class="token comment"># print(depthdir)</span>
+    <span class="token comment"># if min_depth_percentile &gt; max_depth_percentile:</span>
+    <span class="token comment">#     raise ValueError("min_depth_percentile should be less than or equal "</span>
+    <span class="token comment">#                      "to the max_depth_perceintile.")</span>
+
+    <span class="token comment"># Read depth and normal maps corresponding to the same image.</span>
+    <span class="token keyword">if</span> <span class="token keyword">not</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>exists<span class="token punctuation">(</span>depth_map<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">raise</span> fileNotFoundError<span class="token punctuation">(</span><span class="token string">"file not found: {}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>depth_map<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+    depth_map <span class="token operator">=</span> read_array<span class="token punctuation">(</span>depth_map<span class="token punctuation">)</span>
+
+    min_depth<span class="token punctuation">,</span> max_depth <span class="token operator">=</span> np<span class="token punctuation">.</span>percentile<span class="token punctuation">(</span>depth_map<span class="token punctuation">[</span>depth_map<span class="token operator">&gt;</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token punctuation">[</span>min_depth_percentile<span class="token punctuation">,</span> max_depth_percentile<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    depth_map<span class="token punctuation">[</span>depth_map <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> np<span class="token punctuation">.</span>nan <span class="token comment"># 把0和负数都设置为nan，防止被min_depth取代</span>
+    depth_map<span class="token punctuation">[</span>depth_map <span class="token operator">&lt;</span> min_depth<span class="token punctuation">]</span> <span class="token operator">=</span> min_depth
+    depth_map<span class="token punctuation">[</span>depth_map <span class="token operator">&gt;</span> max_depth<span class="token punctuation">]</span> <span class="token operator">=</span> max_depth
+
+    maxdisp <span class="token operator">=</span> fB <span class="token operator">/</span> min_depth<span class="token punctuation">;</span>
+    mindisp <span class="token operator">=</span> fB <span class="token operator">/</span> max_depth<span class="token punctuation">;</span>
+    depth_map <span class="token operator">=</span> <span class="token punctuation">(</span>fB<span class="token operator">/</span>depth_map <span class="token operator">-</span> mindisp<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">255</span> <span class="token operator">/</span> <span class="token punctuation">(</span>maxdisp <span class="token operator">-</span> mindisp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    depth_map <span class="token operator">=</span> np<span class="token punctuation">.</span>nan_to_num<span class="token punctuation">(</span>depth_map<span class="token punctuation">)</span> <span class="token comment"># nan全都变为0</span>
+    depth_map <span class="token operator">=</span> depth_map<span class="token punctuation">.</span>astype<span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">)</span>
+
+    image <span class="token operator">=</span> Image<span class="token punctuation">.</span>fromarray<span class="token punctuation">(</span>depth_map<span class="token punctuation">)</span><span class="token punctuation">.</span>convert<span class="token punctuation">(</span><span class="token string">'L'</span><span class="token punctuation">)</span>
+    <span class="token comment"># image = image.resize((1920, 1080), Image.ANTIALIAS) # 保证resize为1920*1080</span>
+    image<span class="token punctuation">.</span>save<span class="token punctuation">(</span>depthdir <span class="token operator">+</span> <span class="token builtin">str</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">'.png'</span><span class="token punctuation">)</span>
+
+<span class="token keyword">for</span> j <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>camnum<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	binjdir <span class="token operator">=</span> depthmapsdir <span class="token operator">+</span> <span class="token builtin">str</span><span class="token punctuation">(</span>j<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">'.png.'</span> <span class="token operator">+</span> <span class="token string">'geometric'</span> <span class="token operator">+</span> <span class="token string">'.bin'</span>
+	<span class="token comment"># binjdir = depthmapsdir + str(j) + '.png.' + 'photometric' + '.bin'</span>
+	<span class="token keyword">if</span> os<span class="token punctuation">.</span>path<span class="token punctuation">.</span>exists<span class="token punctuation">(</span>binjdir<span class="token punctuation">)</span><span class="token punctuation">:</span>
+		read_write_dense<span class="token punctuation">.</span>bin2depth<span class="token punctuation">(</span>j<span class="token punctuation">,</span> binjdir<span class="token punctuation">,</span> outputdir<span class="token punctuation">)</span>
+</code></pre> 
+<p>这份代码可以把<code>depthmapsdir </code>的<code>.bin</code>文件转化成<code>.png</code>图片并保存到<code>outputdir</code>，具体参数大家可以自行调整。<br> 注意在代码中，<code>depth_map</code>其实就已经把<code>.bin</code>文件变成COLMAP估计得的距离了，这份代码和<a href="https://github.com/colmap/colmap/blob/dev/scripts/python/read_write_dense.py">官方代码</a>思路一样，都是把估计得的距离值的2百分位数至98百分位数范围内的值保存下来，其他值替换掉。<br> 在得到<code>depth_map</code>后，大家可以自定义自己喜欢和需要的可视化方法。我这里是用<code>fB</code>可视化为视差图了，大家根据需要自己更改代码，这里仅作参考。</p> 
+<h3>
+<a id="_113"></a>导出估计得的相机参数</h3> 
+<p>在根目录下运行命令：</p> 
+<pre><code class="prism language-shell">colmap model_converter --input_path dense/sparse --output_path dense/sparse --output_type TXT
+</code></pre> 
+<p>即可把<code>dense/sparse</code>文件夹中的<code>.bin</code>格式的文件转化为<code>.txt</code>格式的文件。<br> 其中<code>cameras.txt</code>文件中保存的是内参，形如：</p> 
+<pre><code class="prism language-txt"># Camera list with one line of data per camera:
+#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]
+# Number of cameras: 30
+1 PINHOLE 1920 1080 1987.52 2254.34 960 540
+2 PINHOLE 1920 1080 2039.08 2320.3 960 540
+...
+</code></pre> 
+<p>这里的<code>MODEL</code>是跟之提取特征时选的相机模型一致的。每行的6个数字中，除了图像长宽之外分别是图像对应的相机内参矩阵中的<code>fx</code>,<code>fy</code>,<code>cx</code>,<code>cy</code>，具体含义参见<a href="http://opencv.jp/opencv-2.1_org/py/camera_calibration_and_3d_reconstruction.html">这里</a>。<br> 另一个文件<code>images.txt</code>保存的是外参，形如：</p> 
+<pre><code class="prism language-txt"># Image list with two lines of data per image:
+#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+#   POINTS2D[] as (X, Y, POINT3D_ID)
+# Number of images: 30, mean observations per image: 86.566666666666663
+1 0.927395 0.0306001 -0.367019 -0.065565 5.03061 -0.487973 2.93529 1 0.png
+1617.59 4.99193 -1 1831.38 5.76693 -1 1527.2 9.43552 -1 1490.19 10.4907 -1 367.424 11.5043 -1 775.228 11.182 637 1653.98 11.5989 -1 1896.38 11.4442 -1 30.5403 16.7052 -1 52.5616 18.6398 -1 7.04345 21.7672 1467 7.04345 21.7672 -1 43.2921 23.8136 -1 133.284 24.7492 -1 1249.04 24.1695 -1 3.80868 26.8114 -1 157.906 26.5587 75 173.966 27.2299 -1 22.0715 28.2147 -1 72.7796 29.7689 -1 278.952 29.9326 841 81.3182 30.1362 -1 1242.21 30.9173 -1 1242.21 30.9173 -1 1608.52 30.874 -1 110.63 32.399 -1 110.63 32.399 -1 178.573 32.1621 -1 178.573 32.1621 639 852.426 33.4657 76 201.459 34.3237 640 201.459 34.3237 -1 44.155 35.6634 -1 44.155 35.6634 -1 65.9694 37.3953 -1 65.9694 37.3953 -1 92.186 37.6702 -1 92.186 37.6702 -1 489.638 37.2811 -1 1014.71 37.6817 -1 165.665 40.7318 -1 80.8138 43.304 -1 200.238 43.746 -1 401.959 44.322 -1 473.235 44.9557 -1 473.235 44.9557 -1 5.5055 46.3413 -1 26.7574 47.175 1453 506.037 47.7838 -1 506.037 47.7838 -1 628.451 47.4269 -1 148.813 51.3945 -1 308.002 52.2475 642 71.4106 53.5389 -1
+...
+</code></pre> 
+<p>每张图像有两行，第一行是对应相机外参，七个浮点数中的<code>QW</code>,<code>QX</code>,<code>QY</code>,<code>QZ</code>是四元数的形式，可以转换为旋转矩阵或者其他形式，转化办法可参考<a href="https://www.osgeo.cn/scipy/reference/generated/scipy.spatial.transform.Rotation.from_quat.html">这里</a>，注意几个参数调用顺序，与COLMAP给的顺序是不同的。<br> 而<code>TX</code>,<code>TY</code>,<code>TZ</code>可直接构成外参中的<code>t</code>矩阵。<br> 注意，COLMAP提供的相机参数的含义与<a href="http://opencv.jp/opencv-2.1_org/py/camera_calibration_and_3d_reconstruction.html">这里</a>定义的相同。</p> 
+<h3>
+<a id="_142"></a>导入相机参数进行重建和深度估计</h3> 
+<p>有时候用COLMAP做批量重建和深度估计，需要使用统一的相机参数，这个时候就需要统一导入相同的一组相机参数。这里介绍使用导入的相机参数的方法，和使用导入的参数重建、深度估计的方法。<br> 准备一个<code>cameras.txt</code>，很容易，在得到上一步的<code>cameras.txt</code>的基础上，只需要把最前面的三行删掉就好了：</p> 
+<pre><code class="prism language-txt">1 PINHOLE 1920 1080 1987.52 2254.34 960 540
+2 PINHOLE 1920 1080 2039.08 2320.3 960 540
+...
+</code></pre> 
+<p>再准备一个<code>images.txt</code>，也容易，在得到上一步的<code>images.txt</code>之后，最前面的三行删掉，并且只保留每台相机的第一行：</p> 
+<pre><code class="prism language-txt">1 0.927395 0.0306001 -0.367019 -0.065565 5.03061 -0.487973 2.93529 1 0.png
+
+2 0.938886 0.0294343 -0.338403 -0.0557617 4.86882 -0.403504 2.77603 2 1.png
+
+...
+</code></pre> 
+<p>每台相机后面都要空一行，注意。<br> 然后准备一个完全空的<code>points3D.txt</code>，将<code>cameras.txt</code>，<code>images.txt</code>和<code>points3D.txt</code>放入新建的<code>createdsparse</code>文件夹中，形成如下目录：</p> 
+<pre><code class="prism language-txt">├── created/
+  	├── sparse/
+   		├── cameras.txt
+   		├── images.txt
+   		├── points3D.txt
+├── images/
+    ├── 0.png
+    ├── 1.png
+    ......
+    ├── 12.png
+</code></pre> 
+<p>然后在根目录下运行以下命令：</p> 
+<pre><code class="prism language-shell">colmap feature_extractor --database_path database.db --image_path images
+colmap exhaustive_matcher --database database.db
+<span class="token function">mkdir</span> triangulated/sparse
+colmap point_triangulator --database_path database.db --image_path images --input_path created/sparse --output_path triangulated/sparse
+<span class="token function">mkdir</span> dense
+colmap image_undistorter --image_path images --input_path triangulated/sparse --output_path dense
+colmap patch_match_stereo --workspace_path dense --workspace_format COLMAP --PatchMatchStereo.geom_consistency <span class="token boolean">true</span>
+colmap stereo_fusion --workspace_path dense --output_path dense/fused.ply
+colmap model_converter --input_path dense/sparse --output_path dense/sparse --output_type TXT
+</code></pre> 
+<p>即可完成重建。然后参考前面的步骤进行深度图转换即可。<br> 如果你的相机参数不是从COLMAP得到的，就需要自己转换参数形式了，其实也容易，参考上面的几个文件的解读即可。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

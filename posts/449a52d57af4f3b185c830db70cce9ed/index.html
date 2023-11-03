@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Android 11 Audio框架探索（一） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android 11 Audio框架探索（一）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h2>1、mian_audioservice.cpp文件启动AudioPolicyService与AudioFlinger服务</h2> 
+<p>在面mian函数调用了AudioFlinger，AudioPolicyService的instantiate()函数。</p> 
+<pre><code class="language-cpp">int main(int argc __unused, char **argv)
+{
+    // TODO: update with refined parameters
+    limitProcessMemory(
+        "audio.maxmem", /* "ro.audio.maxmem", property that defines limit */
+        (size_t)512 * (1 &lt;&lt; 20), /* SIZE_MAX, upper limit in bytes */
+        20 /* upper limit as percentage of physical RAM */);
+
+    signal(SIGPIPE, SIG_IGN);
+
+    bool doLog = (bool) property_get_bool("ro.test_harness", 0);
+
+    pid_t childPid;
+    // FIXME The advantage of making the process containing media.log service the parent process of
+    // the process that contains the other audio services, is that it allows us to collect more
+    // detailed information such as signal numbers, stop and continue, resource usage, etc.
+    // But it is also more complex.  Consider replacing this by independent processes, and using
+    // binder on death notification instead.
+    if (doLog &amp;&amp; (childPid = fork()) != 0) {
+        // media.log service
+        //prctl(PR_SET_NAME, (unsigned long) "media.log", 0, 0, 0);
+        // unfortunately ps ignores PR_SET_NAME for the main thread, so use this ugly hack
+        strcpy(argv[0], "media.log");
+        sp&lt;ProcessState&gt; proc(ProcessState::self());
+        MediaLogService::instantiate();
+        ProcessState::self()-&gt;startThreadPool();
+        IPCThreadState::self()-&gt;joinThreadPool();
+        ...
+        ...
+        ...
+        android::hardware::configureRpcThreadpool(4, false /*callerWillJoin*/);
+        sp&lt;ProcessState&gt; proc(ProcessState::self());
+        sp&lt;IServiceManager&gt; sm = defaultServiceManager();
+        ALOGI("ServiceManager: %p", sm.get());
+        AudioFlinger::instantiate();
+        AudioPolicyService::instantiate();
+
+        ...
+        ...
+        ...
+
+        ProcessState::self()-&gt;startThreadPool();
+        IPCThreadState::self()-&gt;joinThreadPool();
+    }
+}</code></pre> 
+<p>在BinderService.h中会创建它们的实例，并注册到SystemManager中</p> 
+<pre><code class="language-cpp">template&lt;typename SERVICE&gt;
+class BinderService
+{
+public:
+    static status_t publish(bool allowIsolated = false,
+                            int dumpFlags = IServiceManager::DUMP_FLAG_PRIORITY_DEFAULT) {
+        sp&lt;IServiceManager&gt; sm(defaultServiceManager());
+        return sm-&gt;addService(String16(SERVICE::getServiceName()), new SERVICE(), allowIsolated,
+                              dumpFlags);
+    }
+
+    static void publishAndJoinThreadPool(
+            bool allowIsolated = false,
+            int dumpFlags = IServiceManager::DUMP_FLAG_PRIORITY_DEFAULT) {
+        publish(allowIsolated, dumpFlags);
+        joinThreadPool();
+    }
+
+    static void instantiate() { publish(); }
+
+    static status_t shutdown() { return NO_ERROR; }
+
+private:
+    static void joinThreadPool() {
+        sp&lt;ProcessState&gt; ps(ProcessState::self());
+        ps-&gt;startThreadPool();
+        ps-&gt;giveThreadPoolName();
+        IPCThreadState::self()-&gt;joinThreadPool();
+    }
+};
+
+
+} // namespace android</code></pre> 
+<p>关于如何启动一个Native service这里不赘叙，可参考下面连接：</p> 
+<p><a href="https://www.jianshu.com/p/46dfce294a4f" title="通过C++实现Android Native Service - 简书">通过C++实现Android Native Service - 简书</a></p> 
+<h3>2、AudioProlicyService初始化</h3> 
+<p>AudioPolicyService用于控制音频播放策略（比如插耳机的时候来电用什么设备去播放音乐）、管理音频设备等。</p> 
+<p>AudioPolicyService的构造函数更简单，只是初始化主要成员。<br> AudioPolicyService会在onFristRef中做比较多的工作，比如创建command线程，创建AudioPolicyManager。</p> 
+<pre><code class="language-cpp">AudioPolicyService::AudioPolicyService()
+    : BnAudioPolicyService(),
+      mAudioPolicyManager(NULL),
+      mAudioPolicyClient(NULL),
+      mPhoneState(AUDIO_MODE_INVALID),
+      mCaptureStateNotifier(false) {
+}
+
+void AudioPolicyService::onFirstRef()
+{
+    {
+        Mutex::Autolock _l(mLock);
+
+        // start audio commands thread
+        mAudioCommandThread = new AudioCommandThread(String8("ApmAudio"), this);
+        // start output activity command thread
+        mOutputCommandThread = new AudioCommandThread(String8("ApmOutput"), this);
+        //创建AudioPolicyClient
+        mAudioPolicyClient = new AudioPolicyClient(this);
+        //创建AudioPolicyManager
+        mAudioPolicyManager = createAudioPolicyManager(mAudioPolicyClient);
+    }
+    // load audio processing modules
+    sp&lt;AudioPolicyEffects&gt; audioPolicyEffects = new AudioPolicyEffects();
+    sp&lt;UidPolicy&gt; uidPolicy = new UidPolicy(this);
+    sp&lt;SensorPrivacyPolicy&gt; sensorPrivacyPolicy = new SensorPrivacyPolicy(this);
+    {
+        Mutex::Autolock _l(mLock);
+        mAudioPolicyEffects = audioPolicyEffects;
+        mUidPolicy = uidPolicy;
+        mSensorPrivacyPolicy = sensorPrivacyPolicy;
+    }
+    uidPolicy-&gt;registerSelf();
+    sensorPrivacyPolicy-&gt;registerSelf();
+}</code></pre> 
+<p>这里createAudioPolicyManager()方法定义在AudioPolicyInterface.h，AudioPolicyManager.h继承了AudioPolicyInterface。</p> 
+<pre><code class="language-cpp">class AudioPolicyManager : public AudioPolicyInterface, public AudioPolicyManagerObserver</code></pre> 
+<p>AudioPolicyFactory.cpp中实现了createAudioPolicyManager().</p> 
+<pre><code class="language-cpp">#include &lt;AudioPolicyManager.h&gt;
+
+namespace android {
+
+extern "C" AudioPolicyInterface* createAudioPolicyManager(
+        AudioPolicyClientInterface *clientInterface)
+{
+    AudioPolicyManager *apm = new AudioPolicyManager(clientInterface);
+    status_t status = apm-&gt;initialize();
+    if (status != NO_ERROR) {
+        delete apm;
+        apm = nullptr;
+    }
+    return apm;
+}
+
+extern "C" void destroyAudioPolicyManager(AudioPolicyInterface *interface)
+{
+    delete interface;
+}
+
+} // namespace android</code></pre> 
+<p>这里创建了AudioPolicyManager并且调用的它的initialize()。</p> 
+<p>话不多说我们直接上代码分析，AudioPolicyManager.cpp：</p> 
+<pre><code class="language-cpp">AudioPolicyManager::AudioPolicyManager(AudioPolicyClientInterface *clientInterface,
+                                       bool /*forTesting*/)
+    :
+    mUidCached(AID_AUDIOSERVER), // no need to call getuid(), there's only one of us running.
+    mpClientInterface(clientInterface),
+    mLimitRingtoneVolume(false), mLastVoiceVolume(-1.0f),
+    mA2dpSuspended(false),
+    mConfig(mHwModulesAll, mOutputDevicesAll, mInputDevicesAll, mDefaultOutputDevice),
+    mAudioPortGeneration(1),
+    mBeaconMuteRefCount(0),
+    mBeaconPlayingRefCount(0),
+    mBeaconMuted(false),
+    mTtsOutputAvailable(false),
+    mMasterMono(false),
+    mMusicEffectOutput(AUDIO_IO_HANDLE_NONE)
+{
+}
+
+AudioPolicyManager::AudioPolicyManager(AudioPolicyClientInterface *clientInterface)
+        : AudioPolicyManager(clientInterface, false /*forTesting*/)
+{
+    loadConfig();
+}
+
+void AudioPolicyManager::loadConfig() {
+    if (deserializeAudioPolicyXmlConfig(getConfig()) != NO_ERROR) {
+        ALOGE("could not load audio policy configuration file, setting defaults");
+        getConfig().setDefault();
+    }
+}
+
+status_t AudioPolicyManager::initialize() {
+    {
+        //代理引擎
+        auto engLib = EngineLibrary::load(
+                        "libaudiopolicyengine" + getConfig().getEngineLibraryNameSuffix() + ".so");
+        if (!engLib) {
+            ALOGE("%s: Failed to load the engine library", __FUNCTION__);
+            return NO_INIT;
+        }
+        //获取引擎
+        mEngine = engLib-&gt;createEngine();
+        if (mEngine == nullptr) {
+            ALOGE("%s: Failed to instantiate the APM engine", __FUNCTION__);
+            return NO_INIT;
+        }
+    }
+    //设为观察者
+    mEngine-&gt;setObserver(this);
+    status_t status = mEngine-&gt;initCheck();  //初始
+    if (status != NO_ERROR) {
+        LOG_FATAL("Policy engine not initialized(err=%d)", status);
+        return status;
+    }
+
+    // after parsing the config, mOutputDevicesAll and mInputDevicesAll contain all known devices;
+    // open all output streams needed to access attached devices
+    // 打开访问附加设备所需的所有输出流
+    onNewAudioModulesAvailableInt(nullptr /*newDevices*/);
+
+    // make sure default device is reachable(确保可以访问默认设备)
+    if (mDefaultOutputDevice == 0 || !mAvailableOutputDevices.contains(mDefaultOutputDevice)) {
+        ALOGE_IF(mDefaultOutputDevice != 0, "Default device %s is unreachable",
+                 mDefaultOutputDevice-&gt;toString().c_str());
+        status = NO_INIT;
+    }
+    // If microphones address is empty, set it according to device type
+    //如果麦克风地址为空，请根据设备类型进行设置
+    for (size_t i = 0; i &lt; mAvailableInputDevices.size(); i++) {
+        if (mAvailableInputDevices[i]-&gt;address().empty()) {
+            if (mAvailableInputDevices[i]-&gt;type() == AUDIO_DEVICE_IN_BUILTIN_MIC) {
+                mAvailableInputDevices[i]-&gt;setAddress(AUDIO_BOTTOM_MICROPHONE_ADDRESS);
+            } else if (mAvailableInputDevices[i]-&gt;type() == AUDIO_DEVICE_IN_BACK_MIC) {
+                mAvailableInputDevices[i]-&gt;setAddress(AUDIO_BACK_MICROPHONE_ADDRESS);
+            }
+        }
+    }
+
+    if (mPrimaryOutput == 0) {
+        ALOGE("Failed to open primary output");
+        status = NO_INIT;
+    }
+
+    // Silence ALOGV statements
+    property_set("log.tag." LOG_TAG, "D");
+
+    updateDevicesAndOutputs();
+    return status;
+}</code></pre> 
+<p>AudioPolicyManager的构造中代码并不多，主要逻都在initialize()函数中。这里有个很重要的函数onNewAudioModulesAvailableInt()。</p> 
+<pre><code class="language-cpp">void AudioPolicyManager::onNewAudioModulesAvailableInt(DeviceVector *newDevices)
+{
+    for (const auto&amp; hwModule : mHwModulesAll) {
+        if (std::find(mHwModules.begin(), mHwModules.end(), hwModule) != mHwModules.end()) {
+            continue;
+        }
+        //调用ClientInterface加载Audio模块，ClientInterface将调用AudioFlinger的loadHwModule
+        hwModule-&gt;setHandle(mpClientInterface-&gt;loadHwModule(hwModule-&gt;getName()));
+        if (hwModule-&gt;getHandle() == AUDIO_MODULE_HANDLE_NONE) {
+            ALOGW("could not open HW module %s", hwModule-&gt;getName());
+            continue;
+        }
+        mHwModules.push_back(hwModule);
+        // open all output streams needed to access attached devices
+        // except for direct output streams that are only opened when they are actually
+        // required by an app.
+        // This also validates mAvailableOutputDevices list
+        //打开访问连接设备所需的所有输出流
+        // 除了直接输出流，它们只有在实际打开时才打开
+        // 应用程序需要。
+        // 这也验证了 mAvailableOutputDevices 列表
+        for (const auto&amp; outProfile : hwModule-&gt;getOutputProfiles()) {
+            if (!outProfile-&gt;canOpenNewIo()) {
+                ALOGE("Invalid Output profile max open count %u for profile %s",
+                      outProfile-&gt;maxOpenCount, outProfile-&gt;getTagName().c_str());
+                continue;
+            }
+            if (!outProfile-&gt;hasSupportedDevices()) {
+                ALOGW("Output profile contains no device on module %s", hwModule-&gt;getName());
+                continue;
+            }
+            if ((outProfile-&gt;getFlags() &amp; AUDIO_OUTPUT_FLAG_TTS) != 0) {
+                mTtsOutputAvailable = true;
+            }
+
+            const DeviceVector &amp;supportedDevices = outProfile-&gt;getSupportedDevices();
+            DeviceVector availProfileDevices = supportedDevices.filter(mOutputDevicesAll);
+            sp&lt;DeviceDescriptor&gt; supportedDevice = 0;
+            if (supportedDevices.contains(mDefaultOutputDevice)) {
+                supportedDevice = mDefaultOutputDevice;
+            } else {
+                // choose first device present in profile's SupportedDevices also part of
+                // mAvailableOutputDevices.
+                if (availProfileDevices.isEmpty()) {
+                    continue;
+                }
+                supportedDevice = availProfileDevices.itemAt(0);
+            }
+            if (!mOutputDevicesAll.contains(supportedDevice)) {
+                continue;
+            }
+            //根据outProfile 得到一个描述符，设置mpClientInterface
+            sp&lt;SwAudioOutputDescriptor&gt; outputDesc = new SwAudioOutputDescriptor(outProfile,
+                                                                                 mpClientInterface);
+            audio_io_handle_t output = AUDIO_IO_HANDLE_NONE;
+            //AudioOutputDescriptor.cpp 的open方法会调用AF的openOutput方法
+            status_t status = outputDesc-&gt;open(nullptr, DeviceVector(supportedDevice),
+                                               AUDIO_STREAM_DEFAULT,
+                                               AUDIO_OUTPUT_FLAG_NONE, &amp;output);
+            if (status != NO_ERROR) {
+                ALOGW("Cannot open output stream for devices %s on hw module %s",
+                      supportedDevice-&gt;toString().c_str(), hwModule-&gt;getName());
+                continue;
+            }
+            for (const auto &amp;device : availProfileDevices) {
+                // give a valid ID to an attached device once confirmed it is reachable
+                //一旦确认连接的设备可以访问，就为它提供一个有效的 ID
+                if (!device-&gt;isAttached()) {
+                    device-&gt;attach(hwModule);
+                    mAvailableOutputDevices.add(device);
+                    device-&gt;setEncapsulationInfoFromHal(mpClientInterface);
+                    if (newDevices) newDevices-&gt;add(device);
+                    setEngineDeviceConnectionState(device, AUDIO_POLICY_DEVICE_STATE_AVAILABLE);
+                }
+            }
+            if (mPrimaryOutput == 0 &amp;&amp;
+                    outProfile-&gt;getFlags() &amp; AUDIO_OUTPUT_FLAG_PRIMARY) {
+                mPrimaryOutput = outputDesc;
+            }
+            if ((outProfile-&gt;getFlags() &amp; AUDIO_OUTPUT_FLAG_DIRECT) != 0) {
+                outputDesc-&gt;close();
+            } else {
+                //根据output添加outputDesc描述符
+                addOutput(output, outputDesc);
+                setOutputDevices(outputDesc,
+                                 DeviceVector(supportedDevice),
+                                 true,
+                                 0,
+                                 NULL);
+            }
+        }
+        // open input streams needed to access attached devices to validate
+        //打开访问连接设备所需的输入流以进行验证
+        // mAvailableInputDevices list
+        for (const auto&amp; inProfile : hwModule-&gt;getInputProfiles()) {
+            if (!inProfile-&gt;canOpenNewIo()) {
+                ALOGE("Invalid Input profile max open count %u for profile %s",
+                      inProfile-&gt;maxOpenCount, inProfile-&gt;getTagName().c_str());
+                continue;
+            }
+            if (!inProfile-&gt;hasSupportedDevices()) {
+                ALOGW("Input profile contains no device on module %s", hwModule-&gt;getName());
+                continue;
+            }
+            // chose first device present in profile's SupportedDevices also part of
+            // available input devices
+            //选择配置文件的 SupportedDevices 中存在的第一个设备也是可用的输入设备
+            const DeviceVector &amp;supportedDevices = inProfile-&gt;getSupportedDevices();
+            DeviceVector availProfileDevices = supportedDevices.filter(mInputDevicesAll);
+            if (availProfileDevices.isEmpty()) {
+                ALOGE("%s: Input device list is empty!", __FUNCTION__);
+                continue;
+            }
+            sp&lt;AudioInputDescriptor&gt; inputDesc =
+                    new AudioInputDescriptor(inProfile, mpClientInterface);
+
+            audio_io_handle_t input = AUDIO_IO_HANDLE_NONE;
+            status_t status = inputDesc-&gt;open(nullptr,
+                                              availProfileDevices.itemAt(0),
+                                              AUDIO_SOURCE_MIC,
+                                              AUDIO_INPUT_FLAG_NONE,
+                                              &amp;input);
+            if (status != NO_ERROR) {
+                ALOGW("Cannot open input stream for device %s on hw module %s",
+                      availProfileDevices.toString().c_str(),
+                      hwModule-&gt;getName());
+                continue;
+            }
+            for (const auto &amp;device : availProfileDevices) {
+                // give a valid ID to an attached device once confirmed it is reachable
+                if (!device-&gt;isAttached()) {
+                    device-&gt;attach(hwModule);
+                    device-&gt;importAudioPortAndPickAudioProfile(inProfile, true);
+                    mAvailableInputDevices.add(device);
+                    if (newDevices) newDevices-&gt;add(device);
+                    setEngineDeviceConnectionState(device, AUDIO_POLICY_DEVICE_STATE_AVAILABLE);
+                }
+            }
+            inputDesc-&gt;close();
+        }
+    }
+}</code></pre> 
+<p>这里创建了SwAudioOutputDescriptor指针，这个类定义在AudioOutputDescriptor.h。</p> 
+<pre><code class="language-cpp">// Audio output driven by a software mixer in audio flinger.
+class SwAudioOutputDescriptor: public AudioOutputDescriptor
+{
+public:
+        ...
+        ...
+        ...
+        status_t open(const audio_config_t *config,
+                      const DeviceVector &amp;devices,
+                      audio_stream_type_t stream,
+                      audio_output_flags_t flags,
+                      audio_io_handle_t *output);
+
+        // Called when a stream is about to be started
+        // Note: called before setClientActive(true);
+        status_t start();
+        // Called after a stream is stopped.
+        // Note: called after setClientActive(false);
+        void stop();
+        void close();
+        status_t openDuplicating(const sp&lt;SwAudioOutputDescriptor&gt;&amp; output1,
+                                 const sp&lt;SwAudioOutputDescriptor&gt;&amp; output2,
+                                 audio_io_handle_t *ioHandle);
+...
+...
+...
+...
+};</code></pre> 
+<p>open函数的具体实现在SwAudioOutputDescriptor.cpp</p> 
+<pre><code class="language-cpp">status_t SwAudioOutputDescriptor::open(const audio_config_t *config,
+                                       const DeviceVector &amp;devices,
+                                       audio_stream_type_t stream,
+                                       audio_output_flags_t flags,
+                                       audio_io_handle_t *output)
+{
+    mDevices = devices;
+    sp&lt;DeviceDescriptor&gt; device = devices.getDeviceForOpening();
+    LOG_ALWAYS_FATAL_IF(device == nullptr,
+                        "%s failed to get device descriptor for opening "
+                        "with the requested devices, all device types: %s",
+                        __func__, dumpDeviceTypes(devices.types()).c_str());
+
+    audio_config_t lConfig;
+    if (config == nullptr) {
+        lConfig = AUDIO_CONFIG_INITIALIZER;
+        lConfig.sample_rate = mSamplingRate;
+        lConfig.channel_mask = mChannelMask;
+        lConfig.format = mFormat;
+    } else {
+        lConfig = *config;
+    }
+
+    // if the selected profile is offloaded and no offload info was specified,
+    // create a default one
+    if ((mProfile-&gt;getFlags() &amp; AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) &amp;&amp;
+            lConfig.offload_info.format == AUDIO_FORMAT_DEFAULT) {
+        flags = (audio_output_flags_t)(flags | AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD);
+        lConfig.offload_info = AUDIO_INFO_INITIALIZER;
+        lConfig.offload_info.sample_rate = lConfig.sample_rate;
+        lConfig.offload_info.channel_mask = lConfig.channel_mask;
+        lConfig.offload_info.format = lConfig.format;
+        lConfig.offload_info.stream_type = stream;
+        lConfig.offload_info.duration_us = -1;
+        lConfig.offload_info.has_video = true; // conservative
+        lConfig.offload_info.is_streaming = true; // likely
+    }
+
+    mFlags = (audio_output_flags_t)(mFlags | flags);
+
+    ALOGV("opening output for device %s profile %p name %s",
+          mDevices.toString().c_str(), mProfile.get(), mProfile-&gt;getName().c_str());
+    //熟悉的openOutput
+    status_t status = mClientInterface-&gt;openOutput(mProfile-&gt;getModuleHandle(),
+                                                   output,
+                                                   &amp;lConfig,
+                                                   device,
+                                                   &amp;mLatency,
+                                                   mFlags);
+
+    if (status == NO_ERROR) {
+        LOG_ALWAYS_FATAL_IF(*output == AUDIO_IO_HANDLE_NONE,
+                            "%s openOutput returned output handle %d for device %s, "
+                            "selected device %s for opening",
+                            __FUNCTION__, *output, devices.toString().c_str(),
+                            device-&gt;toString().c_str());
+        mSamplingRate = lConfig.sample_rate;
+        mChannelMask = lConfig.channel_mask;
+        mFormat = lConfig.format;
+        mId = PolicyAudioPort::getNextUniqueId();
+        mIoHandle = *output;
+        mProfile-&gt;curOpenCount++;
+    }
+
+    return status;
+}</code></pre> 
+<p>这里调用mClientInterface-&gt;openOutput()这个函数最终是在AudioFlicy.cpp中实现。这个mClientInterface是在SwAudioOutputDescriptor的构造中传过来的。</p> 
+<pre><code class="language-cpp">   //根据outProfile 得到一个描述符，设置mpClientInterface
+            sp&lt;SwAudioOutputDescriptor&gt; outputDesc = new SwAudioOutputDescriptor(outProfile,
+                                                                                 mpClientInterface);</code></pre> 
+<pre><code class="language-cpp">  AudioPolicyClientInterface *mpClientInterface;  // audio policy client interface
+        sp&lt;SwAudioOutputDescriptor&gt; mPrimaryOutput;     // primary output descriptor
+        // list of descriptors for outputs currently opened</code></pre> 
+<p>下面我们看一下AudioPolicyClientInterface这个类。</p> 
+<p>AudioPolicyClientInterface.h</p> 
+<pre><code class="language-cpp">// Audio Policy client Interface
+class AudioPolicyClientInterface
+{
+public:
+    virtual ~AudioPolicyClientInterface() {}
+
+    //
+    // Audio HW module functions
+    //
+
+    // loads a HW module.
+    virtual audio_module_handle_t loadHwModule(const char *name) = 0;
+
+    //
+    // Audio output Control functions
+    //
+
+    // opens an audio output with the requested parameters. The parameter values can indicate to use the default values
+    // in case the audio policy manager has no specific requirements for the output being opened.
+    // When the function returns, the parameter values reflect the actual values used by the audio hardware output stream.
+    // The audio policy manager can check if the proposed parameters are suitable or not and act accordingly.
+    virtual status_t openOutput(audio_module_handle_t module,
+                                audio_io_handle_t *output,
+                                audio_config_t *config,
+                                const sp&lt;DeviceDescriptorBase&gt;&amp; device,
+                                uint32_t *latencyMs,
+                                audio_output_flags_t flags) = 0;
+    // creates a special output that is duplicated to the two outputs passed as arguments. The duplication is performed by
+    // a special mixer thread in the AudioFlinger.
+    virtual audio_io_handle_t openDuplicateOutput(audio_io_handle_t output1, audio_io_handle_t output2) = 0;
+    // closes the output stream
+    virtual status_t closeOutput(audio_io_handle_t output) = 0;
+    // suspends the output. When an output is suspended, the corresponding audio hardware output stream is placed in
+    // standby and the AudioTracks attached to the mixer thread are still processed but the output mix is discarded.
+    virtual status_t suspendOutput(audio_io_handle_t output) = 0;
+    // restores a suspended output.
+    virtual status_t restoreOutput(audio_io_handle_t output) = 0;
+
+    //
+    // Audio input Control functions
+    //
+
+    // opens an audio input
+    virtual status_t openInput(audio_module_handle_t module,
+                               audio_io_handle_t *input,
+                               audio_config_t *config,
+                               audio_devices_t *device,
+                               const String8&amp; address,
+                               audio_source_t source,
+                               audio_input_flags_t flags) = 0;
+  ...
+  ...
+  ...
+  ...
+};</code></pre> 
+<p>openOutput()在AudioPolicyClientImpl.cpp中被实现。</p> 
+<pre><code class="language-cpp">status_t AudioPolicyService::AudioPolicyClient::openOutput(audio_module_handle_t module,
+                                                           audio_io_handle_t *output,
+                                                           audio_config_t *config,
+                                                           const sp&lt;DeviceDescriptorBase&gt;&amp; device,
+                                                           uint32_t *latencyMs,
+                                                           audio_output_flags_t flags)
+{
+    sp&lt;IAudioFlinger&gt; af = AudioSystem::get_audio_flinger();
+    if (af == 0) {
+        ALOGW("%s: could not get AudioFlinger", __func__);
+        return PERMISSION_DENIED;
+    }
+    return af-&gt;openOutput(module, output, config, device, latencyMs, flags);
+}</code></pre> 
+<p>获取获取AF的代理并调用了openoutput()函数。</p> 
+<p></p> 
+<pre><code class="language-cpp">status_t AudioFlinger::openOutput(audio_module_handle_t module,
+                                  audio_io_handle_t *output,
+                                  audio_config_t *config,
+                                  const sp&lt;DeviceDescriptorBase&gt;&amp; device,
+                                  uint32_t *latencyMs,
+                                  audio_output_flags_t flags)
+{
+    ALOGI("openOutput() this %p, module %d Device %s, SamplingRate %d, Format %#08x, "
+              "Channels %#x, flags %#x",
+              this, module,
+              device-&gt;toString().c_str(),
+              config-&gt;sample_rate,
+              config-&gt;format,
+              config-&gt;channel_mask,
+              flags);
+
+    audio_devices_t deviceType = device-&gt;type();
+    const String8 address = String8(device-&gt;address().c_str());
+
+    if (deviceType == AUDIO_DEVICE_NONE) {
+        return BAD_VALUE;
+    }
+
+    Mutex::Autolock _l(mLock);
+
+    sp&lt;ThreadBase&gt; thread = openOutput_l(module, output, config, deviceType, address, flags);
+    if (thread != 0) {
+        if ((flags &amp; AUDIO_OUTPUT_FLAG_MMAP_NOIRQ) == 0) {
+            PlaybackThread *playbackThread = (PlaybackThread *)thread.get();
+            *latencyMs = playbackThread-&gt;latency();
+
+            // notify client processes of the new output creation
+            playbackThread-&gt;ioConfigChanged(AUDIO_OUTPUT_OPENED);
+
+            // the first primary output opened designates the primary hw device if no HW module
+            // named "primary" was already loaded.
+            AutoMutex lock(mHardwareLock);
+            if ((mPrimaryHardwareDev == nullptr) &amp;&amp; (flags &amp; AUDIO_OUTPUT_FLAG_PRIMARY)) {
+                ALOGI("Using module %d as the primary audio interface", module);
+                mPrimaryHardwareDev = playbackThread-&gt;getOutput()-&gt;audioHwDev;
+
+                mHardwareStatus = AUDIO_HW_SET_MODE;
+                mPrimaryHardwareDev-&gt;hwDevice()-&gt;setMode(mMode);
+                mHardwareStatus = AUDIO_HW_IDLE;
+            }
+        } else {
+            MmapThread *mmapThread = (MmapThread *)thread.get();
+            mmapThread-&gt;ioConfigChanged(AUDIO_OUTPUT_OPENED);
+        }
+        return NO_ERROR;
+    }
+
+    return NO_INIT;
+}
+</code></pre> 
+<p>接着看下openOutput_l()函数：</p> 
+<pre><code class="language-cpp">sp&lt;AudioFlinger::ThreadBase&gt; AudioFlinger::openOutput_l(audio_module_handle_t module,
+                                                        audio_io_handle_t *output,
+                                                        audio_config_t *config,
+                                                        audio_devices_t deviceType,
+                                                        const String8&amp; address,
+                                                        audio_output_flags_t flags)
+{
+    //AudioHwDevice 代表一个打开的音频接口设备
+    AudioHwDevice *outHwDev = findSuitableHwDev_l(module, deviceType);
+    if (outHwDev == NULL) {
+        return 0;
+    }
+
+    if (*output == AUDIO_IO_HANDLE_NONE) {
+        *output = nextUniqueId(AUDIO_UNIQUE_ID_USE_OUTPUT);
+    } else {
+        // Audio Policy does not currently request a specific output handle.
+        // If this is ever needed, see openInput_l() for example code.
+        ALOGE("openOutput_l requested output handle %d is not AUDIO_IO_HANDLE_NONE", *output);
+        return 0;
+    }
+
+    mHardwareStatus = AUDIO_HW_OUTPUT_OPEN;
+
+    // FOR TESTING ONLY:
+    // This if statement allows overriding the audio policy settings
+    // and forcing a specific format or channel mask to the HAL/Sink device for testing.
+    if (!(flags &amp; (AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD | AUDIO_OUTPUT_FLAG_DIRECT))) {
+        // Check only for Normal Mixing mode
+        if (kEnableExtendedPrecision) {
+            // Specify format (uncomment one below to choose)
+            //config-&gt;format = AUDIO_FORMAT_PCM_FLOAT;
+            //config-&gt;format = AUDIO_FORMAT_PCM_24_BIT_PACKED;
+            //config-&gt;format = AUDIO_FORMAT_PCM_32_BIT;
+            //config-&gt;format = AUDIO_FORMAT_PCM_8_24_BIT;
+            // ALOGV("openOutput_l() upgrading format to %#08x", config-&gt;format);
+        }
+        if (kEnableExtendedChannels) {
+            // Specify channel mask (uncomment one below to choose)
+            //config-&gt;channel_mask = audio_channel_out_mask_from_count(4);  // for USB 4ch
+            //config-&gt;channel_mask = audio_channel_mask_from_representation_and_bits(
+            //        AUDIO_CHANNEL_REPRESENTATION_INDEX, (1 &lt;&lt; 4) - 1);  // another 4ch example
+        }
+    }
+
+    ///为设备打开一个输出流，会获得一个audio_stream_out_t *stream; 一个audio_devices_t devices,其中会生成一个AudioStreamOut
+    //（AudioStreamOut *outputStream = new AudioStreamOut(this, flags);）就是来封装audio_stream_out_t和audio_devices_t的。
+    AudioStreamOut *outputStream = NULL;
+    status_t status = outHwDev-&gt;openOutputStream(
+            &amp;outputStream,
+            *output,
+            deviceType,
+            flags,
+            config,
+            address.string());
+
+    mHardwareStatus = AUDIO_HW_IDLE;
+
+    if (status == NO_ERROR) {
+        if (flags &amp; AUDIO_OUTPUT_FLAG_MMAP_NOIRQ) {
+            sp&lt;MmapPlaybackThread&gt; thread =
+                    new MmapPlaybackThread(this, *output, outHwDev, outputStream, mSystemReady);
+            mMmapThreads.add(*output, thread);
+            ALOGV("openOutput_l() created mmap playback thread: ID %d thread %p",
+                  *output, thread.get());
+            return thread;
+        } else {
+            //创建播放线程
+            sp&lt;PlaybackThread&gt; thread;
+            if (flags &amp; AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) {
+                thread = new OffloadThread(this, outputStream, *output, mSystemReady);
+                ALOGV("openOutput_l() created offload output: ID %d thread %p",
+                      *output, thread.get());
+            } else if ((flags &amp; AUDIO_OUTPUT_FLAG_DIRECT)
+                    || !isValidPcmSinkFormat(config-&gt;format)
+                    || !isValidPcmSinkChannelMask(config-&gt;channel_mask)) {
+                thread = new DirectOutputThread(this, outputStream, *output, mSystemReady);
+                ALOGV("openOutput_l() created direct output: ID %d thread %p",
+                      *output, thread.get());
+            } else {
+                thread = new MixerThread(this, outputStream, *output, mSystemReady);
+                ALOGV("openOutput_l() created mixer output: ID %d thread %p",
+                      *output, thread.get());
+            }
+            //添加到mPlaybackThreads中
+            mPlaybackThreads.add(*output, thread);
+            mPatchPanel.notifyStreamOpened(outHwDev, *output);
+            return thread;
+        }
+    }
+
+    return 0;
+}</code></pre> 
+<p> 在openOutput_l函数中这个findSuitableHwDev_l函数很重要。</p> 
+<p>这里暂时不做分析....</p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

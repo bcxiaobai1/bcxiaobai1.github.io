@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Nacos 原理详解 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Nacos 原理详解</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="__0"></a>一. 背景</h2> 
+<p>现如今市面上注册中心的轮子很多，我实际使用过的就有三款：Eureka、Nacos，Zookeeper、Consul 由于当前参与Nacos 集群的维护和开发工作，期间也参与了 Nacos 社区的一些开发和 bug fix 工作，过程中对 Nacos 原理有了一定的积累，今天给大家分享一下 Nacos 动态服务发现的原理。</p> 
+<h2>
+<a id="__4"></a>二. 什么是动态服务发现</h2> 
+<p>服务发现是指使用一个注册中心来记录分布式系统中的全部服务的信息，以便其他服务能够快速的找到这些已注册的服务。在单体应用中，DNS+Nginx 可以满足服务发现的要求，此时服务的IP列表配置在 nginx 上。在微服务架构中，由于服务粒度变的更细，服务的上下线更加频繁，我们需要一款注册中心来动态感知服务的上下线，并且推送IP列表变化给服务消费者，架构如下图。<br> <img src="https://images2.imgbox.com/7e/b8/SIiIx9iX_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_Nacos_9"></a>三. Nacos实现动态服务发现的原理</h2> 
+<p>Nacos实现动态服务发现的核心原理如下图，我们接下来的内容将围绕这个图来进行。<br> <img src="https://images2.imgbox.com/08/ff/pdoDTJE1_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="1_13"></a>1.通讯协议</h2> 
+<p>整个服务注册与发现过程，都离不开通讯协议，在1.x的 Nacos 版本中服务端只支持 http 协议，后来为了提升性能在2.x版本引入了谷歌的 grpc，grpc 是一款长连接协议，极大的减少了 http 请求频繁的连接创建和销毁过程，能大幅度提升性能，节约资源。据官方测试，Nacos服务端 grpc 版本，相比 http 版本的性能提升了9倍以上。</p> 
+<h2>
+<a id="2_Nacos__16"></a>2. Nacos 服务注册</h2> 
+<p>简单来讲，服务注册的目的就是客户端将自己的ip端口等信息上报给 Nacos 服务端，过程如下：<br> <strong>创建长连接</strong><br> Nacos SDK 通过Nacos服务端域名解析出服务端ip列表，选择其中一个ip创建 grpc 连接，并定时检查连接状态，当连接断开，则自动选择服务端ip列表中的下一个ip进行重连。<br> <strong>健康检查请求</strong><br> 在正式发起注册之前，Nacos SDK 向服务端发送一个空请求，服务端回应一个空请求，若Nacos SDK 未收到服务端回应，则认为服务端不健康，并进行一定次数重试，如果都未收到回应，则注册失败。<br> <strong>发起注册</strong><br> 当你查看Nacos java SDK的注册方法时，你会发现没有返回值，这是因为Nacos SDK做了补偿机制，在真实给服务端上报数据之前，会先往缓存中插入一条记录表示开始注册，注册成功之后再从缓存中标记这条记录为注册成功，当注册失败时，缓存中这条记录是未注册成功的状态，Nacos SDK开启了一个定时任务，定时查询异常的缓存数据，重新发起注册。<br> Nacos SDK注册失败时的自动补偿机制时序图。<br> <img src="https://images2.imgbox.com/29/86/k0zn6ynH_o.png" alt="在这里插入图片描述"><br> 相关源码如下：</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">registerService</span><span class="token punctuation">(</span><span class="token class-name">String</span> serviceName<span class="token punctuation">,</span> <span class="token class-name">String</span> groupName<span class="token punctuation">,</span> <span class="token class-name">Instance</span> instance<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">NacosException</span> <span class="token punctuation">{<!-- --></span>
+        NAMING_LOGGER<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"[REGISTER-SERVICE] {} registering service {} with instance {}"</span><span class="token punctuation">,</span> namespaceId<span class="token punctuation">,</span> serviceName<span class="token punctuation">,</span>
+                instance<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//添加redo日志</span>
+        redoService<span class="token punctuation">.</span><span class="token function">cacheInstanceForRedo</span><span class="token punctuation">(</span>serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">,</span> instance<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        
+        <span class="token function">doRegisterService</span><span class="token punctuation">(</span>serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">,</span> instance<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">doRegisterService</span><span class="token punctuation">(</span><span class="token class-name">String</span> serviceName<span class="token punctuation">,</span> <span class="token class-name">String</span> groupName<span class="token punctuation">,</span> <span class="token class-name">Instance</span> instance<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">NacosException</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token comment">//向服务端发起注册</span>
+        <span class="token class-name">InstanceRequest</span> request <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">InstanceRequest</span><span class="token punctuation">(</span>namespaceId<span class="token punctuation">,</span> serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">,</span>
+                <span class="token class-name">NamingRemoteConstants</span><span class="token punctuation">.</span>REGISTER_INSTANCE<span class="token punctuation">,</span> instance<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">requestToServer</span><span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token class-name">Response</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//标记注册成功</span>
+        redoService<span class="token punctuation">.</span><span class="token function">instanceRegistered</span><span class="token punctuation">(</span>serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>执行补偿定时任务RedoScheduledTask</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>redoService<span class="token punctuation">.</span><span class="token function">isConnected</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">LogUtils</span><span class="token punctuation">.</span>NAMING_LOGGER<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"Grpc Connection is disconnect, skip current redo task"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">redoForInstances</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">redoForSubscribes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">LogUtils</span><span class="token punctuation">.</span>NAMING_LOGGER<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"Redo task run with unexpected exception: "</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+      <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">redoForInstances</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">InstanceRedoData</span> each <span class="token operator">:</span> redoService<span class="token punctuation">.</span><span class="token function">findInstanceRedoData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token function">redoForInstance</span><span class="token punctuation">(</span>each<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">NacosException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">LogUtils</span><span class="token punctuation">.</span>NAMING_LOGGER<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"Redo instance operation {} for {}@@{} failed. "</span><span class="token punctuation">,</span> each<span class="token punctuation">.</span><span class="token function">getRedoType</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                        each<span class="token punctuation">.</span><span class="token function">getGroupName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> each<span class="token punctuation">.</span><span class="token function">getServiceName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    
+</code></pre> 
+<p><strong>服务端数据同步(Distro协议)</strong>：<br> Nacos SDK只会与服务端某个节点建立长连接，当服务端接受到客户端注册的实例数据后，还需要将实例数据同步给其他节点。Nacos自己实现了一个一致性协议名为Distro，服务注册的时候会触发Distro一次同步，每个Nacos节点之间会定时互相发送Distro数据，以此保证数据最终一致。关于Distro协议更多信息可以阅读<a href="https://www.yuque.com/docs/share/57a4c6a9-cef3-4fb3-a5e2-2fad36b199c5?#">《Nacos 自研Distro协议》</a><br> <strong>服务实例上线推送</strong>：<br> Nacos服务端收到服务实例数据后会将服务的最新实例列表通过grpc推送给该服务的所有订阅者。<br> <strong>服务注册过程源码时序图</strong>：<br> 整理了一下服务注册过程整体时序图，对源码实现感兴趣的可以按照根据这个时序图view一下源码。<br> <img src="https://images2.imgbox.com/f3/8a/tHVa2pwC_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="3_Nacos__84"></a>3. Nacos 心跳机制</h2> 
+<p>目前主流的注册中心，比如Consul、Eureka、Zk包括我们公司自研的Gsched，都是通过心跳机制来感知服务的下线。Nacos也是通过心跳机制来实现的。<br> Nacos目前SDK维护了两个分支的版本（1.x、2.x），这两个版本心跳机制的实现不一样。其中1.x版本的SDK通过http协议来定时向服务端发送心跳维持自己的健康状态，2.x版本的SDK则通过grpc自身的心跳机制来保活，当Nacos服务端接受不到服务实例的心跳，会认为实例下线。如下图：<br> <img src="https://images2.imgbox.com/c2/36/qzZ37PHR_o.png" alt="在这里插入图片描述"><br> 部分源码<br> grpc监测到连接断开事件，发送ClientDisconnectEvent</p> 
+<pre><code class="prism language-java">   <span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ConnectionBasedClientManager</span> <span class="token keyword">extends</span> <span class="token class-name">ClientConnectionEventListener</span> <span class="token keyword">implements</span> <span class="token class-name">ClientManager</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">//连接断开，发送连接断开事件</span>
+    <span class="token keyword">public</span> <span class="token keyword">boolean</span> <span class="token function">clientDisconnected</span><span class="token punctuation">(</span><span class="token class-name">String</span> clientId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Loggers</span><span class="token punctuation">.</span>SRV_LOG<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Client connection {} disconnect, remove instances and subscribers"</span><span class="token punctuation">,</span> clientId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">ConnectionBasedClient</span> client <span class="token operator">=</span> clients<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>clientId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> client<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        client<span class="token punctuation">.</span><span class="token function">release</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">NotifyCenter</span><span class="token punctuation">.</span><span class="token function">publishEvent</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ClientEvent<span class="token punctuation">.</span>ClientDisconnectEvent</span><span class="token punctuation">(</span>client<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+ <span class="token punctuation">}</span>
+</code></pre> 
+<p>移除客户端注册的服务实例</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ClientServiceIndexesManager</span> <span class="token keyword">extends</span> <span class="token class-name">SmartSubscriber</span> <span class="token punctuation">{<!-- --></span>
+
+  <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span><span class="token class-name">Event</span> event<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//接收失去连接事件</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>event <span class="token keyword">instanceof</span> <span class="token class-name">ClientEvent<span class="token punctuation">.</span>ClientDisconnectEvent</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">handleClientDisconnect</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">ClientEvent<span class="token punctuation">.</span>ClientDisconnectEvent</span><span class="token punctuation">)</span> event<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>event <span class="token keyword">instanceof</span> <span class="token class-name">ClientOperationEvent</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">handleClientOperation</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">ClientOperationEvent</span><span class="token punctuation">)</span> event<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">handleClientDisconnect</span><span class="token punctuation">(</span><span class="token class-name">ClientEvent<span class="token punctuation">.</span>ClientDisconnectEvent</span> event<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Client</span> client <span class="token operator">=</span> event<span class="token punctuation">.</span><span class="token function">getClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Service</span> each <span class="token operator">:</span> client<span class="token punctuation">.</span><span class="token function">getAllSubscribeService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">removeSubscriberIndexes</span><span class="token punctuation">(</span>each<span class="token punctuation">,</span> client<span class="token punctuation">.</span><span class="token function">getClientId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//移除客户端注册的服务实例</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">Service</span> each <span class="token operator">:</span> client<span class="token punctuation">.</span><span class="token function">getAllPublishedService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">removePublisherIndexes</span><span class="token punctuation">(</span>each<span class="token punctuation">,</span> client<span class="token punctuation">.</span><span class="token function">getClientId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    
+    <span class="token comment">//移除客户端注册的服务实例</span>
+    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">removePublisherIndexes</span><span class="token punctuation">(</span><span class="token class-name">Service</span> service<span class="token punctuation">,</span> <span class="token class-name">String</span> clientId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>publisherIndexes<span class="token punctuation">.</span><span class="token function">containsKey</span><span class="token punctuation">(</span>service<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        publisherIndexes<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>service<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>clientId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">NotifyCenter</span><span class="token punctuation">.</span><span class="token function">publishEvent</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ServiceEvent<span class="token punctuation">.</span>ServiceChangedEvent</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="4_Nacos__143"></a>4. Nacos 服务订阅</h2> 
+<p>当一个服务发生上下线，Nacos如何知道要推送给哪些客户端？<br> Nacos SDK 提供了订阅和取消订阅方法，当客户端向服务端发起订阅请求，服务端会记录发起调用的客户端为该服务的订阅者，同时将服务的最新实例列表返回。当客户端发起了取消订阅，服务端就会从该服务的订阅者列表中把当前客户端移除。<br> 当客户端发起订阅时，服务端除了会同步返回最新的服务实例列表，还会异步的通过grpc推送给该订阅者最新的服务实例列表，这样做的目的是为了异步更新客户端本地缓存的服务数据。<br> 当客户端订阅的服务上下线，该服务所有的订阅者会立刻收到最新的服务列表并且将服务最新的实例数据更新到内存。<br> <img src="https://images2.imgbox.com/53/d5/89C37pDs_o.png" alt="在这里插入图片描述"><br> 我们也看一下相关源码，服务端接收到订阅数据，首先保存到内存中。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">subscribeService</span><span class="token punctuation">(</span><span class="token class-name">Service</span> service<span class="token punctuation">,</span> <span class="token class-name">Subscriber</span> subscriber<span class="token punctuation">,</span> <span class="token class-name">String</span> clientId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Service</span> singleton <span class="token operator">=</span> <span class="token class-name">ServiceManager</span><span class="token punctuation">.</span><span class="token function">getInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getSingletonIfExist</span><span class="token punctuation">(</span>service<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">orElse</span><span class="token punctuation">(</span>service<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">Client</span> client <span class="token operator">=</span> clientManager<span class="token punctuation">.</span><span class="token function">getClient</span><span class="token punctuation">(</span>clientId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//校验长连接是否正常</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">clientIsLegal</span><span class="token punctuation">(</span>client<span class="token punctuation">,</span> clientId<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//保存订阅数据</span>
+        client<span class="token punctuation">.</span><span class="token function">addServiceSubscriber</span><span class="token punctuation">(</span>singleton<span class="token punctuation">,</span> subscriber<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        client<span class="token punctuation">.</span><span class="token function">setLastUpdatedTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//发送订阅事件</span>
+        <span class="token class-name">NotifyCenter</span><span class="token punctuation">.</span><span class="token function">publishEvent</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ClientOperationEvent<span class="token punctuation">.</span>ClientSubscribeServiceEvent</span><span class="token punctuation">(</span>singleton<span class="token punctuation">,</span> clientId<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    
+        <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">handleClientOperation</span><span class="token punctuation">(</span><span class="token class-name">ClientOperationEvent</span> event<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Service</span> service <span class="token operator">=</span> event<span class="token punctuation">.</span><span class="token function">getService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">String</span> clientId <span class="token operator">=</span> event<span class="token punctuation">.</span><span class="token function">getClientId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>event <span class="token keyword">instanceof</span> <span class="token class-name">ClientOperationEvent<span class="token punctuation">.</span>ClientRegisterServiceEvent</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">addPublisherIndexes</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> clientId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>event <span class="token keyword">instanceof</span> <span class="token class-name">ClientOperationEvent<span class="token punctuation">.</span>ClientDeregisterServiceEvent</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">removePublisherIndexes</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> clientId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>event <span class="token keyword">instanceof</span> <span class="token class-name">ClientOperationEvent<span class="token punctuation">.</span>ClientSubscribeServiceEvent</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//处理订阅操作</span>
+            <span class="token function">addSubscriberIndexes</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> clientId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>event <span class="token keyword">instanceof</span> <span class="token class-name">ClientOperationEvent<span class="token punctuation">.</span>ClientUnsubscribeServiceEvent</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">removeSubscriberIndexes</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> clientId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>然后发布订阅事件。</p> 
+<pre><code class="prism language-java">   <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">addSubscriberIndexes</span><span class="token punctuation">(</span><span class="token class-name">Service</span> service<span class="token punctuation">,</span> <span class="token class-name">String</span> clientId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//保存订阅数据</span>
+        subscriberIndexes<span class="token punctuation">.</span><span class="token function">computeIfAbsent</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token punctuation">(</span>key<span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentHashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// Fix #5404, Only first time add need notify event.</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>subscriberIndexes<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>service<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>clientId<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//发布订阅事件</span>
+            <span class="token class-name">NotifyCenter</span><span class="token punctuation">.</span><span class="token function">publishEvent</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ServiceEvent<span class="token punctuation">.</span>ServiceSubscribedEvent</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> clientId<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>服务端自己消费订阅事件，并且推送给订阅的客户端最新的服务实例数据。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span><span class="token class-name">Event</span> event<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>upgradeJudgement<span class="token punctuation">.</span><span class="token function">isUseGrpcFeatures</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>event <span class="token keyword">instanceof</span> <span class="token class-name">ServiceEvent<span class="token punctuation">.</span>ServiceChangedEvent</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// If service changed, push to all subscribers.</span>
+            <span class="token class-name">ServiceEvent<span class="token punctuation">.</span>ServiceChangedEvent</span> serviceChangedEvent <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">ServiceEvent<span class="token punctuation">.</span>ServiceChangedEvent</span><span class="token punctuation">)</span> event<span class="token punctuation">;</span>
+            <span class="token class-name">Service</span> service <span class="token operator">=</span> serviceChangedEvent<span class="token punctuation">.</span><span class="token function">getService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            delayTaskEngine<span class="token punctuation">.</span><span class="token function">addTask</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">PushDelayTask</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token class-name">PushConfig</span><span class="token punctuation">.</span><span class="token function">getInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getPushTaskDelay</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>event <span class="token keyword">instanceof</span> <span class="token class-name">ServiceEvent<span class="token punctuation">.</span>ServiceSubscribedEvent</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// If service is subscribed by one client, only push this client.</span>
+            <span class="token class-name">ServiceEvent<span class="token punctuation">.</span>ServiceSubscribedEvent</span> subscribedEvent <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">ServiceEvent<span class="token punctuation">.</span>ServiceSubscribedEvent</span><span class="token punctuation">)</span> event<span class="token punctuation">;</span>
+            <span class="token class-name">Service</span> service <span class="token operator">=</span> subscribedEvent<span class="token punctuation">.</span><span class="token function">getService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            delayTaskEngine<span class="token punctuation">.</span><span class="token function">addTask</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">PushDelayTask</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token class-name">PushConfig</span><span class="token punctuation">.</span><span class="token function">getInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getPushTaskDelay</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    subscribedEvent<span class="token punctuation">.</span><span class="token function">getClientId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="5_Nacos__219"></a>5. Nacos 推送</h2> 
+<p><strong>推送方式</strong><br> 前面说了服务的注册和订阅都会发生推送（服务端-&gt;客户端），那推送到底是如何实现的呢？<br> 在早期的Nacos版本，当服务实例变化，服务端会通过udp协议将最新的数据发送给客户端，后来发现udp推送有一定的丢包率，于是新版本的Nacos支持了grpc推送。Nacos服务端会自动判断客户端的版本来选择哪种方式来进行推送，如果你使用1.4.2以前的SDK进行注册，那Nacos服务端会使用udp协议来进行推送，反之则使用grpc。<br> <strong>推送失败重试</strong><br> 当发送推送时，客户端可能正在重启，或者连接不稳定导致推送失败，这个时候Nacos会进行重试。Nacos将每个推送都封装成一个任务对象，放入到队列中，再开启一个线程不停的从队列取出任务执行，执行之前会先删除该任务，如果执行失败则将任务重新添加到队列，该线程会记录任务执行的时间，如果超过1秒，则会记录到日志。<br> <strong>推送部分源码</strong><br> 添加推送任务到执行队列中。</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">class</span> <span class="token class-name">PushDelayTaskProcessor</span> <span class="token keyword">implements</span> <span class="token class-name">NacosTaskProcessor</span> <span class="token punctuation">{<!-- --></span>
+        
+        <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">PushDelayTaskExecuteEngine</span> executeEngine<span class="token punctuation">;</span>
+        
+        <span class="token keyword">public</span> <span class="token class-name">PushDelayTaskProcessor</span><span class="token punctuation">(</span><span class="token class-name">PushDelayTaskExecuteEngine</span> executeEngine<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>executeEngine <span class="token operator">=</span> executeEngine<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        
+        <span class="token annotation punctuation">@Override</span>
+        <span class="token keyword">public</span> <span class="token keyword">boolean</span> <span class="token function">process</span><span class="token punctuation">(</span><span class="token class-name">NacosTask</span> task<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">PushDelayTask</span> pushDelayTask <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">PushDelayTask</span><span class="token punctuation">)</span> task<span class="token punctuation">;</span>
+            <span class="token class-name">Service</span> service <span class="token operator">=</span> pushDelayTask<span class="token punctuation">.</span><span class="token function">getService</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">NamingExecuteTaskDispatcher</span><span class="token punctuation">.</span><span class="token function">getInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">.</span><span class="token function">dispatchAndExecuteTask</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">PushExecuteTask</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> executeEngine<span class="token punctuation">,</span> pushDelayTask<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>推送任务PushExecuteTask 的执行。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">PushExecuteTask</span> <span class="token keyword">extends</span> <span class="token class-name">AbstractExecuteTask</span> <span class="token punctuation">{<!-- --></span>
+    
+  <span class="token comment">//..省略</span>
+    
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//封装要推送的服务实例数据</span>
+            <span class="token class-name">PushDataWrapper</span> wrapper <span class="token operator">=</span> <span class="token function">generatePushData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">ClientManager</span> clientManager <span class="token operator">=</span> delayTaskEngine<span class="token punctuation">.</span><span class="token function">getClientManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//如果是服务上下线导致的推送，获取所有订阅者</span>
+            <span class="token comment">//如果是订阅导致的推送，获取订阅者</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">String</span> each <span class="token operator">:</span> <span class="token function">getTargetClientIds</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token class-name">Client</span> client <span class="token operator">=</span> clientManager<span class="token punctuation">.</span><span class="token function">getClient</span><span class="token punctuation">(</span>each<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> client<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">// means this client has disconnect</span>
+                    <span class="token keyword">continue</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token class-name">Subscriber</span> subscriber <span class="token operator">=</span> clientManager<span class="token punctuation">.</span><span class="token function">getClient</span><span class="token punctuation">(</span>each<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getSubscriber</span><span class="token punctuation">(</span>service<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//推送给订阅者</span>
+                delayTaskEngine<span class="token punctuation">.</span><span class="token function">getPushExecutor</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">doPushWithCallback</span><span class="token punctuation">(</span>each<span class="token punctuation">,</span> subscriber<span class="token punctuation">,</span> wrapper<span class="token punctuation">,</span>
+                        <span class="token keyword">new</span> <span class="token class-name">NamingPushCallback</span><span class="token punctuation">(</span>each<span class="token punctuation">,</span> subscriber<span class="token punctuation">,</span> wrapper<span class="token punctuation">.</span><span class="token function">getOriginalData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> delayTask<span class="token punctuation">.</span><span class="token function">isPushToAll</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Loggers</span><span class="token punctuation">.</span>PUSH<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"Push task for service"</span> <span class="token operator">+</span> service<span class="token punctuation">.</span><span class="token function">getGroupedServiceName</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">" execute failed "</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">//当推送发生异常，重新将推送任务放入执行队列</span>
+            delayTaskEngine<span class="token punctuation">.</span><span class="token function">addTask</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">PushDelayTask</span><span class="token punctuation">(</span>service<span class="token punctuation">,</span> <span class="token number">1000L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    
+      <span class="token comment">//如果是服务上下线导致的推送，获取所有订阅者</span>
+            <span class="token comment">//如果是订阅导致的推送，获取订阅者</span>
+        <span class="token keyword">private</span> <span class="token class-name">Collection</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> <span class="token function">getTargetClientIds</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> delayTask<span class="token punctuation">.</span><span class="token function">isPushToAll</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">?</span> delayTaskEngine<span class="token punctuation">.</span><span class="token function">getIndexesManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getAllClientsSubscribeService</span><span class="token punctuation">(</span>service<span class="token punctuation">)</span>
+                <span class="token operator">:</span> delayTask<span class="token punctuation">.</span><span class="token function">getTargetClients</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>执行推送任务线程InnerWorker 的执行。</p> 
+<pre><code class="prism language-java"><span class="token comment">/**
+     * Inner execute worker.
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">class</span> <span class="token class-name">InnerWorker</span> <span class="token keyword">extends</span> <span class="token class-name">Thread</span> <span class="token punctuation">{<!-- --></span>
+        
+        <span class="token class-name">InnerWorker</span><span class="token punctuation">(</span><span class="token class-name">String</span> name<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">setDaemon</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token function">setName</span><span class="token punctuation">(</span>name<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        
+        <span class="token annotation punctuation">@Override</span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token operator">!</span>closed<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//从队列中取出任务PushExecuteTask </span>
+                    <span class="token class-name">Runnable</span> task <span class="token operator">=</span> queue<span class="token punctuation">.</span><span class="token function">take</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">long</span> begin <span class="token operator">=</span> <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">currentTimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token comment">//执行PushExecuteTask </span>
+                    task<span class="token punctuation">.</span><span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">long</span> duration <span class="token operator">=</span> <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">currentTimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> begin<span class="token punctuation">;</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>duration <span class="token operator">&gt;</span> <span class="token number">1000L</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        log<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"task {} takes {}ms"</span><span class="token punctuation">,</span> task<span class="token punctuation">,</span> duration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    log<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"[TASK-FAILED] "</span> <span class="token operator">+</span> e<span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="6_Nacos_SDK__322"></a>6. Nacos SDK 查询服务实例</h2> 
+<p>服务消费者首先需要调用Nacos SDK的接口来获取最新的服务实例，然后才能从获取到的实例列表中以加权轮询的方式选择出一个实例（包含ip，port等信息），最后再发起调用。<br> 前面已经提到Nacos服务发生上下线、订阅的时候都会推送最新的服务实例列表到当客户端，客户端再更新本地内存中的缓冲数据，所以调用Nacos SDK提供的查询实例列表的接口时，不会直接请求服务端获取数据，而是会优先使用内存中的服务数据，只有内存中查不到的情况下才会发起订阅请求服务端数据。Nacos SDK内存中的数据除了接受来自服务端的推送更新之外，自己本地也会有一个定时任务定时去获取服务端数据来进行兜底。Nacos SDK在查询的时候也了容灾机制，即从磁盘获取服务数据，而这个磁盘的数据其实也是来自于内存，有一个定时任务定时从内存缓存中获取然后加载到磁盘。Nacos SDK的容灾机制默认关闭，可通过设置环境变量failover-mode=true来开启。<br> 架构图<br> <img src="https://images2.imgbox.com/7e/00/UX4tueif_o.png" alt="在这里插入图片描述"><br> 用户查询流程<br> <img src="https://images2.imgbox.com/4a/b7/WcjqGwlr_o.png" alt="在这里插入图片描述"><br> 查询服务实例部分源码</p> 
+<pre><code class="prism language-java"> <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">ConcurrentMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">,</span> <span class="token class-name">ServiceInfo</span><span class="token punctuation">&gt;</span></span> serviceInfoMap<span class="token punctuation">;</span>
+     <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> <span class="token function">getAllInstances</span><span class="token punctuation">(</span><span class="token class-name">String</span> serviceName<span class="token punctuation">,</span> <span class="token class-name">String</span> groupName<span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> clusters<span class="token punctuation">,</span>
+            <span class="token keyword">boolean</span> subscribe<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">NacosException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">ServiceInfo</span> serviceInfo<span class="token punctuation">;</span>
+        <span class="token class-name">String</span> clusterString <span class="token operator">=</span> <span class="token class-name">StringUtils</span><span class="token punctuation">.</span><span class="token function">join</span><span class="token punctuation">(</span>clusters<span class="token punctuation">,</span> <span class="token string">","</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//这里默认传过来是true</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>subscribe<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//从本地内存获取服务数据，如果获取不到则从磁盘获取</span>
+            serviceInfo <span class="token operator">=</span> serviceInfoHolder<span class="token punctuation">.</span><span class="token function">getServiceInfo</span><span class="token punctuation">(</span>serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">,</span> clusterString<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">null</span> <span class="token operator">==</span> serviceInfo <span class="token operator">||</span> <span class="token operator">!</span>clientProxy<span class="token punctuation">.</span><span class="token function">isSubscribed</span><span class="token punctuation">(</span>serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">,</span> clusterString<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token comment">//如果从本地获取不到数据，则调用订阅方法</span>
+                serviceInfo <span class="token operator">=</span> clientProxy<span class="token punctuation">.</span><span class="token function">subscribe</span><span class="token punctuation">(</span>serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">,</span> clusterString<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token comment">//适用于不走订阅，直接从服务端获取数据的情况</span>
+            serviceInfo <span class="token operator">=</span> clientProxy<span class="token punctuation">.</span><span class="token function">queryInstancesOfService</span><span class="token punctuation">(</span>serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">,</span> clusterString<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span> list<span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>serviceInfo <span class="token operator">==</span> <span class="token keyword">null</span> <span class="token operator">||</span> <span class="token class-name">CollectionUtils</span><span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span>list <span class="token operator">=</span> serviceInfo<span class="token punctuation">.</span><span class="token function">getHosts</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Instance</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> list<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+      <span class="token comment">//从本地内存获取服务数据，如果开启了故障转移则直接从磁盘获取，因为当服务端挂了，本地启动时内存中也没有数据</span>
+    <span class="token keyword">public</span> <span class="token class-name">ServiceInfo</span> <span class="token function">getServiceInfo</span><span class="token punctuation">(</span><span class="token keyword">final</span> <span class="token class-name">String</span> serviceName<span class="token punctuation">,</span> <span class="token keyword">final</span> <span class="token class-name">String</span> groupName<span class="token punctuation">,</span> <span class="token keyword">final</span> <span class="token class-name">String</span> clusters<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        NAMING_LOGGER<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"failover-mode: {}"</span><span class="token punctuation">,</span> failoverReactor<span class="token punctuation">.</span><span class="token function">isFailoverSwitch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">String</span> groupedServiceName <span class="token operator">=</span> <span class="token class-name">NamingUtils</span><span class="token punctuation">.</span><span class="token function">getGroupedName</span><span class="token punctuation">(</span>serviceName<span class="token punctuation">,</span> groupName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">String</span> key <span class="token operator">=</span> <span class="token class-name">ServiceInfo</span><span class="token punctuation">.</span><span class="token function">getKey</span><span class="token punctuation">(</span>groupedServiceName<span class="token punctuation">,</span> clusters<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//故障转移则直接从磁盘获取</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>failoverReactor<span class="token punctuation">.</span><span class="token function">isFailoverSwitch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> failoverReactor<span class="token punctuation">.</span><span class="token function">getService</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//返回内存中数据</span>
+        <span class="token keyword">return</span> serviceInfoMap<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="__372"></a>四. 尾声</h2> 
+<p>本篇文章向大家介绍Nacos服务发现的基本概念和核心能力以及实现的原理，旨在让大家对Nacos的服务注册与发现功能有更多的了解，做到心中有数。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

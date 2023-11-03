@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>SQL 优化经历：从 30248秒到 0.001秒的经历 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">SQL 优化经历：从 30248秒到 0.001秒的经历</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>场景</p> 
+<p>用的数据库是mysql5.6，下面简单的介绍下场景。</p> 
+<p><strong>课程表</strong></p> 
+<pre><code>create table Course(
+c_id int PRIMARY KEY,
+name varchar(10)
+)
+</code></pre> 
+<p>数据100条。</p> 
+<p><strong>学生表</strong></p> 
+<pre><code>create table Student(
+id int PRIMARY KEY,
+name varchar(10)
+)
+</code></pre> 
+<p>数据70000条。</p> 
+<p><strong>学生成绩表</strong></p> 
+<pre><code>CREATE table SC(
+    sc_id int PRIMARY KEY,   
+    s_id int,  
+    c_id int,  
+    score int
+)
+</code></pre> 
+<p>数据70w条。</p> 
+<p><strong>查询目的：</strong></p> 
+<p>查找语文考100分的考生。</p> 
+<p><strong>查询语句：</strong></p> 
+<pre><code>select s.* from Student s
+where s.s_id in (  
+    select s_id   
+    from SC sc   
+    where sc.c_id = 0 and sc.score = 100 )
+</code></pre> 
+<p><strong>执行时间：30248.271s</strong></p> 
+<p>晕，为什么这么慢，先来查看下查询计划：</p> 
+<pre><code>EXPLAIN
+select s.* from Student s 
+  where s.s_id in ( 
+    select s_id  
+    from SC sc  
+    where sc.c_id = 0 and sc.score = 100 )
+</code></pre> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/6e/cd/6meDbE3c_o.png"></p> 
+<p>发现没有用到索引，type全是ALL，那么首先想到的就是建立一个索引，建立索引的字段当然是在where条件的字段。</p> 
+<p>先给sc表的c_id和score建个索引。</p> 
+<pre><code>CREATE index sc_c_id_index on SC(c_id);
+CREATE index sc_score_index on SC(score);
+</code></pre> 
+<p>再次执行上述查询语句，时间为: <strong>1.054s</strong></p> 
+<p>快了3w多倍，大大缩短了查询时间，看来索引能极大程度的提高查询效率，建索引很有必要，很多时候都忘记建。</p> 
+<p>索引了，数据量小的的时候压根没感觉，这优化的感觉挺爽。</p> 
+<p>但是1s的时间还是太长了，还能进行优化吗，仔细看执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/1e/f5/ezztiU7I_o.png"></p> 
+<p>查看优化后的sql:</p> 
+<pre><code>SELECT
+    `YSB`.`s`.`s_id` AS `s_id`,  
+    `YSB`.`s`.`name` AS `name`
+FROM  
+    `YSB`.`Student` `s`
+WHERE   
+    &lt; in_optimizer &gt; (     
+        `YSB`.`s`.`s_id` ,&lt; EXISTS &gt; (     
+            SELECT          
+                1         
+            FROM           
+                `YSB`.`SC` `sc`    
+            WHERE          
+                (          
+                  (`YSB`.`sc`.`c_id` = 0)                  
+                  AND (`YSB`.`sc`.`score` = 100)                 
+                  AND (    
+                      &lt; CACHE &gt; (`YSB`.`s`.`s_id`) = `YSB`.`sc`.`s_id`                   
+                  )    
+              )     
+      ) 
+  )
+</code></pre> 
+<p>补充：这里有网友问怎么查看优化后的语句。</p> 
+<p>方法如下：</p> 
+<p>在命令窗口执行</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/24/5d/kRRXmdTE_o.png"></p> 
+<p><strong>有type=all</strong></p> 
+<p>按照我之前的想法，该sql的执行的顺序应该是先执行子查询。</p> 
+<pre><code>select s_id
+from SC sc 
+where sc.c_id = 0 and sc.score = 100
+</code></pre> 
+<p><strong>耗时：0.001s</strong></p> 
+<p>得到如下结果：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/8c/70/ZX6lyLRx_o.png"></p> 
+<p>然后再执行</p> 
+<pre><code>select s.* 
+from Student s 
+where s.s_id in(7,29,5000)
+</code></pre> 
+<p><strong>耗时：0.001s</strong></p> 
+<p>这样就是相当快了啊，Mysql竟然不是先执行里层的查询，而是将sql优化成了exists子句，并出现了EPENDENT SUBQUERY，</p> 
+<p>mysql是先执行外层查询，再执行里层的查询，这样就要循环70007*8次。</p> 
+<p>那么改用连接查询呢？</p> 
+<pre><code>SELECT s.* from
+Student s
+INNER JOIN SC sc
+on sc.s_id = s.s_id
+where sc.c_id=0 and sc.score=100
+</code></pre> 
+<p>这里为了重新分析连接查询的情况，先暂时删除索引<code>sc_c_id_index，sc_score_index</code> 。</p> 
+<p><strong>执行时间是：0.057s</strong></p> 
+<p>效率有所提高，看看执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/2f/fb/knWfSh4o_o.png"></p> 
+<p>这里有连表的情况出现，我猜想是不是要给sc表的s_id建立个索引</p> 
+<pre><code>CREATE index sc_s_id_index on SC(s_id);
+show index from SC
+</code></pre> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/e1/b3/Rvafk4je_o.png"></p> 
+<p>在执行连接查询</p> 
+<p><strong>时间: 1.076s，</strong> 竟然时间还变长了，什么原因？查看执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/c3/59/V5KVfBAf_o.png"></p> 
+<p>优化后的查询语句为：</p> 
+<pre><code>SELECT  
+    `YSB`.`s`.`s_id` AS `s_id`,   
+    `YSB`.`s`.`name` AS `name`
+FROM   
+    `YSB`.`Student` `s`
+JOIN `YSB`.`SC` `sc`
+WHERE  
+    (     
+        (         
+            `YSB`.`sc`.`s_id` = `YSB`.`s`.`s_id`       
+        )   
+        AND (`YSB`.`sc`.`score` = 100)    
+        AND (`YSB`.`sc`.`c_id` = 0)  
+    )
+</code></pre> 
+<p>貌似是先做的连接查询，再进行的where条件过滤。</p> 
+<p><strong>回到前面的执行计划：</strong></p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/4f/21/HboerR4N_o.png"></p> 
+<p>这里是先做的where条件过滤，再做连表，执行计划还不是固定的，那么我们先看下标准的sql执行顺序：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/c0/25/yZNEkWuJ_o.png"></p> 
+<p>正常情况下是先join再进行where过滤，但是我们这里的情况，如果先join，将会有70w条数据发送join做操，因此先执行where 。</p> 
+<p>过滤是明智方案，现在为了排除mysql的查询优化，我自己写一条优化后的sql 。</p> 
+<pre><code>SELECT   
+    s.*
+FROM   
+    (     
+        SELECT      
+            *     
+        FROM       
+            SC sc   
+        WHERE       
+            sc.c_id = 0    
+        AND sc.score = 100  
+    ) t
+INNER JOIN Student s ON t.s_id = s.s_id
+</code></pre> 
+<p>即先执行sc表的过滤，再进行表连接，<strong>执行时间为：0.054s</strong> 。</p> 
+<p>和之前没有建s_id索引的时间差不多。</p> 
+<p>查看执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/0c/e6/IA77c65v_o.png"></p> 
+<p>先提取sc再连表，这样效率就高多了，现在的问题是提取sc的时候出现了扫描表，那么现在可以明确需要建立相关索引。</p> 
+<pre><code>CREATE index sc_c_id_index on SC(c_id);
+CREATE index sc_score_index on SC(score);
+</code></pre> 
+<p>再执行查询：</p> 
+<pre><code>SELECT   
+    s.*
+FROM   
+    (    
+        SELECT     
+            *    
+        FROM      
+            SC sc    
+        WHERE        
+            sc.c_id = 0    
+        AND sc.score = 100   
+    ) t
+INNER JOIN Student s ON t.s_id = s.s_id
+</code></pre> 
+<p><strong>执行时间为：0.001s</strong>，这个时间相当靠谱，快了50倍。</p> 
+<p>执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/e5/17/odRj2VRq_o.png"></p> 
+<p>我们会看到，先提取sc，再连表，都用到了索引。</p> 
+<p>那么再来执行下sql。</p> 
+<pre><code>SELECT s.* from
+Student s
+INNER JOIN SC sc
+on sc.s_id = s.s_id
+where sc.c_id=0 and sc.score=100
+</code></pre> 
+<p><strong>执行时间0.001s</strong></p> 
+<p>执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/d0/b5/iUwSwYMy_o.png"></p> 
+<p>这里是mysql进行了查询语句优化，先执行了where过滤，再执行连接操作，且都用到了索引。</p> 
+<p>2015-04-30日补充：最近又重新导入一些生产数据，经测试发现，前几天优化完的sql执行效率又变低了。</p> 
+<p>调整内容为SC表的数据增长到300W,学生分数更为离散。</p> 
+<p>先回顾下：</p> 
+<p><code>show index from SC</code></p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/ef/e2/uHQ526eS_o.png"></p> 
+<p><strong>执行sql</strong></p> 
+<pre><code>SELECT s.* from
+Student s
+INNER JOIN SC sc
+on sc.s_id = s.s_id
+where sc.c_id=81 and sc.score=84
+</code></pre> 
+<p><strong>执行时间：0.061s</strong>，这个时间稍微慢了点。执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/77/8b/6KvU9mcg_o.png"></p> 
+<p>这里用到了intersect并集操作，即两个索引同时检索的结果再求并集，再看字段score和c_id的区分度。</p> 
+<p>单从一个字段看，区分度都不是很大，从SC表检索，<code>c_id=81</code>检索的结果是70001，<code>score=84</code>的结果是39425。</p> 
+<p>而<code>c_id=81 and score=84</code> 的结果是897，即这两个字段联合起来的区分度是比较高的，因此建立联合索引查询效率。</p> 
+<p>将会更高，从另外一个角度看，该表的数据是300w，以后会更多，就索引存储而言，都是不小的数目，随着数据量的。</p> 
+<p>增加，索引就不能全部加载到内存，而是要从磁盘去读取，这样索引的个数越多，读磁盘的开销就越大，因此根据具体。</p> 
+<p>业务情况建立多列的联合索引是必要的，那么我们来试试吧。</p> 
+<pre><code>alter table SC drop index sc_c_id_index;
+alter table SC drop index sc_score_index;
+create index sc_c_id_score_index on SC(c_id,score);
+</code></pre> 
+<p>执行上述查询语句，<strong>消耗时间为：0.007s</strong>，这个速度还是可以接收的。</p> 
+<p>执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/66/7d/Ux8Myl7a_o.png"></p> 
+<p>该语句的优化暂时告一段落。</p> 
+<h3>总结</h3> 
+<ol>
+<li> <p>mysql嵌套子查询效率确实比较低</p> </li>
+<li> <p>可以将其优化成连接查询</p> </li>
+<li> <p>连接表时，可以先用where条件对表进行过滤，然后做表连接<br> （虽然mysql会对连表语句做优化）</p> </li>
+<li> <p>建立合适的索引，必要时建立多列联合索引</p> </li>
+<li> <p>学会分析sql执行计划，mysql会对sql进行优化，所以分析执行计划很重要</p> </li>
+</ol>
+<h2>索引优化</h2> 
+<p>上面讲到子查询的优化，以及如何建立索引，而且在多个字段索引时，分别对字段建立了单个索引。</p> 
+<p>后面发现其实建立联合索引效率会更高，尤其是在数据量较大，单个列区分度不高的情况下。</p> 
+<h2>单列索引</h2> 
+<p>查询语句如下：</p> 
+<pre><code>select * from user_test_copy where sex = 2 and type = 2 and age = 10
+</code></pre> 
+<p>索引：</p> 
+<pre><code>CREATE index user_test_index_sex on user_test_copy(sex);
+CREATE index user_test_index_type on user_test_copy(type);
+CREATE index user_test_index_age on user_test_copy(age);
+</code></pre> 
+<p>分别对sex,type,age字段做了索引，数据量为300w，<strong>查询时间：0.415s</strong>执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/a3/81/3O7riLvX_o.png"></p> 
+<p>发现 <code>type=index_merge</code></p> 
+<p>这是mysql对多个单列索引的优化，对结果集采用intersect并集操作</p> 
+<h2>多列索引</h2> 
+<p>我们可以在这3个列上建立多列索引，将表copy一份以便做测试</p> 
+<pre><code>create index user_test_index_sex_type_age on user_test(sex,type,age);
+</code></pre> 
+<p>查询语句：</p> 
+<pre><code>select * from user_test where sex = 2 and type = 2 and age = 10
+</code></pre> 
+<p>执行时间：0.032s，快了10多倍，且多列索引的区分度越高，提高的速度也越多</p> 
+<p>执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/1e/22/myxrfDDq_o.png"></p> 
+<p><strong>最左前缀</strong></p> 
+<p>多列索引还有最左前缀的特性：</p> 
+<p>执行一下语句：</p> 
+<pre><code>select * from user_test where sex = 2
+select * from user_test where sex = 2 and type = 2
+select * from user_test where sex = 2 and age = 10
+</code></pre> 
+<p>都会使用到索引，即索引的第一个字段sex要出现在where条件中</p> 
+<h2>索引覆盖</h2> 
+<p>就是查询的列都建立了索引，这样在获取结果集的时候不用再去磁盘获取其它列的数据，直接返回索引数据即可</p> 
+<p>如：</p> 
+<pre><code>select sex,type,age from user_test where sex = 2 and type = 2 and age = 10
+</code></pre> 
+<p><strong>执行时间：0.003s</strong></p> 
+<p>要比取所有字段快的多</p> 
+<h2>排序</h2> 
+<pre><code>select * from user_test where sex = 2 and type = 2 ORDER BY user_name
+</code></pre> 
+<p><strong>时间：0.139s</strong></p> 
+<p>在排序字段上建立索引会提高排序的效率</p> 
+<pre><code>create index user_name_index on user_test(user_name)
+</code></pre> 
+<p>最后附上一些sql调优的总结，以后有时间再深入研究</p> 
+<ol>
+<li> <p>列类型尽量定义成数值类型，且长度尽可能短，如主键和外键，类型字段等等</p> </li>
+<li> <p>建立单列索引</p> </li>
+<li> <p>根据需要建立多列联合索引<br> 当单个列过滤之后还有很多数据，那么索引的效率将会比较低，即列的区分度较低，<br> 那么如果在多个列上建立索引，那么多个列的区分度就大多了，将会有显著的效率提高。</p> </li>
+<li> <p>根据业务场景建立覆盖索引<br> 只查询业务需要的字段，如果这些字段被索引覆盖，将极大的提高查询效率</p> </li>
+<li> <p>多表连接的字段上需要建立索引 这样可以极大的提高表连接的效率</p> </li>
+<li> <p>where条件字段上需要建立索引</p> </li>
+<li> <p>排序字段上需要建立索引</p> </li>
+<li> <p>分组字段上需要建立索引</p> </li>
+<li> <p>Where条件上不要使用运算函数，以免索引失效</p> </li>
+</ol>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

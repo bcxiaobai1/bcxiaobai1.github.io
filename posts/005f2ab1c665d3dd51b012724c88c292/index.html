@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>跨数据中心下的 Kafka 高可用架构分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">跨数据中心下的 Kafka 高可用架构分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_0"></a>导语</h2> 
+<p>本文介绍了 Kafka 跨数据中心的两种部署方式，简要分析两种方式下的不同架构以及优缺点，对这些架构可能碰到的问题也提供了一些解决思路；同时也说明了 Kafka 跨数据中心部署的社区解决方案和商业化解决方案。</p> 
+<h2>
+<a id="_4"></a>背景</h2> 
+<p>Kafka 作为世界上最流行的消息中间件之一，一般是客户数据链路中的核心组件，高可用性是客户很关注的因素。近期在对接云上客户时发现，客户对 Kafka 的高可用也有需求，行业架构师也想了解 Kafka 高可用的方案细节；有些客户需要云上 Kafka 的高可用能力；有些客户需要 IDC 中的 Kafka 与云上 Kafka 建立高可用架构;有些客户需要与其他友商云进行跨云高可用。单集群的高可用讨论得比较多，但跨数据中心的方式比较多，相对复杂。本文希望借由对 Kafka 跨数据中心高可用架构的分析，为以上场景的解决方案提供一些思路。</p> 
+<h2>
+<a id="_9"></a>相关术语</h2> 
+<ul>
+<li> <p><strong>RTO</strong>(Recovery Time Objective)：即数据恢复时间目标。指如果发生故障，发生故障转移时业务系统所能容忍的最长停止服务时间。如果需要 RTO 越低，就越要避免手工操作，只有自动化故障转移才能实现比较低的 RTO。</p> </li>
+<li> <p><strong>RPO</strong>(Recovery Point Objective)：即数据恢复点目标。指如果发生故障，故障转移需要从数据历史记录中的哪个点恢复。换句话说，有多少数据会在故障期间丢失。</p> </li>
+<li> <p><strong>灾难恢复</strong>(Disaster Recovery): 涵盖所有允许应用程序从灾难中恢复的体系结构、实现、工具、策略和过程的总称，在本文档的上下文中，是指整个区域故障。</p> </li>
+<li> <p><strong>高可用性</strong>(High Availability): 一个高度可用的系统即使在出现故障的情况下也可以连续运行。在多区域架构的上下文中，高可用性应用程序即使在整个区域故障期间也可以运行。HA 应用程序具有灾难恢复策略。</p> </li>
+</ul> 
+<h2>
+<a id="_19"></a>发生故障的场景</h2> 
+<p>在当前基础设施丰富的时代，我们很容易认为不需要考虑故障场景。然而现实情况是，不论是在虚拟化或容器化架构下，还是在提供成熟服务的云厂商上，尽管概率各不相同，但都有可能发生局部和系统故障。架构师需要考虑特定类型故障的可能性以及对其整体系统可用性的影响。</p> 
+<p>下面列出一些典型的故障场景</p> 
+<table>
+<thead><tr>
+<th align="left">序号</th>
+<th align="left">故障场景</th>
+<th align="left">影响</th>
+<th align="left">缓解措施</th>
+</tr></thead>
+<tbody>
+<tr>
+<td align="left">1</td>
+<td align="left">单节点故障</td>
+<td align="left">单个节点或托管在该节点上的 VM 的功能丧失</td>
+<td align="left">集群部署</td>
+</tr>
+<tr>
+<td align="left">2</td>
+<td align="left">机架或交换机故障</td>
+<td align="left">该机架内托管的所有节点/虚拟机（和/或连接）丢失</td>
+<td align="left">集群部署分布在多个机架和/或网络故障域中</td>
+</tr>
+<tr>
+<td align="left">3</td>
+<td align="left">DC/DC-机房故障</td>
+<td align="left">在该 DC/DC 机房内托管的所有节点/虚拟机（和/或连接）丢失</td>
+<td align="left">扩展集群、复制部署</td>
+</tr>
+<tr>
+<td align="left">4</td>
+<td align="left">区域故障</td>
+<td align="left">该区域内托管的所有节点/虚拟机（和/或连接）丢失</td>
+<td align="left">地理延伸集群（延迟相关）和/或复制部署</td>
+</tr>
+<tr>
+<td align="left">5</td>
+<td align="left">全球性系统性中断（D​​NS 故障、路由故障等）</td>
+<td align="left">影响客户和员工的所有系统和服务完全中断</td>
+<td align="left">离线备份；第三方域中的副本</td>
+</tr>
+<tr>
+<td align="left">6</td>
+<td align="left">人为行为（无意或恶意）</td>
+<td align="left">在检测之前，人为行为可能会破坏数据和任何同步副本的可用性</td>
+<td align="left">离线备份</td>
+</tr>
+</tbody>
+</table> 
+<p>这篇文章重点围绕故障场景2、3、4说明 Kafka 中有哪些方案来应对这几类故障场景。第1种单节点故障，Kafka 集群高可用可以应对；第5、6种故障可以考虑将数据存储到第三方系统，如果在云上可以转储到 COS。</p> 
+<h2>
+<a id="Kafka__36"></a>Kafka 体系架构简介</h2> 
+<p>以下是 Kafka 的软件架构，整个 Kafka 体系结构由 Producer、Consumer、Broker、ZooKeeper 组成。Broker 又由 Topic、分区、副本组成。</p> 
+<p><img src="https://images2.imgbox.com/90/bd/9LJvzCjS_o.png" alt="1.png"></p> 
+<p>详细可以参考 Kafka 官方文档，<a href="https://kafka.apache.org/documentation/#introduction">Kafka introduce</a>。</p> 
+<p>单套 Kafka 集群是通过副本复制来保障集群的高可用，但在实际生产情况下，单数据中心单集群不一定能满足生产上需要的高可用需求，也难以应对复杂的业务场景。我们下面来看看跨数据中心下几种常见的应用场景。</p> 
+<h2>
+<a id="_46"></a>跨数据中心的应用场景</h2> 
+<ul>
+<li> <p>跨地域复制<br> 有时候，一家公司可能会在不同的地理区域、城市或大洲有多个数据中心。每个数据中心都有自己的 Kafka 集群。有些应用程序只需要与本地的 Kafka 集群通信，有些应用程序则需要访问多个数据中心的数据（否则就没有必要跨数据中心的复制方案了）。有很多情况需要跨数据中心访问数据，例如，根据供需情况修改商品价格就是一个典型的应用场景。该公司在每个城市都有一个数据中心，用于收集每个城市的供需信息，然后根据整体的供需情况调整商品价格。这些信息会被镜像到中心集群，然后业务分析员会基于中心集群中的数据生成整个公司的收益报告。</p> </li>
+<li> <p>灾备<br> Kafka 集群可能因为某些原因不可用，为了实现冗余，需要有另外一个与第一个集群完全相同的集群。如果有第一个集群不可用的情况发生，可以将应用程序重新定向到第二个集群。</p> </li>
+<li> <p>集群的物理隔离<br> 有些客户需要将生产环境数据镜像到测试环境，进行验证。</p> </li>
+<li> <p>云迁移和混合云部署<br> 在云计算流行的今天，部分公司会将业务同时部署在本地 IDC 和云端。本地 IDC 和每个云服务区域可能都会有 Kafka 集群，应用程序会在这些 Kafka 集群之间传输数据。例如，云端部署了一个应用，它需要访问 IDC 里的数据，IDC 里的应用程序负责更新这个数据，并保存在本地的数据库中。可以捕获这些数据变更，然后保存在 IDC 的 Kafka 集群中，然后再镜像到云端的 Kafka 集群中，让云端的应用程序可以访问这些数据。这样既有助于控制跨数据中心的流量成本，也有助于提高流量的监管合规性和安全性。</p> </li>
+<li> <p>法律和法规要求<br> 越来越多的国家和地区对数据安全都很重视，都有出台相应的信息保护法律法规。如果有数据涉及到跨境被访问，可以利用kafka的镜像能力，在传输到境外之前，进行数据脱敏、传输加密等一系列的处理。<br> 为了符合不同国家的法律和监管要求，一家公司在不同国家的运营也可能需要不同的配置和策略。例如，一些数据可能需要被保存在具有严格访问控制的独立集群中，一些数据则可以被复制到具有宽松访问权限的其他集群。为了满足不同区域对数据保留期限的合规性要求，保存在不同区域集群中的数据可以使用不同的配置。</p> </li>
+</ul> 
+<h2>
+<a id="Kafka_64"></a>跨数据中心Kafka的部署形态</h2> 
+<p>一般来说，Kafka 跨数据中心部署大体分两种形态：Stretched Cluster和Connected Cluster。</p> 
+<h3>
+<a id="Stretched_Cluster_68"></a>Stretched Cluster</h3> 
+<p>延展集群，它本质上是单个集群，是使用Kafka内置的复制机制来保持broker副本的同步。通过配置min.insync.replicas和acks=all，可以确保每次写入消息时都可以收到至少来自两个数据中心的确认。</p> 
+<p><img src="https://images2.imgbox.com/5a/0f/FL1NndG8_o.png" alt="2.png"></p> 
+<h3>
+<a id="Connected_Cluster_75"></a>Connected Cluster</h3> 
+<p>连接集群，一般通过异步复制完成多地域复制，并且使用外部工具将数据从一个（或多个）集群复制到另一个集群。该工具中会有Kafka消费者从源集群消费数据，然后利用Kafka生产者将数据生产到目的集群。但Confluent提供了一种不使用外部工具实现此功能的连接集群，在下面介绍商业化方案的时候再详细说明。</p> 
+<p><img src="https://images2.imgbox.com/ed/b9/jFRQL56b_o.png" alt="3.png"></p> 
+<p>下面是这两种部署形态的对比</p> 
+<table>
+<thead><tr>
+<th align="left">部署形态</th>
+<th align="center">数据传输方式</th>
+<th align="center">Offset 保留</th>
+<th align="center">延迟</th>
+<th align="center">RTO&amp;RPO</th>
+<th align="left">何时使用</th>
+</tr></thead>
+<tbody>
+<tr>
+<td align="left">Stretched Cluster</td>
+<td align="center">同步</td>
+<td align="center">可以</td>
+<td align="center">无</td>
+<td align="center">0</td>
+<td align="left">数据中心距离较短</td>
+</tr>
+<tr>
+<td align="left">Connected Cluster</td>
+<td align="center">异步</td>
+<td align="center">可以</td>
+<td align="center">取决于网络</td>
+<td align="center">&gt;0</td>
+<td align="left">数据中心较远</td>
+</tr>
+</tbody>
+</table> 
+<p>基于这两种部署形态，跨数据中心会有如下几种部署架构。</p> 
+<h2>
+<a id="Kafka_91"></a>跨数据中心Kafka的部署架构</h2> 
+<h3>
+<a id="_2AZ_93"></a>延展集群 2AZ</h3> 
+<p>Kafka 的 Broker 跨两个数据中心组成集群，Zookeeper 是 Hierarchical Quorum 模式。数据中心的 Kafka 集群直接连接本地的 Zookeeper 组。延展集群 2AZ 部署架构如下：</p> 
+<p><img src="https://images2.imgbox.com/f0/89/f4ATIMfn_o.png" alt="4.png"></p> 
+<p>如果 DC1 不可用，客户端在另外一个数据中心也失去了分区 Leader。要么部分生产，要么停止生产，这取决于复制因子的配置。</p> 
+<p><img src="https://images2.imgbox.com/28/c1/ki2leYsL_o.png" alt="5.png"></p> 
+<p>如果某个数据中心发生故障，可以通过如下方式进行切换。</p> 
+<p>① DC1 发生故障</p> 
+<p>②不能选择 Leader 分区</p> 
+<p>③从配置文件中移除不可用的 ZK 和 Group</p> 
+<p>④在 DC2 中选择新的 Leader 分区</p> 
+<p>⑤将 min.insync.replica 从3修改为2</p> 
+<p>⑥生产者可以发送消息给新的 Leader 分区</p> 
+<p>可以看到延展集群 2AZ 的架构并非标准的高可用解决方案。如果出现某个数据中心不可用，需要手动调整配置文件，手动重新拉起ZK集群。所以整个过程 RTO 和 RPO 都是大于0。现有的解决方案中， Confluent 提供的 Linker 产品更适用 2AZ 高可用的场景，在下面的商业化解决方案中再详细介绍。</p> 
+<h3>
+<a id="_25AZ_119"></a>延展集群 2.5AZ</h3> 
+<p>延展集群 2.5AZ 的架构包含两个完全运行的可用区，和一个运行单个延展集群的轻可用区(0.5)。Zookeeper 需要跨3个数据中心部署，每个数据中心一个 ZK 节点。如果某个数据中心不可用，故障切换的 RTO 和 RPO 都是0。在 2.5AZ 的部署架构下，如果副本数设为3，并且 Acks=all，min.insync.replicas=2，那么3副本的分布为2+1。此时如果2副本所在的数据中心不可用，因最小 ISR 设为了2，所以集群的写入将不可用，但消费不受影响。</p> 
+<p>延展集群 2.5AZ 的部署架构如下：</p> 
+<p><img src="https://images2.imgbox.com/bd/d4/75EuO1Y3_o.png" alt="6.png"></p> 
+<h3>
+<a id="_3AZ_127"></a>延展集群 3AZ</h3> 
+<p>该架构跨3个数据中心部署一个集群，RTO 和 RPO 在一个数据中心故障时为 0。这种模式是所有模式中最简单、最健壮的。这种模式在公共云中非常常见（使用多个可用区）。也不会有 2.5AZ 最少 ISR 不够用的风险。延展集群 3AZ 的部署架构如下：</p> 
+<p><img src="https://images2.imgbox.com/ad/53/RCux9uAw_o.png" alt="7.png"></p> 
+<p>通过配置 min.insync.replicas 和 Acks=all，可以确保每次写入消息时都可以收到至少来自两个数据中心的确认。从 Kafka 2.4.0 开始，消费者可以基于机架信息从最近的副本获取数据。从本地数据中心的 Follow 副本读取数据可以提高吞吐量、降低延迟和成本，因为跨数据中心的流量减少了。</p> 
+<h3>
+<a id="_135"></a>连接集群-灾备架构</h3> 
+<p>Parimay 集群(主)将数据镜像到备用集群集群(被动)使用 MM2。当主用站点故障时，您需要移动生产者和消费者应用程序到备用站点。RTO 取决于备用站点的升温程度向上当涉及到 RPO 时，可能会发生数据丢失因为 MM2 异步复制数据主用站点到备用站点。 <br>  <br> <img src="https://images2.imgbox.com/17/d8/cJZRpAJT_o.png" alt="8.png"></p> 
+<p>这种架构好处是比较好实现，只需要安装第二个集群，然后使用镜像工具将第一个集群的数据完全镜像到第二个集群中。但这个架构最大的问题在于浪费一个集群，并且 Kafka 的故障转移很难完全做到既不丢数据，也无重复数据。我们只能尽量减少这些问题的发生，但是无法完全避免。</p> 
+<p>Kafka 的已知的镜像方案都是异步的，所以灾备集群无法及时获取主集群的主要数据。我们需要监控同步延迟，来确认灾备集群落后主集群多少，并确保不要落后太多。如果有故障转移计划，可以先停止主集群，等镜像进程将剩余数据同步完毕，然后再切换到灾备集群，这样可以避免数据丢失。如果发生了非计划内的故障转移，切换到灾备集群可能会丢失一部分消息。</p> 
+<p>另外，当前社区镜像方案还不支持 EOS(Exactly-once Semantics)，如果主集群有事务消息，同步到灾备集群，有些消息可能会丢失。切换到灾备集群，还有个比较大的挑战是消费者位点的同步。MM1 并不能承诺消费者位点能够同步，所以早期版本（2.4版本以前）的 Kafka 灾备切换，消费位点要么从起始位置开始读取数据，要么从末尾开始读取数据。从起始位置读取会带来大量的重复数据；从末尾开始读取数据，可能丢弃部分数据。一般来说，从末尾读取数据更为常见。从 Kafka0.10 之后，Kafka 每条消息都包含了一个时间戳，所以也可以根据时间点来调整消费位移点。跟随 Kafka2.4 一起推出的 MirrorMaker2（以下简称MM2）是下一代的多集群镜像解决方案，修复了 MirrorMaker1 的局限性。</p> 
+<h3>
+<a id="_147"></a>连接集群-双活架构</h3> 
+<p>当有两个或者多个数据中心需要共享部分或全部数据，并且每个数据中心都可以生产或者消费数据，可以使用双活架构，如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/96/41/6Xe76rUU_o.png" alt="9.png"></p> 
+<p>每个数据中心运行单独的 Kafka 集群，每个集群都是另外一个集群的副本。当一个数据中心发生故障，应用程序将故障转移到另外一个数据中心。</p> 
+<p><img src="https://images2.imgbox.com/83/26/2st05n27_o.png" alt="10.png"></p> 
+<p>双活架构可能遇到的一些问题。</p> 
+<ul>
+<li> <p>数据镜像延迟问题。如果用户向一个数据中心生产数据，从另外一个数据中心消费数据，生产的数据可能还没有镜像到另外一个数据中心。</p> </li>
+<li> <p>多数据中心重复消费问题。要小心避免同一条消息被镜像到两个或多个数据中心，被消费多次。需要根据实际情况选择合适的方法，比如给每条消息设置一个 ID，通过消息 ID 来检测是否被重复消费过。或者根据消息上带的时间戳，消费前检查该时间戳是否被消费过。</p> </li>
+<li> <p>配置和管理的复杂性。需要在两个或多个数据中心之间配置和管理多个 kafka 集群，如果配置不当或者管理不当，可能会导致数据同步失败或者数据丢失。同时也需要有完善的监控系统来观测镜像的情况，如镜像延迟，镜像速率等。</p> </li>
+<li> <p>消息循环镜像。需要避免消息在两个或多个数据中心来回镜像。可以通过在不同的数据中心设置单独的 Topic，并确保不要从不同的数据中心镜像同名的 Topic。如 MirrorMaker2 就是通过在目标集群的 Topic 上中带 Kafka 实例 ID 来避免循环镜像。或者通过消息 Head 中包含数据中心信息，从而避免循环镜像。</p> </li>
+</ul> 
+<h2>
+<a id="Kafka_167"></a>跨数据中心Kafka解决方案</h2> 
+<h3>
+<a id="_169"></a>社区解决方案</h3> 
+<p>社区方案中的延展集群利用 Kafka 自身的同步机制达到高可用的效果，并不需要借助于外部工具。针对连接集群，社区解决方案主要是借助于 Kafka 自带的 MirrorMaker 工具。早期的 MirrorMaker1(以下简称MM1)存在一些问题。</p> 
+<p>比如：</p> 
+<ul>
+<li> <p>目标集群的 Topic 使用默认配置创建，但通常需要手动分区。</p> </li>
+<li> <p>ACL 和 Topic 配置的变更不会自动同步</p> </li>
+<li> <p>消息会被 <code>DefaultPartitioner</code> 打散到不同分区，即对一个 Topic ，目标集群的 Partition 与源集群的 Partition 不一致。所以也没办法保障顺序消息。</p> </li>
+<li> <p>不保证 Exactly-Once 语义，可能出现重复数据的情况</p> </li>
+<li> <p>MM1 支持的数据备份模式较简单，比如无法支持 Active/Active 模式</p> </li>
+<li> <p>Rebalance 可能会导致镜像延迟</p> </li>
+<li> <p>不支持消费 Offset 同步</p> </li>
+</ul> 
+<p>因为存在这些问题，MM1 很难在生产环境中使用。所以在 Kafka2.4 版本中，推出了一个新的MirrorMaker2（以下简称MM2），MM2 基于 kafka connect 框架，解决了上面大部分的问题。</p> 
+<p>下图是 MM2 在主备架构中的应用。</p> 
+<p><img src="https://images2.imgbox.com/11/84/mw1wYmdh_o.png" alt="11.png"></p> 
+<p>可以在 MirrorMaker2 下配置复杂的拓扑来支持更为广泛的的场景。比如有 Kafka 集群 A、B、C。双活高可用可配置：A→B，B→A。灾备集群可配置：A→B。聚合：A→C，B→C。扇出可配置：C→A，C→B。链式复制可配置：A→B，B→C。</p> 
+<p>为避免添加新的 Topic 或分区发生再均衡而导致延迟激增，在分配分区时，MirrorMaker2 并没有使用 Kafka 的消费群组管理协议。源集群的每个分区的消息都可以镜像到目标集群的相同分区。如果源 Topic 添加了分区，那么目标 Topic 也会自动创建对应的分区。除了可以复制元数据、消息数据，MM2 还支持消费者偏移量、Topic 配置和 ACL。</p> 
+<p>MM2的具体配置也可以参考：<a href="https://kafka.apache.org/documentation/#georeplication-mirrormaker">https://kafka.apache.org/documentation/#georeplication-mirrormaker</a> ，文档里面包含MM2相关的KIP-382，有兴趣可以了解下。</p> 
+<h2>
+<a id="_201"></a>开源&amp;商业化方案</h2> 
+<h3>
+<a id="uberuReplicator_203"></a>uber的uReplicator</h3> 
+<p>uReplicator 是 UBber 开源的 Kafka 集群复制开源项目，基于 MirrorMaker1 的改进版，使用 Apache Helix 作为中心控制器，用于管理 Topic 列表和分配给每个 uReplicator 实例的分区。管理员可以通过 REST API 添加新的 Topic，uReplicator 负责将分区分配给不同的消费者。uReplicator 引入 Helix，取代了 High-Level Consumer 里面的 Consumer Group Coordinator 角色，消费者的分区由 Helix 控制器负责分配，不需要在消费者之间进行协调，避免了再均衡。</p> 
+<p>uReplicator 借助于 Helix 解决了 MM1 的一些痛点问题，但是也带来了额外的复杂性。MM2 解决了 MM1 的伸缩性和容错性问题，并且不需要依赖外部组件。想对 uReplicator 有更多了解，可以参考官方博客：<a href="https://www.uber.com/blog/ureplicator-apache-kafka-replicator/">uReplicator: Uber Engineering’s Robust Apache Kafka Replicator</a>。</p> 
+<h3>
+<a id="ConfluentReplicator_209"></a>Confluent的Replicator</h3> 
+<p>Confluent Replicator 允许您轻松可靠地将主题从一个 Kafka 集群复制到另一个集群。除了复制消息外，Replicator 还会根据需要创建主题，保留源集群中的主题配置。这包括保留分区数、复制因子以及为单个主题指定的任何配置覆盖。和 MirrorMaker 类似，Confluent Replicator 也依赖于 Connect 框架，并可以在 Connect 集群中运行。</p> 
+<p>Confluent Replicator 支持各种拓扑的数据复制以及消费者偏移量和 Topic 配置信息的迁移，但与 MirrorMaker2 不同，Confluent Replicator 不支持 ACL 迁移；并且 Replicator 不使用远程 Topic 避免循环复制，而是使用来源头来避免循环复制。同时 Replicator 提供一系列指标，比如复制延迟，还可以通过 REST API 或者控制台 UI 来监控这些指标。</p> 
+<p><img src="https://images2.imgbox.com/63/63/sWv4Pywj_o.png" alt="12.png"></p> 
+<h3>
+<a id="ConfluentCluster_Linker_217"></a>Confluent的Cluster Linker</h3> 
+<p>Confluent 的 Cluster Linker 可以使能够直接将集群和镜像 Topic 从一个集群连接到另一个集群。Cluster Linker 使构建多数据中心、多区域和混合云部署变得更为容易。它是安全的，高性能的，容忍网络延迟，并内置于 Confluent 服务器和 Confluent 云。通过 Cluster Linker，可以实现多区域高可用性，同时可以支持灾难恢复、全局复制、数据共享以及集群迁移等需求。</p> 
+<p>与 Replicator 和 MirrorMaker 2不同，集群链接不需要运行 Connector 来将消息从一个集群移动到另一个集群，并且它创建具有全局一致偏移量的相同的“镜像主题”。源主题上的消息精确地镜像到目标集群上，在相同的分区和偏移量上。镜像主题中不会出现与源主题所包含内容相关的重复记录。</p> 
+<p><img src="https://images2.imgbox.com/d2/ad/DsTxKCnw_o.png" alt="13.png"></p> 
+<p>Cluster Linker 将 Topic 副本复制协议用在了集群复制上，可以跨集群进行带消费 Offset 迁移的数据复制，不需要进行 Offset 转换。Topic 配置信息、分区、消费者 Offset 和 ACL 都可以在两个集群直接同步，以便在发生灾难时实现低 RTO 的故障转移。目标集群上镜像 Topic 的 Leader 分区从对应的源 Leader 那里获取分区数据，目标集群上镜像 Topic 的 Follower 使用 Kafka 标准的 Replication 机制从本地 Leader 那里复制数据。目标集群的镜像 Topic 会被定义成只读，防止本地生产者将数据生产到这些主题。</p> 
+<p>Cluster Linker 比 MM2 或 Replicator 优势的地方在于，不需要维护一个 Connector 集群，并且比外部工具更高效，避免了 Connector 集群镜像数据时需要解压缩和再压缩，同时 Cluster Linker 可用于网络不可靠且高延迟的数据中心，它只在数据中心之间复制一次数据，减少了跨数据中心的流量。但 Cluster Linker 没有类似 MM2 的镜像配置选项，缺少镜像配置的灵活性。同时，如果发生了故障转移，需要重启客户端，将网络连接到目标集群上。Cluster Linker 一般适用于迁移集群和需要共享主题的场景。</p> 
+<h3>
+<a id="ConfluentMultiRegion_Cluster_229"></a>Confluent的Multi-Region Cluster</h3> 
+<p>Confluent 的 Multi-Region Cluster（以下简称MRC）适用于延迟在50ms以内的数据中心，它同步组合了同步复制和异步复制，以此来降低对生产者性能的影响，并能提供给更高的网络容错性。</p> 
+<p>Confluent Server 通常跨可用性区域或附近的数据中心运行。如果跨可用性区域或附近数据中心的代理之间的计算机网络在可靠性、延迟、带宽或成本方面不同，这可能会导致更高的延迟、更低的吞吐量以及生产和使用消息的成本增加。</p> 
+<p>为了缓解这种情况，Confluent Server 添加两个增强的能力：</p> 
+<ul>
+<li> <p><strong><strong>Follower-Fetching</strong></strong>：Kafka 允许客户端从 Follower 副本读取数据，客户端可以根据机架 ID 从最近的 Broker 获取数据，从而减少了跨数据中心的流量。</p> </li>
+<li> <p><strong><strong>Observers</strong></strong>：社区 Kafka 有两种类型的副本，Leader 和 Follower。Multi-Region Cluster 引入了第三种类型的副本，观察者。默认情况下，观察者不会加入同步副本 (ISR)，但会像 Follower 一样努力跟上 Leader 的步伐。通过 Follower 获取，客户也可以从 Observer 那里消费。通过不加入 ISR，Observer 使操作员能够异步复制数据。在 Confluent Server 中，主题分区的高水位线不会增加，直到 ISR 的所有成员都确认他们已经复制了一条消息。使用的客户端 <code>acks=all</code> 可能会遇到吞吐量问题，尤其是在涉及跨数据中心的高延迟、低带宽网络时。使用Observer，可以定义在一个区域内同步复制数据但在区域之间异步复制数据的 Topic。默认情况下，这些 Observer不加入 ISR，因此它们不会影响排除消息的吞吐量和延迟，因为主题分区 Leader 在向生产者确认请求之前不需要等待它们被复制到 Observer。<br> Confluent Server支持自动观察者提升(<em><strong>Automatic Observer Promotion</strong></em>)，可以自动将 Observer 提升到同步副本列表 (ISR) 中。这在某些降级情况下可能是很有用的。例如，如果分区的 ISR 数量小于 min.insync.replicas 的值，那么该分区通常会不可用。通过自动观察者提升，一个或多个 Observer 可以取代 ISR 中的 Follower，保持分区在线，直到不可用的 Follower 恢复。一旦 Follower 被恢复（他们被赶上并重新加入 ISR），观察者就会自动从 ISR 中降级。</p> </li>
+</ul> 
+<h2>
+<a id="_242"></a>总结</h2> 
+<p>本文介绍了 Kafka 跨数据中心的两种部署方式，简要分析了两种方式下的不同架构以及优缺点，对这些架构可能碰到的问题也提供了一些解决思路；同时也说明了 Kafka 跨数据中心部署的社区解决方案和商业化解决方案。</p> 
+<p>随着数据中心故障的不可避免，作为核心数据链路中的 Kafka 的高可用也得到更多的重视。Kafka 跨数据中心部署方式中，Stretched Cluster 采用同步的方式复制数据，RTO&amp;RPO 是0；Connected Cluster 采用异步的方式复制数据，RTO&amp;RPO 一般大于0。如果自建 Connected Cluster，那么需要做好故障切换的演练。大家可以根据实际场景需求来选择相应的部署架构，一种场景并不见得只有一种解决方案架构能满足。或者为了省心，可以在腾讯云上直接选择 Ckafka。</p> 
+<p>腾讯云 CKafka 在公有云上也提供跨可用区集群的产品化能力，支持 Streched Cluster 2.5AZ 和 Streched Cluster3AZ 两种部署架构；也支持 Connected Cluster，支持多个集群直接互相复制，支持多种复制拓扑。已经有众多的大客户在云上选择了 Ckafka。</p> 
+<p>因篇幅有限，本文在部分方案细节上并未深入展开，欢迎随时联系交流。</p> 
+<h2>
+<a id="_252"></a>参考资料</h2> 
+<p><a href="https://docs.confluent.io/platform/current/multi-dc-deployments/multi-region-architectures.html">https://docs.confluent.io/platform/current/multi-dc-deployments/multi-region-architectures.html</a></p> 
+<p><a href="https://www.confluent.io/blog/multi-geo-replication-in-apache-kafka/">https://www.confluent.io/blog/multi-geo-replication-in-apache-kafka/</a></p> 
+<p><a href="https://kafka.apache.org/documentation/">https://kafka.apache.org/documentation/</a></p> 
+<p><a href="https://www.confluent.io/resources/kafka-the-definitive-guide-v2/">https://www.confluent.io/resources/kafka-the-definitive-guide-v2/</a></p> 
+<p><a href="https://cloud.tencent.com/document/product/597/52786">https://cloud.tencent.com/document/product/597/52786</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

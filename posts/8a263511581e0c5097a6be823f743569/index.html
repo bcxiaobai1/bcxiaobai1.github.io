@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>人脸识别 (5) 基于MCTNN人脸检测（Pytorch） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">人脸识别 (5) 基于MCTNN人脸检测（Pytorch）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>参考：<a href="https://github.com/faciallab/FaceDetector/blob/master/tutorial/detect_step_by_step.ipynb" title="FaceDetector/detect_step_by_step.ipynb at master · faciallab/FaceDetector · GitHub">FaceDetector/detect_step_by_step.ipynb at master · faciallab/FaceDetector · GitHub</a></p> 
+<p>中文翻译：<a href="https://zhuanlan.zhihu.com/p/60199964" title="从零开始搭建人脸识别系统（一）MTCNN - 知乎">从零开始搭建人脸识别系统（一）MTCNN - 知乎</a></p> 
+<h1>1、网络结构</h1> 
+<p>mtcnn 算法人脸检测过程分为三个独立的stage，每一个stage对应一个卷积网络，分别为pnet，rnet，onet。网络结构如图所示。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/f1/de/zymWl6zD_o.png"></p> 
+<p>mtcnn三个网络的结构都相对简单，整个网络只包含3*3和2*2的卷积层、2*2的MaxPooling层、Prelu层和全连接层，网络结构比较简单。mtcnn采用级联网络的思想，pnet-&gt;rnet-&gt;onet网络结构更加复杂，每个网络采用多任务学习分别进行训练。</p> 
+<h1>2、构造网络的三个stages (pnet, rnet, onet)</h1> 
+<pre><code class="language-python">
+
+import os
+import numpy as np
+import mtcnn.network.mtcnn_pytorch as mtcnn
+
+pnet = mtcnn.PNet()
+rnet = mtcnn.RNet()
+onet = mtcnn.ONet()
+
+weight_folder = '../output/converted'
+
+pnet.load_caffe_model(
+    np.load(os.path.join(weight_folder, 'pnet.npy'))[()])
+rnet.load_caffe_model(
+    np.load(os.path.join(weight_folder, 'rnet.npy'))[()])
+onet.load_caffe_model(
+    np.load(os.path.join(weight_folder, 'onet.npy'))[()])
+
+</code></pre> 
+<h1> 3、三个子网络的实际作用是什么？</h1> 
+<p>首先我们构建 一个虚拟图片，看看这个图片经过三个网络后会什么样子？</p> 
+<h2>3.1 Pnet</h2> 
+<pre><code class="language-python">import torch
+print("Given ten images with shape (500 * 500).")
+pnet_data = torch.randn(10, 3, 500, 500)
+ret1, ret2, _ = pnet(pnet_data)
+print("Pnet output: ntTensor shape of ret1 is %s.ntTensor shape of ret2 is %s.n" % (ret1.shape, ret2.shape))
+print("Where does '245' come from?")
+print("245 = (500-2)/2-2-2 .nApply 'minus 2' every Conv layer with kernel 3*3. Apply 'divide 2' every max-pooling layer with kenel 2.")</code></pre> 
+<pre>给定图片大小是 (500 * 500).
+Pnet 输出: 
+	张量ret1的维度是torch.Size([10, 2, 245, 245]).
+	张量ret2的维度是torch.Size([10, 4, 245, 245]).
+
+这个 '245'怎么来的呢？
+245 = (500-2)/2-2-2 .
+Apply 'minus 2' every Conv layer with kernel 3*3. Apply 'divide 2' every max-pooling layer with kenel 2.
+</pre> 
+<p>每个卷积层（3*3）减2（每次卷积减少2个像素），每个池化层（核为2）除以2，一共三个卷积层一个池化层。</p> 
+<blockquote> 
+ <p>Pnet只有卷积层和relu层没有最后的全连接层，输入一张500*500的图片，输出分别是2*245*245，4*245*245 的feature map。245是怎么来的呢，我们知道<strong>原始图片没经过一个n*n的卷积层，输出维度都会减少n-1</strong>，<strong>每经过一个n*n的pooling 层输出维度都会减少n倍</strong>。Pnet的网络结构为 conv33-&gt;pooling22-&gt;conv33-&gt;conv33-&gt;conv11，所以最终输出维度为(500-2)/2-2-2 = 245。</p> 
+ <p>由于是多任务学习Pnet输出的<strong>第一个feature map为分类结果（该feature map像素点对应的原图像12*12的区域是否包含人脸的分类结果）</strong>，所以channel的值为2。<strong>第二个feature map对应于bounding box左上定点坐标和右下定点坐标的偏移量</strong>。与RPN的思想基本相同，避免了使用滑动窗口多次经过网络计算。此网络的作用是产生候选框，保证召回率，减少onet，rnet的计算量。</p> 
+ <p>rnet、onet与pnet不同，由于最后存在全连接层，只能输入固定大小的图像。<strong>同样输出分类结果和人脸框坐标回归值</strong>，<strong>onet完成最后的人脸5个关键点的坐标预测任务</strong>。</p> 
+ <p></p> 
+</blockquote> 
+<h2>3.2 Rnet</h2> 
+<pre><code class="language-python">rnet_data = torch.randn(10, 3, 24, 24)
+print("The input tensor of Rnet must be with shape (24 * 24)")
+ret1, ret2, _ = rnet(rnet_data)
+print("Rnet output: ntTensor shape of ret1 is %s.ntTensor shape of ret2 is %s.n" % (ret1.shape, ret2.shape))</code></pre> 
+<p>Rnet输入张量维度必须是(24 * 24)<br> Rnet 输出:<br> Tensor shape of ret1 is torch.Size([10, 2]). <strong>分类结果</strong><br> Tensor shape of ret2 is torch.Size([10, 4]). <strong>坐标回归值</strong></p> 
+<h2>
+<br> 3.3 Onet</h2> 
+<pre><code class="language-python">onet_data = torch.randn(10, 3, 48, 48)
+print("The input tensor of Rnet must be with shape (48 * 48)")
+ret1, ret2, ret3 = onet(onet_data)
+print("Rnet output: ntTensor shape of ret1 is %s.ntTensor shape of ret2 is %s.ntTensor shape of ret3 is %s." % (ret1.shape, ret2.shape, ret3.shape))
+
+
+
+</code></pre> 
+<pre>Onet的输入维度是 (48 * 48)
+Onet输出: 
+	Tensor shape of ret1 is torch.Size([10, 2]).<strong>  分类结果</strong>
+	Tensor shape of ret2 is torch.Size([10, 4]).<strong>  坐标回归值</strong>
+	Tensor shape of ret3 is torch.Size([10, 10]). <strong>五个关键点</strong>坐标
+</pre> 
+<h1>4、真实照片测试</h1> 
+<pre><code class="language-python">import matplotlib.pyplot as plt
+from PIL import Image
+import numpy as np
+
+img = Image.open('../tests/asset/images/office5.jpg')
+img_array = np.asarray(img)
+plt.imshow(img_array)
+plt.show()</code></pre> 
+<p><img alt="" height="252" src="https://images2.imgbox.com/c0/1d/m48bwYYf_o.png" width="340"></p> 
+<h2> 4.1 图像金字塔</h2> 
+<p>由于我们的pnet只能生成12*12大小的候选框，不能满足任意大小的人脸检测，所以我们使用原作者称为图像金字塔的方法解决这个问题。比如我们将图像缩小一倍，那么12*12的框就对应于原图像24*24的框。</p> 
+<pre><code class="language-python">import math
+
+minsize = 12
+factor = 0.707
+
+width = img.size[0]
+height = img.size[1]
+
+# Compute valid scales
+scales = []
+cur_width = width
+cur_height = height
+cur_factor = 1
+while cur_width &gt;= minsize and cur_height &gt;= minsize:
+    # ensure width and height are even
+    w = cur_width
+    h = cur_height
+    scales.append((w, h, cur_factor))
+
+    cur_factor *= factor
+    cur_width = math.ceil(cur_width * factor)
+    cur_height = math.ceil(cur_height * factor)
+    
+# Resize the image
+img_pyramid = img_array.copy()
+pyramid_list = []
+for w, h, f in scales:
+    im = img.resize((w, h), Image.BILINEAR)
+    im = np.asarray(im)
+    img_pyramid[0:h, 0:w] = im
+    pyramid_list.append(im)
+    
+plt.imshow(img_pyramid)
+plt.show() </code></pre> 
+<p><img alt="" height="252" src="https://images2.imgbox.com/22/27/YYK64g1C_o.png" width="340"></p> 
+<h2>4.2 For each resized image in pyramid, pass it into pnet and get classification feature map and bounding box regression feature map.</h2> 
+<pre><code class="language-python">def preprocess(img):
+    """
+    Convert image from NDArray to torch.FloatTensor. 
+    """
+    img = img.transpose(2, 0, 1)
+    img = torch.FloatTensor(img)
+    # The input of pnet must be normalized.
+    img = (img - 127.5) * 0.0078125
+    img = torch.unsqueeze(img, 0)
+    return img
+    
+for (w, h, f), im in zip(scales, pyramid_list):
+    im = preprocess(im)
+    p_distribution, box_regs, _ = pnet(im)
+    score = p_distribution[:, 1]
+    
+    print("Input shape: %s.nt--&gt;Score shape %s.nt--&gt;Box regression shpae %s.n" % (im.shape, score.shape, box_regs.shape))
+</code></pre> 
+<p>执行结果</p> 
+<blockquote> 
+ <pre>Input shape: torch.Size([1, 3, 375, 500]).
+	--&gt;Score shape torch.Size([1, 183, 245]).
+	--&gt;Box regression shpae torch.Size([1, 4, 183, 245]).
+
+Input shape: torch.Size([1, 3, 266, 354]).
+	--&gt;Score shape torch.Size([1, 128, 172]).
+	--&gt;Box regression shpae torch.Size([1, 4, 128, 172]).
+
+Input shape: torch.Size([1, 3, 189, 251]).
+	--&gt;Score shape torch.Size([1, 90, 121]).
+	--&gt;Box regression shpae torch.Size([1, 4, 90, 121]).
+
+Input shape: torch.Size([1, 3, 134, 178]).
+	--&gt;Score shape torch.Size([1, 62, 84]).
+	--&gt;Box regression shpae torch.Size([1, 4, 62, 84]).
+
+Input shape: torch.Size([1, 3, 95, 126]).
+	--&gt;Score shape torch.Size([1, 43, 58]).
+	--&gt;Box regression shpae torch.Size([1, 4, 43, 58]).
+
+Input shape: torch.Size([1, 3, 68, 90]).
+	--&gt;Score shape torch.Size([1, 29, 40]).
+	--&gt;Box regression shpae torch.Size([1, 4, 29, 40]).
+
+Input shape: torch.Size([1, 3, 49, 64]).
+	--&gt;Score shape torch.Size([1, 20, 27]).
+	--&gt;Box regression shpae torch.Size([1, 4, 20, 27]).
+
+Input shape: torch.Size([1, 3, 35, 46]).
+	--&gt;Score shape torch.Size([1, 13, 18]).
+	--&gt;Box regression shpae torch.Size([1, 4, 13, 18]).
+
+Input shape: torch.Size([1, 3, 25, 33]).
+	--&gt;Score shape torch.Size([1, 8, 12]).
+	--&gt;Box regression shpae torch.Size([1, 4, 8, 12]).
+
+Input shape: torch.Size([1, 3, 18, 24]).
+	--&gt;Score shape torch.Size([1, 4, 7]).
+	--&gt;Box regression shpae torch.Size([1, 4, 4, 7]).
+
+Input shape: torch.Size([1, 3, 13, 17]).
+	--&gt;Score shape torch.Size([1, 2, 4]).
+	--&gt;Box regression shpae torch.Size([1, 4, 2, 4]).</pre> 
+</blockquote> 
+<h2> 4.3 特征如何映射到原始图片中的位置？以金字塔第五个图片为例</h2> 
+<pre><code class="language-python">import matplotlib.patches as patches
+w, h, f = scales[5]
+im = pyramid_list[5].copy()
+
+# Create figure and axes
+fig, ax = plt.subplots(1)
+
+# Display the image
+ax.imshow(im)
+
+# Create a Rectangle patch
+rect = patches.Rectangle((0,0),12,12,linewidth=1,edgecolor='r',facecolor='none')
+# Add the patch to the Axes
+ax.add_patch(rect)
+
+# Create a Rectangle patch
+rect = patches.Rectangle((51,51),12,12,linewidth=1,edgecolor='b',facecolor='none')
+# Add the patch to the Axes
+ax.add_patch(rect)
+
+plt.imshow(im)
+plt.show()
+
+print("We caculate Correspondence by this fomula: ntx1 = x1_map * 2 + 1, nty1 = y1_map * 2 + 1, ntx2 = x1_map * 2 + 1 + 12, nty2 = y2_map * 2 + 1 + 12.")
+print("So the axis of Red box in original image is (1, 1, 13, 13), which Correspond to (0, 0) in feature map.")
+print("The axis of blue box in original image is (51, 51, 63, 63), which correspond to (25, 25) in feature map.mro")</code></pre> 
+<p><img alt="" height="252" src="https://images2.imgbox.com/dc/5d/gLlVAdjO_o.png" width="325"></p> 
+<pre>We caculate Correspondence by this fomula: 
+	x1 = x1_map * 2 + 1, 
+	y1 = y1_map * 2 + 1, 
+	x2 = x1_map * 2 + 1 + 12, 
+	y2 = y2_map * 2 + 1 + 12.
+Red box在原图中位置为(1, 1, 13, 13),特征图上位置为 (0, 0).
+blue box在原图中位置为(51, 51, 63, 63), 特征图上位置为 (25, 25)</pre> 
+<h2> 4.4 通过pnet计算feature map，并建立feature map中每一个正样本点到原始图片区域的映射关系</h2> 
+<pre><code class="language-python">def generate_bboxes(probs, offsets, scale, threshold):
+        """Generate bounding boxes at places
+        where there is probably a face.
+
+        Arguments:
+            probs: a FloatTensor of shape [1, 2, n, m].
+            offsets: a FloatTensor array of shape [1, 4, n, m].
+            scale: a float number,
+                width and height of the image were scaled by this number.
+            threshold: a float number.
+
+        Returns:
+            boxes: LongTensor with shape [x, 4].
+            score: FloatTensor with shape [x].
+        """
+
+        # applying P-Net is equivalent, in some sense, to
+        # moving 12x12 window with stride 2
+        stride = 2
+        cell_size = 12
+
+        # extract positive probability and resize it as [n, m] dim tensor.
+        probs = probs[0, 1, :, :]
+
+        # indices of boxes where there is probably a face
+        inds = (probs &gt; threshold).nonzero()
+
+        if inds.shape[0] == 0:
+            return torch.empty((0, 4), dtype=torch.int32), torch.empty(0, dtype=torch.float32), torch.empty((0, 4), dtype=torch.float32)
+
+        # transformations of bounding boxes
+        tx1, ty1, tx2, ty2 = [offsets[0, i, inds[:, 0], inds[:, 1]]
+                              for i in range(4)]
+        # they are defined as:
+        # w = x2 - x1 + 1
+        # h = y2 - y1 + 1
+        # x1_true = x1 + tx1*w
+        # x2_true = x2 + tx2*w
+        # y1_true = y1 + ty1*h
+        # y2_true = y2 + ty2*h
+
+        offsets = torch.stack([tx1, ty1, tx2, ty2], 1)
+        score = probs[inds[:, 0], inds[:, 1]]
+
+        # P-Net is applied to scaled images
+        # so we need to rescale bounding boxes back
+        bounding_boxes = torch.stack([
+            stride*inds[:, 1] + 1.0,
+            stride*inds[:, 0] + 1.0,
+            stride*inds[:, 1] + 1.0 + cell_size,
+            (stride*inds[:, 0] + 1.0 + cell_size),
+        ], 0).transpose(0, 1).float()
+
+        bounding_boxes = torch.round(bounding_boxes / scale).int()
+        return bounding_boxes, score, offsets
+    
+candidate_boxes = torch.empty((0, 4), dtype=torch.int32)
+candidate_scores = torch.empty((0))
+candidate_offsets = torch.empty((0, 4), dtype=torch.float32)
+    
+for (w, h, f), im in zip(scales, pyramid_list):
+    im = preprocess(im)
+    p_distribution, box_regs, _ = pnet(im)
+    
+    # we set filter threshold 0.6 here
+    candidate, scores, offsets = generate_bboxes(p_distribution, box_regs, f, 0.6)
+    candidate_boxes = torch.cat([candidate_boxes, candidate])
+    candidate_scores = torch.cat([candidate_scores, scores])
+    candidate_offsets = torch.cat([candidate_offsets, offsets])</code></pre> 
+<p>显示pnet给出的候选框</p> 
+<pre><code class="language-python">img_origin = img_array.copy()
+
+def show_boxes(img, boxes):
+    
+    # Create figure and axes
+    fig, ax = plt.subplots(1)
+
+    # Display the image
+    ax.imshow(img)
+    for box in boxes:
+        # Create a Rectangle patch
+        rect = patches.Rectangle((box[0],box[1]),box[2]-box[0],box[3]-box[1],linewidth=1,edgecolor='r',facecolor='none')
+        # Add the patch to the Axes
+        ax.add_patch(rect)
+
+    plt.show()
+    
+show_boxes(img_origin, candidate_boxes)
+print("It seems that there are many boxes around regions with face. Pretty good!")
+print("There are olso many redundant box here and the axis is olso inaccurate. Don't worry about it.")</code></pre> 
+<p> <img alt="" height="252" src="https://images2.imgbox.com/a3/77/wER0CLXn_o.png" width="340"></p> 
+<p> 候选框很多而且不是很准对不对，没关系，上面说了第一阶段网络只保证召回率就可以了。接下来我们需要使用box regression的回归值对坐标形状位置进行调整。并进行nms(非极大抑制)操作过滤重合度过高的候选框。最后将候选框重新refine为正方形（防止进入下一层网络进行resize操作时图像变形）</p> 
+<h2>4.4 Accurately adjust coordinates，nms and re-convert boxes to square.</h2> 
+<pre><code class="language-python">def calibrate_box(bboxes, offsets):
+    """Transform bounding boxes to be more like true bounding boxes.
+    'offsets' is one of the outputs of the nets.
+
+    Arguments:
+        bboxes: a IntTensor of shape [n, 4].
+        offsets: a IntTensor of shape [n, 4].
+
+    Returns:
+        a IntTensor of shape [n, 4].
+    """
+    x1, y1, x2, y2 = [bboxes[:, i] for i in range(4)]
+    w = x2 - x1 + 1.0
+    h = y2 - y1 + 1.0
+    w = torch.unsqueeze(w, 1)
+    h = torch.unsqueeze(h, 1)
+
+    translation = torch.cat([w, h, w, h], 1).float() * offsets
+    bboxes += torch.round(translation).int()
+    return bboxes
+
+def convert_to_square(bboxes):
+    """Convert bounding boxes to a square form.
+
+    Arguments:
+        bboxes: a IntTensor of shape [n, 4].
+
+    Returns:
+        a IntTensor of shape [n, 4],
+            squared bounding boxes.
+    """
+
+    square_bboxes = torch.zeros_like(bboxes, dtype=torch.float32)
+    x1, y1, x2, y2 = [bboxes[:, i].float() for i in range(4)]
+    h = y2 - y1 + 1.0
+    w = x2 - x1 + 1.0
+    max_side = torch.max(h, w)
+    square_bboxes[:, 0] = x1 + w*0.5 - max_side*0.5
+    square_bboxes[:, 1] = y1 + h*0.5 - max_side*0.5
+    square_bboxes[:, 2] = square_bboxes[:, 0] + max_side - 1.0
+    square_bboxes[:, 3] = square_bboxes[:, 1] + max_side - 1.0
+
+    square_bboxes = torch.ceil(square_bboxes + 1).int()
+    return square_bboxes
+
+def refine_boxes(bboxes, w, h):
+    """
+    Avoid coordinates beyond image size
+    """
+
+    bboxes = torch.max(torch.zeros_like(bboxes), bboxes)
+    sizes = torch.IntTensor([[w, h, w, h]] * bboxes.shape[0])
+    bboxes = torch.min(bboxes, sizes)
+    return bboxes
+
+def nms(dets, scores, thresh, mode="Union"):
+    """
+    greedily select boxes with high confidence
+    keep boxes overlap &lt;= thresh
+    rule out overlap &gt; thresh
+    :param dets: [[x1, y1, x2, y2 score]]
+    :param thresh: retain overlap &lt;= thresh
+    :return: indexes to keep
+    """
+    x1 = dets[:, 0]
+    y1 = dets[:, 1]
+    x2 = dets[:, 2]
+    y2 = dets[:, 3]
+    scores = scores
+
+    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+    order = scores.argsort()[::-1]
+
+    keep = []
+    while order.size &gt; 0:
+        i = order[0]
+        keep.append(i)
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+
+        w = np.maximum(0.0, xx2 - xx1 + 1)
+        h = np.maximum(0.0, yy2 - yy1 + 1)
+        inter = w * h
+        if mode == "Union":
+            ovr = inter / (areas[i] + areas[order[1:]] - inter)
+        elif mode == "Minimum":
+            ovr = inter / np.minimum(areas[i], areas[order[1:]])
+
+        inds = np.where(ovr &lt;= thresh)[0]
+        order = order[inds + 1]
+
+    return np.array(keep)
+</code></pre> 
+<pre><code class="language-python">
+
+candidate_boxes = calibrate_box(candidate_boxes, candidate_offsets)
+candidate_boxes = convert_to_square(candidate_boxes)
+candidate_boxes = refine_boxes(candidate_boxes, width, height)
+keep = nms(candidate_boxes.cpu().detach().numpy(), candidate_scores.cpu().detach().numpy(), 0.7)
+candidate_boxes = candidate_boxes[keep]
+show_boxes(img_array.copy(), candidate_boxes)
+
+</code></pre> 
+<p><img alt="" height="252" src="https://images2.imgbox.com/a3/9e/nPhBvPmq_o.png" width="340"></p> 
+<h1> 5、Stage 2 Rnet</h1> 
+<p>对pnet所有输出的候选框进行resize操作，全部变成24*24的大小，送入rnet网络进行分类，并预测框坐标回归值。与pnet一样，做坐标调整、nms、重新调整为正方形的操作。</p> 
+<pre><code class="language-python">boxes = candidate_boxes
+# Step one: crop and resize the images and pre-process them.
+stage_two_imgs = []
+for box in boxes:
+    im = img_array[box[1]: box[3], box[0]: box[2]]
+    im = Image.fromarray(im)
+    im = im.resize((24, 24), Image.BILINEAR)
+    im = np.asarray(im)
+    im = preprocess(im)
+    stage_two_imgs.append(im)
+    
+stage_two_imgs = torch.cat(stage_two_imgs)
+
+# Step two: filter the boxes by scores given by rnet
+p_distribution, box_regs, _ = rnet(stage_two_imgs)  # rnet forward pass
+scores = p_distribution[:, 1]
+mask = (scores &gt;= 0.7)
+boxes = boxes[mask]
+box_regs = box_regs[mask]
+scores = scores[mask]
+
+boxes = calibrate_box(boxes, box_regs)
+boxes = convert_to_square(boxes)
+boxes = refine_boxes(boxes, width, height)
+
+# nms
+keep = nms(boxes.cpu().detach().numpy(), scores.cpu().detach().numpy(), 0.7)
+boxes = boxes[keep]</code></pre> 
+<blockquote> 
+ <pre>show_boxes(img_array.copy(), boxes)</pre> 
+</blockquote> 
+<p><img alt="" height="252" src="https://images2.imgbox.com/e6/60/xHtVrDgB_o.png" width="340"> </p> 
+<h1> 6、Stage 3 Onet</h1> 
+<pre><code class="language-python">
+
+# Step one: crop and resize the images and pre-process them.
+stage_three_imgs = []
+for box in boxes:
+    im = img_array[box[1]: box[3], box[0]: box[2]]
+    im = Image.fromarray(im)
+    im = im.resize((48, 48), Image.BILINEAR)
+    im = np.asarray(im)
+    im = preprocess(im)
+    stage_three_imgs.append(im)
+    
+stage_two_imgs = torch.cat(stage_three_imgs)
+
+# Step two: filter the boxes by scores given by rnet
+p_distribution, box_regs, _ = onet(stage_two_imgs)  # rnet forward pass
+scores = p_distribution[:, 1]
+mask = (scores &gt;= 0.6)
+boxes = boxes[mask]
+box_regs = box_regs[mask]
+scores = scores[mask]
+
+boxes = calibrate_box(boxes, box_regs)
+boxes = refine_boxes(boxes, width, height)
+
+# nms
+keep = nms(boxes.cpu().detach().numpy(), scores.cpu().detach().numpy(), 0.3)
+boxes = boxes[keep]
+
+</code></pre> 
+<blockquote> 
+ <p> </p> 
+ <pre>show_boxes(img_array.copy(), boxes)</pre> 
+</blockquote> 
+<p><img alt="" height="252" src="https://images2.imgbox.com/a6/9d/UyhvA1Fc_o.png" width="340"> </p> 
+<p> </p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

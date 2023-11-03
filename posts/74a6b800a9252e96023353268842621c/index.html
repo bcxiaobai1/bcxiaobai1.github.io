@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>开源堡垒机Guacamole二次开发记录之二 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">开源堡垒机Guacamole二次开发记录之二</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>这篇主要记录录屏和SFTP的实现。</p> 
+<h1>录屏及视频播放</h1> 
+<p>对于录屏及录屏的播放，因为我们的项目中需要把guacd和java后端分开两台服务器部署，而guacamole的录屏是通过guacd程序录制的。我的要求是在Java后端直接把录好的视频文件通过http前端播放，因此需要把录屏放在Java端的服务器上。 </p> 
+<p>首先稍微修改一下guacamole-common的源码，添加几个可重载的函数，分别是向前端下发ws消息，向guacd上传前端消息以及ws连接关闭的地方。</p> 
+<p>GuacamoleWebSocketTunnelEndpoint类的onMessage函数中，添加receiveData(message);</p> 
+<pre><code class="language-java">try {
+            // Write received message
+            writer.write(message.toCharArray());
+            receiveData(message);
+        }
+        catch (GuacamoleConnectionClosedException e) {
+            logger.debug("Connection to guacd closed.", e);
+        }
+        catch (GuacamoleException e) {
+            logger.debug("WebSocket tunnel write failed.", e);
+        }
+
+        tunnel.releaseWriter();</code></pre> 
+<p>onClose函数中添加closeConnect函数调用。</p> 
+<pre><code class="language-java">public void onClose(Session session, CloseReason closeReason) {
+        try {
+            if (tunnel != null)
+                tunnel.close();
+            closeConnect();
+        }
+        catch (GuacamoleException e) {
+            logger.debug("Unable to close WebSocket tunnel.", e);
+        }
+    }</code></pre> 
+<p>定义两个可重载的函数</p> 
+<pre><code class="language-java">protected void receiveData(String message) {
+        //logger.info("GuacamoleWebSocketTunnelEndpoint-receiveData");
+    }
+
+    protected void closeConnect() {
+        //logger.info("GuacamoleWebSocketTunnelEndpoint-receiveData");
+    }</code></pre> 
+<p>在Java工程的WebSocketTunnel类中重载函数</p> 
+<p>receiveData函数用于记录鼠标键盘事件</p> 
+<pre><code class="language-java">@Override
+    protected void receiveData(String message)  {
+        //logger.info("WebSocketTunnel-receiveData : " + message);
+//        try {
+//            userConnectLogEntity.getBufferedWriter2().write(message);
+//            userConnectLogEntity.getBufferedWriter2().newLine();
+//            userConnectLogEntity.getBufferedWriter2().flush();
+//        } catch (IOException e) {
+//            throw new RuntimeException(e);
+//        }
+    }</code></pre> 
+<p>sendInstruction函数，对将要发送给前端的报文进行拦截处理，重点是最后的几行，把报文记录在一个文件中。</p> 
+<pre><code class="language-java">Override
+    protected void sendInstruction(String instruction) throws IOException {
+        if(instruction.startsWith("0.,36.")) {
+            uuid = instruction.substring(6, instruction.length()-1);
+            System.out.println("uuid: "+uuid);
+
+            TunnelStream tunnelStream = new TunnelStream();
+            tunnelStream.setWebSocketTunnel(this);
+            tunnelStream.setEnd(false);
+            tunnelStream.setBuffer(null);
+            streamMap.tunnelStreamMap.put(uuid, tunnelStream);
+            streamMap.tunnelStreamMap.get(uuid).setOk(false);
+        }
+        else if(instruction.contains("application/octet-stream")) {
+            fileTranfer = true;
+
+            GuacamoleParser parser = new GuacamoleParser();
+
+            int parsed;
+            int offset = 0;
+            int length = instruction.toCharArray().length;
+            while (true) {
+                try {
+                    if (!((parsed = parser.append(instruction.toCharArray(), offset, length)) != 0))
+                        break;
+                }
+                catch (GuacamoleException e) {
+                    throw new RuntimeException(e);
+                }
+
+                offset += parsed;
+                length -= parsed;
+            }
+
+            GuacamoleInstruction ins = parser.next();
+            synchronized (bufferInstructions) {
+                bufferInstructions.put(ins.getArgs().get(0), ins);
+            }
+        }
+        else if(instruction.contains("17.SFTP: File opened")) {
+            streamMap.tunnelStreamMap.get(uuid).setOk(true);
+        }
+        else if(instruction.contains("8.SFTP: OK")) {
+            streamMap.tunnelStreamMap.get(uuid).setOk(true);
+        }
+        else {
+            if(fileTranfer) {
+                if(instruction.startsWith("4.blob")) {
+                    int num1 = instruction.indexOf(",");
+                    int num2 = instruction.indexOf(",", num1+1);
+                    int num3 = instruction.indexOf(".", num1+1);
+
+                    int id = Integer.parseInt(instruction.substring(num3+1, num2));
+
+                    int num4 = instruction.indexOf(".", num2+1);
+                    String str = instruction.substring(num4+1, instruction.length()-1);
+
+                    TunnelStream tunnelStream = streamMap.tunnelStreamMap.get(uuid);
+
+                    if(tunnelStream != null) {
+                        synchronized(streamMap) {
+                            streamMap.tunnelStreamMap.get(uuid).setBuffer(str);
+                        }
+
+                        instruction = instruction.substring(0, num2+1) + "0.;";
+                    }
+
+                }
+                else if(instruction.startsWith("3.end")) {
+                    System.out.println("3.end");
+                    fileTranfer = false;
+
+                    TunnelStream tunnelStream = streamMap.tunnelStreamMap.get(uuid);
+
+                    synchronized(streamMap) {
+                        streamMap.tunnelStreamMap.get(uuid).setEnd(true);
+                    }
+                }
+            }
+        }
+
+        super.sendInstruction(instruction);
+        if(!instruction.startsWith("0.")) {
+            userConnectLogEntity.getBufferedWriter().write(instruction);
+        }
+    }</code></pre> 
+<p>closeConnect函数，用于ws连接断开时，记录日志，启动线程进行录屏文件的转换。sendInstruction函数中记录了下发的报文，通过调用guacenc程序把日志转换成m4v格式的视频文件。</p> 
+<pre><code class="language-java">@Override
+    protected void closeConnect() {
+        try {
+            streamMap.tunnelStreamMap.remove(uuid);
+
+            userConnectLogEntity.getBufferedWriter().flush();
+            userConnectLogEntity.getBufferedWriter().close();
+
+            userConnectLogEntity.setEtime(new Date(System.currentTimeMillis()));
+            userConnectLogEntity.setPeriod((int)(userConnectLogEntity.getEtime().getTime()-userConnectLogEntity.getStime().getTime()) / 1000);
+
+            Thread thread = new MyThread(userConnectLogEntity, userConnectLogService);
+            thread.start();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }</code></pre> 
+<p> 视频转换线程</p> 
+<pre><code class="language-java">public class MyThread extends Thread {
+        private UserConnectLogEntity userConnectLogEntity;
+        private IUserConnectLogService userConnectLogService;
+
+        public MyThread(UserConnectLogEntity userConnectLogEntity, IUserConnectLogService userConnectLogService) {
+            this.userConnectLogEntity = userConnectLogEntity;
+            this.userConnectLogService = userConnectLogService;
+        }
+
+        public void run() {
+            try {
+                String fileName = userConnectLogEntity.getVideo().substring(0, userConnectLogEntity.getVideo().length()-4);
+                String str = "guacenc -s 1024x768 -r 300000 -f " + fileName;
+                Process process = Runtime.getRuntime().exec(str);
+                process.waitFor();
+
+                logger.info("转换视频完成: " + fileName);
+            }
+            catch (Exception e) {
+                logger.error(e.getMessage(), e);
+            }
+
+            String str = userConnectLogEntity.getVideo();
+            int num1 = str.lastIndexOf(File.separator);
+            int num2 = str.lastIndexOf(File.separator, num1-1);
+            userConnectLogEntity.setVideo("/video"+str.substring(num2));
+            userConnectLogService.updateById(userConnectLogEntity);
+        }
+    }</code></pre> 
+<p> 把视频文件暴露给web端</p> 
+<pre><code class="language-java">@Configuration
+public class WebAppConfig extends WebMvcConfigurerAdapter {
+
+    @Value("${fileserver.videofolder}")
+    private String videoFolder;
+
+    @Override
+    public void addResourceHandlers(ResourceHandlerRegistry registry) {
+        registry.addResourceHandler("/video/**").addResourceLocations("file:"+videoFolder);
+        super.addResourceHandlers(registry);
+    }
+}</code></pre> 
+<p>这样视频文件直接通过web链接就可以在浏览器中播放。</p> 
+<p>另外要说明一点的是，默认的guacenc程序转换出来的视频文件在浏览器中是无法播放的，视频的内部格式不对，需要修改一下guacamole-server的源码重新编译一下。</p> 
+<p>guacamole-server-1.5.1srcguacencguacenc.c文件，121行左右，修改一下视频格式重新编译。</p> 
+<pre><code class="language-cpp">//if (guacenc_encode(path, out_path, "mpeg4", width, height, bitrate, force))
+// 修改为
+if (guacenc_encode(path, out_path, "libx264", width, height, bitrate, force))</code></pre> 
+<h1>SFTP实现</h1> 
+<p>SFTP的实现较为复杂，需要对SFTP上传下载的流程及guacamole封装的协议有较好的了解，才能实现。</p> 
+<h2>文件列表</h2> 
+<p>文件列表相对简单些，通过查看guacamole的前端代码，基本可以了解其流程，自己再按照流程重新写一下前端就行。</p> 
+<p>实现Guacamole.Client的onfilesystem的响应</p> 
+<pre><code class="language-javascript">guac.onfilesystem = function(object, name) {
+        filesystemObject = object;
+        currentPath = name;
+        listDirectory(currentPath);
+    };</code></pre> 
+<p>获取文件列表的函数 ，主要是调用filesystemObject.requestInputStream、sendAck</p> 
+<pre><code class="language-javascript">listDirectory(path) {
+	filesystemObject.requestInputStream(path, function handleStream(stream, mimetype) {
+		// Ignore stream if mimetype is wrong
+		if (mimetype !== Guacamole.Object.STREAM_INDEX_MIMETYPE) {
+			stream.sendAck('Unexpected mimetype', Guacamole.Status.Code.UNSUPPORTED);
+			return;
+		}
+
+		currentPath = path;
+		let exchangePath = path.replace(/^//,'')
+		folders = exchangePath.length ? exchangePath.split('/') : []
+		paths = []
+		folders.reduce((tmp, item, index) =&gt; {
+			let path = tmp+"/"+item
+			let obj = {
+				path: path,
+				folder: item
+			}
+			paths.push(obj)
+			return path }, "")
+		// Signal server that data is ready to be received
+		stream.sendAck('Ready', Guacamole.Status.Code.SUCCESS);
+
+		// Read stream as JSON
+		let reader = new Guacamole.JSONReader(stream);
+
+		// Acknowledge received JSON blobs
+		reader.onprogress = function onprogress() {
+			stream.sendAck("Received", Guacamole.Status.Code.SUCCESS);
+		};
+
+		// Reset contents of directory
+		reader.onend = function jsonReady() {
+			fileList = []
+			// For each received stream name
+			var mimetypes = reader.getJSON();
+
+			for (var name in mimetypes) {
+				if (name.substring(0, path.length) !== path){
+					continue;
+				}
+
+				var filename = name.substring(path.length);
+				if(path.substring(path.length-1) != '/'){
+					filename = name.substring(path.length+1);
+				}
+
+				let one = {}
+				one.path = filename
+				if (mimetypes[name] === Guacamole.Object.STREAM_INDEX_MIMETYPE) {
+					one.type="folder"
+				}
+				else {
+					one.type="file"
+				}
+				one.fullpath = name
+				fileList.push(one)
+			}
+		};
+	});
+},</code></pre> 
+<h2>上传下载</h2> 
+<p>上传下载，首先得搞清楚整体得流程，</p> 
+<p>通过wireshark抓包，可以查看guacd与java后端的通信报文，</p> 
+<p><img alt="" height="513" src="https://images2.imgbox.com/2a/0f/45grHSgJ_o.png" width="889"></p> 
+<p>通过浏览器自带的调试工具，可以查看前端和Java后端之间的websocket通信报文，</p> 
+<p><img alt="" height="320" src="https://images2.imgbox.com/cb/33/6oIJQTdi_o.png" width="606"></p> 
+<p><img alt="" height="124" src="https://images2.imgbox.com/b9/b1/v02puFQO_o.png" width="599"></p> 
+<p>通过上面两个工具的抓包分析，分析出上传下载的流程。</p> 
+<p>文件下载流程：</p> 
+<p><img alt="" height="356" src="https://images2.imgbox.com/f2/4a/wlRvzEFI_o.png" width="1084"></p> 
+<ol>
+<li>首先前端通过websocket发送3.get报文，java后端接受到后，直接发往guacd服务端；然后前端再通过http接口发送文件请求到Java端；</li>
+<li>guacd回复application/octet-stream报文给Java后端，Java后端直接向guacd端回复ack消息，不向前端转发；</li>
+<li>guacd端开始发送4.blob文件段，Java端接收到后，将4.blob报文的实际blob字段截取下来，通过WebSocket向前端回复截取后的报文，同时通过HTTP接口向前端发送实际的文件段；</li>
+<li>前端websocket接受到blob消息后，回复ack，Java端转发给guacd，guacd再发下一段文件，循环这个过程直到文件发送完毕。</li>
+<li>最后guacd端发送end报文，java端通过websocket转发给前端，整个下载过程结束。</li>
+</ol> 
+<p>文件上传流程：</p> 
+<p><img alt="" height="325" src="https://images2.imgbox.com/75/7c/M81jP0Yp_o.png" width="784"></p> 
+<ol>
+<li>前端发送put指令，Java端接收到后，直接转给guacd端</li>
+<li>guacd端回复File Opened消息通知文件已准备好，可以写入</li>
+<li>前端通过Http post 发送MultipartFile给java端，java端接收到后转发给guacd端</li>
+<li>guacd端回复SFTP OK消息</li>
+<li>前端发送下一段，循环发送直到文件发送完成，最后Java端发送end命令给guacd端</li>
+<li>guacd端回复OK消息，整个文件上传流程结束</li>
+</ol> 
+<p>下面是代码实现的大致流程：</p> 
+<p>前端下载代码，先通过filesystemObject.requestInputStream发送下载请求，再通过iframe挂一个http get请求开始下载文件，中间通过stream.onblob事件回复Ack消息，通过stream.onend事件结束下载流程</p> 
+<pre><code class="language-javascript">downloadfile(path){
+	filesystemObject.requestInputStream(path, function downloadStreamReceived(stream, mimetype) {
+		// Parse filename from string
+		var filename = path.match(/(.*[\/])?(.*)/)[2];
+		var url = '/tunnels/' + uuid + '/sessions/' + stream.index + '/files/' + filename;
+
+		// Create temporary hidden iframe to facilitate download
+		var iframe = document.createElement('iframe');
+		iframe.style.display = 'none';
+
+		// The iframe MUST be part of the DOM for the download to occur
+		document.body.appendChild(iframe);
+
+		iframe.onload = function downloadComplete() {
+			document.body.removeChild(iframe);
+		};
+
+		// Acknowledge (and ignore) any received blobs
+		stream.onblob = function acknowledgeData() {
+			stream.sendAck('OK', Guacamole.Status.Code.SUCCESS);
+		};
+
+		// Automatically remove iframe from DOM a few seconds after the stream
+		// ends, in the browser does NOT fire the "load" event for downloads
+		stream.onend = function downloadComplete() {
+			window.setTimeout(function cleanupIframe() {
+				if (iframe.parentElement) {
+					document.body.removeChild(iframe);
+				}
+			}, 5000);
+		};
+
+		// Begin download
+		iframe.src = url;
+	});
+}</code></pre> 
+<p>前端上传文件代码，file类型input的change事件响应函数。通过filesystemObject.createOutputStream发送文件上传请求，通过XMLHttpRequest post 发送文件给Java端，</p> 
+<pre><code class="language-javascript">changFile(event){
+	let file1 = event.target.files[0];
+	var stream = filesystemObject.createOutputStream(file1.type, currentPath+'/'+file1.name);
+
+	stream.onack = function beginUpload(status) {
+		if (status.isError()) {
+			return;
+		}
+	}
+
+	var fd = new FormData();
+	fd.append('file', file1);
+
+	var url = '/tunnels/' + uuid + '/sessions/' + stream.index;
+	const xhr = new XMLHttpRequest();
+	xhr.open('POST', url);
+	xhr.send(fd);
+
+	xhr.onreadystatechange = function () {
+		if (xhr.readyState === 4 &amp;&amp; xhr.status === 200) {
+			console.log('上传成功');
+			updateDirectory(currentPath);
+		}
+	}
+},</code></pre> 
+<p>接下来是java端的http接口，</p> 
+<p>下载文件接口，主要是通过ServletOutputStream向前端写文件流。文件流实际是在websocket处理函数中接收的，这儿guacamole通过消息过滤等方式实现了，比较复杂。我这儿简单粗暴的用了全局的公共变量实现，每个websocket实例接受到文件段后，保存到一个公共缓冲区中，再置一个标志位，http controller这儿，循环判断标准位，取出文件段，向前端写文件流。</p> 
+<pre><code class="language-java">@GetMapping("/tunnels/{tnid}/sessions/{snid}/files/{filename}")
+public void download(@PathVariable("tnid")String tnid, @PathVariable("snid")String snid, @PathVariable("filename")String filename, HttpServletResponse response) {
+	try {
+		System.out.println("download controller: "+tnid);
+		response.setCharacterEncoding("UTF-8");
+		response.addHeader("Content-Disposition", "attachment;filename=" + URLEncoder.encode(filename, "UTF-8"));
+		ServletOutputStream os = response.getOutputStream();
+
+		if(streamMap.tunnelStreamMap.get(tnid) != null) {
+			streamMap.tunnelStreamMap.get(tnid).getWebSocketTunnel().startSendFile(snid);
+			streamMap.tunnelStreamMap.get(tnid).setEnd(false);
+			streamMap.tunnelStreamMap.get(tnid).setBuffer(null);
+
+			long start = System.currentTimeMillis();
+			while(!streamMap.tunnelStreamMap.get(tnid).isEnd()){
+				synchronized(streamMap) {
+					String str = streamMap.tunnelStreamMap.get(tnid).getBuffer();
+					if (str != null) {
+						streamMap.tunnelStreamMap.get(tnid).setBuffer(null);
+
+						os.write(decoder.decode(str.getBytes()));
+					}
+				}
+			}
+		}
+
+		os.close();
+	}
+	catch (Exception e) {
+		throw new RuntimeException(e);
+	}
+}</code></pre> 
+<p>上传文件接口。同样通过公共的Bean和websocket线程同步消息</p> 
+<pre><code class="language-java">@PostMapping("/tunnels/{tnid}/sessions/{snid}")
+public void upload(@RequestParam("file") MultipartFile uploadFile, @PathVariable("tnid")String tnid, @PathVariable("snid")String snid) {
+	try {
+		InputStream inputStream = uploadFile.getInputStream();
+		byte[] buffer = new byte[8192];
+		int bytesRead = 0;
+		while ((bytesRead = inputStream.read(buffer, 0, buffer.length)) != -1) {
+
+			long start = System.currentTimeMillis();
+			while(!streamMap.tunnelStreamMap.get(tnid).isOk()) {
+				// 等待上传完成消息
+			}
+
+			streamMap.tunnelStreamMap.get(tnid).setOk(false);
+
+			System.out.println(bytesRead);
+			byte[] bb = null;
+			if(bytesRead &lt; 8192) {
+				bb = new byte[bytesRead];
+				System.arraycopy(buffer, 0, bb, 0, bytesRead);
+			}
+			else {
+				bb = buffer;
+			}
+
+			if(streamMap.tunnelStreamMap.get(tnid) != null) {
+				streamMap.tunnelStreamMap.get(tnid).getWebSocketTunnel().sendBlob(snid, bb);
+			}
+		}
+
+		if(streamMap.tunnelStreamMap.get(tnid) != null) {
+			streamMap.tunnelStreamMap.get(tnid).getWebSocketTunnel().sendEnd(snid);
+		}
+
+		inputStream.close();
+	}
+	catch (Exception e) {
+		throw new RuntimeException(e);
+	}
+}</code></pre> 
+<p> websocket处理部分，注意和http controller的同步</p> 
+<pre><code class="language-java">@Override
+protected void sendInstruction(String instruction) throws IOException {
+	if(instruction.startsWith("0.,36.")) {
+		uuid = instruction.substring(6, instruction.length()-1);
+		System.out.println("uuid: "+uuid);
+
+		TunnelStream tunnelStream = new TunnelStream();
+		tunnelStream.setWebSocketTunnel(this);
+		tunnelStream.setEnd(false);
+		tunnelStream.setBuffer(null);
+		streamMap.tunnelStreamMap.put(uuid, tunnelStream);
+		streamMap.tunnelStreamMap.get(uuid).setOk(false);
+	}
+	else if(instruction.contains("application/octet-stream")) {
+		fileTranfer = true;
+
+		GuacamoleParser parser = new GuacamoleParser();
+
+		int parsed;
+		int offset = 0;
+		int length = instruction.toCharArray().length;
+		while (true) {
+			try {
+				if (!((parsed = parser.append(instruction.toCharArray(), offset, length)) != 0))
+					break;
+			}
+			catch (GuacamoleException e) {
+				throw new RuntimeException(e);
+			}
+
+			offset += parsed;
+			length -= parsed;
+		}
+
+		GuacamoleInstruction ins = parser.next();
+		synchronized (bufferInstructions) {
+			bufferInstructions.put(ins.getArgs().get(0), ins);
+		}
+	}
+	else if(instruction.contains("17.SFTP: File opened")) {
+		streamMap.tunnelStreamMap.get(uuid).setOk(true);
+	}
+	else if(instruction.contains("8.SFTP: OK")) {
+		streamMap.tunnelStreamMap.get(uuid).setOk(true);
+	}
+	else {
+		if(fileTranfer) {
+			if(instruction.startsWith("4.blob")) {
+				int num1 = instruction.indexOf(",");
+				int num2 = instruction.indexOf(",", num1+1);
+				int num3 = instruction.indexOf(".", num1+1);
+
+				int id = Integer.parseInt(instruction.substring(num3+1, num2));
+
+				int num4 = instruction.indexOf(".", num2+1);
+				String str = instruction.substring(num4+1, instruction.length()-1);
+
+				TunnelStream tunnelStream = streamMap.tunnelStreamMap.get(uuid);
+
+				if(tunnelStream != null) {
+					synchronized(streamMap) {
+						streamMap.tunnelStreamMap.get(uuid).setBuffer(str);
+					}
+
+					instruction = instruction.substring(0, num2+1) + "0.;";
+				}
+			}
+			else if(instruction.startsWith("3.end")) {
+				System.out.println("3.end");
+				fileTranfer = false;
+				//int num1 = instruction.indexOf(".", 3);
+				//int id = Integer.parseInt(instruction.substring(num1+1, instruction.length()-1));
+
+				TunnelStream tunnelStream = streamMap.tunnelStreamMap.get(uuid);
+				synchronized(streamMap) {
+					streamMap.tunnelStreamMap.get(uuid).setEnd(true);
+				}
+			}
+		}
+	}
+
+	super.sendInstruction(instruction);
+	if(!instruction.startsWith("0.")) {
+		userConnectLogEntity.getBufferedWriter().write(instruction);
+	}
+}
+
+public void startSendFile(String sid) {
+	acknowledgeStream(sid);
+}
+
+@Override
+protected void receiveData(String message)  {
+}
+
+public void sendBlob(String sid, byte[] bytes) {
+	GuacamoleWriter writer = guacamoleTunnel.acquireWriter();
+
+	GuacamoleInstruction ins = new GuacamoleInstruction("blob", sid, BaseEncoding.base64().encode(bytes));
+	try {
+		writer.writeInstruction(ins);
+	}
+	catch (GuacamoleException e) {
+		logger.debug("Unable to send "{}" for intercepted stream.", ins.getOpcode(), e);
+	}
+
+	guacamoleTunnel.releaseWriter();
+}
+
+public void sendEnd(String sid) {
+	GuacamoleWriter writer = guacamoleTunnel.acquireWriter();
+	GuacamoleInstruction ins = new GuacamoleInstruction("end", sid);
+	try {
+		writer.writeInstruction(ins);
+	}
+	catch (GuacamoleException e) {
+		logger.debug("Unable to send "{}" for intercepted stream.", ins.getOpcode(), e);
+	}
+
+	guacamoleTunnel.releaseWriter();
+}
+
+protected void acknowledgeStream(String sid) {
+	GuacamoleInstruction ins = null;
+	synchronized (bufferInstructions) {
+		ins = bufferInstructions.remove(sid);
+	}
+
+	if(ins != null) {
+		GuacamoleWriter writer = guacamoleTunnel.acquireWriter();
+		try {
+			writer.writeInstruction(
+					new GuacamoleInstruction("ack", ins.getArgs().get(0), "OK",
+							Integer.toString(GuacamoleStatus.SUCCESS.getGuacamoleStatusCode())));
+		}
+		catch (GuacamoleException e) {
+			throw new RuntimeException(e);
+		}
+
+		guacamoleTunnel.releaseWriter();
+	}
+}</code></pre>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

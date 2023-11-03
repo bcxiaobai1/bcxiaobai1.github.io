@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>隐藏了2年的Bug，终于连根拔起，悲观锁并没有那么简单 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">隐藏了2年的Bug，终于连根拔起，悲观锁并没有那么简单</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-github-gist">
+                    
+                        
+                    
+                    <p>接手的新项目，接二连三的出现账不平的问题，作为程序员中比较执着的人，不解决誓不罢休。最终，经过两次，历时多日终于将其连根拔起。实属不易，特写篇文章记录一下。</p> 
+<p>文章中不仅会讲到使用悲观锁踩到的坑，以及本人是如何排查问题的，某些思路和方法或许能对大家有所帮助。</p> 
+<h2>
+<a id="_4"></a>事情的起源</h2> 
+<p>运营同事时不时就提出查账调账的需求，原因很简单，账不平，不查不行。如果你有过财务相关系统的工作经历，账务问题始终是最难攻克的。</p> 
+<p>虽然刚接手项目，虽然很多业务逻辑还不了解，但出现这样的技术挑战，还是要坚决攻克的。</p> 
+<p>其实，这类问题的原因很简单：热点账户。当很多服务或线程操作同一个用户的账户时，就会出现一个更新把另外一个更新覆盖掉的情况。</p> 
+<p><img src="https://images2.imgbox.com/4d/bb/Jb6f6pwX_o.png" alt="账户不平"></p> 
+<p>上图可轻易看出，当两个服务或线程同时查询数据库的一条数据（热点账户），然后内存中做修改，最后更新到数据库。如果出现并发情况，两个线程都读取了100，一个计算得80，一个计算得60，后更新的就有可能将前面的覆盖掉。</p> 
+<p>解决方案通常有：</p> 
+<ul>
+<li>单服务线程锁；</li>
+<li>集群分布式锁；</li>
+<li>集群数据库悲观锁；</li>
+</ul> 
+<p>项目中已采用了悲观锁，就基于来进行排查追踪原因。</p> 
+<h2>
+<a id="_24"></a>何谓悲观锁</h2> 
+<p>悲观锁是在对数据被的修改持悲观态度，在整个数据处理过程中会将数据锁定。</p> 
+<p>悲观锁的实现，往往依靠数据库提供的锁机制（也只有数据库层提供的锁机制才能真正保证数据访问的排他性，否则，即使在应用层中实现了加锁机制，也无法保证外部系统不会修改数据）。</p> 
+<p>通常会使用select … for update语句来实现对数据的枷锁。</p> 
+<p>for update仅适用于InnoDB，且必须在事务块(BEGIN/COMMIT)中才能生效。在进行事务操作时，通过“for update”语句，MySQL会对查询结果集中每行数据都添加排他锁，其他线程对该记录的更新与删除操作都会阻塞。排他锁包含行锁、表锁。</p> 
+<p>如下示例展示了悲观锁的基本使用流程：</p> 
+<pre><code>set autocommit=0;　　
+//设置完autocommit后，执行正常业务。具体如下：
+//0.开始事务
+begin;/begin work;/start transaction; (三者选一就可以)
+//1.查询出商品信息
+select status from t_goods where id=1 for update;
+//2.根据商品信息生成订单
+insert into t_orders (id,goods_id) values (null,1);
+//3.修改商品status为2
+update t_goods set status=2;
+//4.提交事务
+commit;/commit work;
+</code></pre> 
+<p>因为关闭了数据库自动提交，这里通过begin/commit来管理事务。</p> 
+<p>使用select…for update的方式通过数据库实现了悲观锁。其中，id为1的那条数据就被锁定，其它的事务必须等本次事务提交之后才能执行。这样就保证了在操作期间数据不会被其它事务修改。</p> 
+<h2>
+<a id="_55"></a>原因初步分析</h2> 
+<p>在了解了账不平的原因和悲观锁的基本原理之后，就可以进行问题的排查了。既然系统已经使用了悲观锁，竟然还会出现问题，那肯定是哪里漏掉了什么。</p> 
+<p>于是，排查了所有账户（account表）更新的地方，还真找到一处bug。</p> 
+<p>大多数地方都使用了悲观锁，先for update查询一下，然后计算新的余额，再进行更新数据库。但有一处竟然先查询到了计算了余额，然后再进行加锁，最后更新。</p> 
+<p>基本流程如下：</p> 
+<p><img src="https://images2.imgbox.com/c9/ef/F0Dynf7f_o.png" alt="错误加锁"></p> 
+<p>在上述情况中，虽然线程B进行了加锁处理，但由于计算新余额并未在锁中，导致虽然使用了悲观锁，但依旧存在问题。正确的使用方式就是将计算余额的逻辑放在锁中。</p> 
+<p>当然，如果线程B完全被遗忘加锁了，也会出现同样的问题。</p> 
+<p>在排查解决了上述bug，我开始嘚瑟了，以为彻底解决了账不平的问题。</p> 
+<h2>
+<a id="_75"></a>一个月之后</h2> 
+<p>结果一个月之后，运营同事又来找了，偶尔依旧会出现账不平的问题。刚开始我还以为是不是搞错了，历史的账不平导致现在最终的不平。但最终还是下定决心再排查一次。</p> 
+<p>第一天，把账不平的账户的账务流水、涉及到代码、日志全部捋一遍。这期间还遇到了很多小困难，最终注意克服。</p> 
+<h3>
+<a id="_81"></a><strong>困难一：数据查不动</strong>
+</h3> 
+<p>账务记录表数据太多，上千万的数据，最初的设计者并没有创建索引。这就要了老命了，根据筛选条件根本查不出数据来。</p> 
+<p>这里就用到SQL优化的两个技能点：limit限制查询条数和高效的分页策略。</p> 
+<p>关于limit限制查询条件这一点很明显，不仅减少了结果集，而且在遇到符合条件的数据之后会立马返回。</p> 
+<p>高效的分页策略在列表页在查询数据经常遇到，为了避免一次性返回过多的数据影响接口性能，一般会对查询接口做分页处理。</p> 
+<p>在Mysql中分页一般用的<code>limit</code>关键字：</p> 
+<pre><code>select id,name,age from user limit 10,20;
+</code></pre> 
+<p>少量数据时，limit分页没啥问题。但如果表中数据量很多，就会出现性能问题。</p> 
+<p>比如分页参数变成了：</p> 
+<pre><code>select id,name,age from user limit 1000000,20;
+</code></pre> 
+<p>Mysql会查到1000020条数据，然后丢弃前面的1000000条，只查后面的20条数据，非常浪费资源。</p> 
+<p>优化sql：</p> 
+<pre><code>select id,name,age from user where id &gt; 1000000 limit 20;
+</code></pre> 
+<p>当然还可以使用<code>between</code>优化分页：</p> 
+<pre><code>select id,name,age 
+from user where id between 1000000 and 1000020;
+</code></pre> 
+<p>值得庆幸的是那张表的ID是自增的，于是用了id大于的条件，只差了最近的交易记录，才勉强把数据查询出来。</p> 
+<h3>
+<a id="_122"></a>困难二：日志过多</h3> 
+<p>由于系统日志打的比较详细，一个项目每天大概几个G的日志。要在这中间查询到有用的日志，也是一个调整。</p> 
+<p>排查问题时，先使用了grep 命令找到出问题交易的账号日志：</p> 
+<pre><code>grep 123 info.log
+</code></pre> 
+<p>当大概定位的到日志输出时间了，再利用区间缩小日志范围：</p> 
+<pre><code>grep '2021-11-17 19:23:23' info.log &gt; temp.log
+</code></pre> 
+<p>这里同样使用grep命令查找对应时间区间的日志，并将查找到日志输出到temp.log文件中，然后通过sz命令，下载到本地进行筛选分析。</p> 
+<p>这里大家可以善用grep命令。同时也要善用输出到新文件，这样比每次查几个G的内容方便多了。当然更方便的就是把筛选之后的日志下载本地，再次比对分析。</p> 
+<h3>
+<a id="_142"></a>其他</h3> 
+<p>关于代码筛选这块，没有什么诀窍，除了从头到位的捋一捋，没有别的好方法。不过这个过程善用IDE的搜索和“Find usages”功能即可。</p> 
+<h3>
+<a id="_146"></a>日终收获</h3> 
+<p>经过上述排查，最终在临下班时，定位到了问题的原因：一个线程将余额更新之后，另外一个线程将其覆盖了。在账务流水记录中存在了两笔紧邻，且计算前余额一样的记录。</p> 
+<p>得出结果之后，再排查其他的同类问题就方便多了，比如可采用group by来进行快速筛选：</p> 
+<pre><code>select count(id) as num , balance from account group by balance having num &gt; 1;
+</code></pre> 
+<p>通过上述语句就可以快速查出有同样计算前余额的记录。当然，上述语句还可以添加条件和结果维度。</p> 
+<p>虽然找到的问题发生的地方，但并未完全找到问题的原因。</p> 
+<h2>
+<a id="Bug_160"></a>更深层次的Bug</h2> 
+<p>本以为找到了问题发生的点，就能快速解决问题的，但的确小觑了这个Bug，又是一整天才排查出根本原因。</p> 
+<h3>
+<a id="_164"></a>模拟高并发</h3> 
+<p>找到出问题的代码，看了实现逻辑，没问题啊，也加了悲观锁，数据库事务也没失效，也没有同Service的方法调用。怎么就会出现问题呢？</p> 
+<p>既然肉眼看不出来，那就用程序跑。于是，写了一个单元测试，创建一个线程池，来调用对应加锁方法。结果，依旧没问题。</p> 
+<p>由于跑的是测试库，生产库用的是云服务，担心是数据库的差异，于是在Navicat验证了悲观锁是否生效：</p> 
+<pre><code>START transaction ;
+select * from account where id = 1 for update;
+</code></pre> 
+<p>然后在另外一个查询窗口执行：</p> 
+<pre><code>select * from account where id = 1 for update;
+</code></pre> 
+<p>发现，数据库的锁的确是生效的，在没有执行<code>commit</code>操作之前，是查不到数据的。</p> 
+<h3>
+<a id="_185"></a>僵局与希望</h3> 
+<p>此时，完全陷入僵局。于是就开始大量搜索资料，多次阅读代码。</p> 
+<p>最终，在一篇写得很水，但给了一个Hibernate javadoc文档链接的文中，无意点了一下链接，获得了巨大的启发。</p> 
+<p>在javadoc看了一下session实现悲观锁的方法。项目中用了已经废弃的get方法：</p> 
+<blockquote> 
+ <h3>
+<a id="get_193"></a>get</h3> 
+ <pre><code>@Deprecated
+Object get(Class clazz,
+                   Serializable id,
+                   LockMode lockMode)
+</code></pre> 
+ <p>**Deprecated.**<em>LockMode parameter should be replaced with LockOptions</em></p> 
+ <p>Return the persistent instance of the given entity class with the given identifier, or null if there is no such persistent instance. (If the instance is already associated with the session, return that instance. This method never returns an uninitialized instance.) Obtain the specified lock mode if the instance exists.</p> 
+</blockquote> 
+<p>其中的“If the instance is already associated with the session, return that instance”让我眼前一亮。难道是缓存在作祟？</p> 
+<p>上面的重点是：<strong>如果session中已经存在这么个对象实例，会直接返回这个实例</strong>。</p> 
+<p>感觉回去看代码，还真是的，伪代码如下：</p> 
+<pre><code>Account account = accountService.getAccount(type, userNo);
+if(account == null){
+	//...
+}
+accountService.getAccountAndLock(account.getId());
+// ...
+</code></pre> 
+<p>上述代码首先值得肯定的有两点：第一，在加锁之前先查了一次对象，这样能避免因为对象不存在，锁住全表；第二，就是锁一条数据库记录时尽量采用id，精确定位到具体的记录，避免锁住其他记录或整张表。</p> 
+<p>那么，是不是因为前面的查询导致后面getAccountAndLock方法的实效呢？再来验证一下。</p> 
+<p>于是，在单元测试中添加了前面的查询，再次执行。哈哈，Bug终于复现了！</p> 
+<p>为了进一步证实，在底层的公共方法中添加了clear操作：</p> 
+<pre><code>	public T findAndLock(Class cls, String primaryKey) throws DataAccessException {
+		Session session = getHibernateTemplate().getSessionFactory().getCurrentSession();
+		// 添加验证是否缓存问题
+		session.clear();
+		Object object = session.load(cls, primaryKey, LockOptions.UPGRADE);
+		return (T) object;
+	}
+</code></pre> 
+<p>再次执行单元测试，可正常加锁。至此，Bug定位完毕。</p> 
+<h3>
+<a id="_241"></a>问题的解决</h3> 
+<p>既然已经定位问题，解决起来就非常方便了。上面使用<code>session.clear()</code>只是为了验证，真实生产使用这种方法影响太大，而且是事后处理。</p> 
+<p>解决方案：将基于Hibernate的普通查询，改为基于原生SQL的查询。因为前面的普通查询只需要id，那么只用一条SQL查询ID即可，如果id为空，则不存在；如果id非空，则再进行下一步处理。</p> 
+<p>至此，问题完美解决。</p> 
+<h2>
+<a id="_249"></a>小结</h2> 
+<p>在解决上述问题的过程中，看似只是很简单的悲观锁，但在排查的过程中还用到和涉及到了大量的其他知识，比如@Transactional事务失效场景的排查、事务的隔离级别、Hibernate的多级缓存、Spring的事物管理、多线程、Linux操作、Navicat手动事务、SQL优化、单元测试、Javadoc查阅等。</p> 
+<p>所以，在解决问题之后，觉得十分有必要分享给大家。通过这个案例，你又学到了什么呢？</p> 
+<blockquote> 
+ <p>博主简介：《SpringBoot技术内幕》技术图书作者，酷爱钻研技术，写技术干货文章。</p> 
+ <p>公众号：「程序新视界」，博主的公众号，欢迎关注~</p> 
+ <p>技术交流：请联系博主微信号：zhuan2quan</p> 
+</blockquote> 
+<hr> 
+<p><img src="https://images2.imgbox.com/63/40/zf2LUdmk_o.jpg" alt="微信公众号：程序新视界"></p> 
+
+ “
+ <b>程序新视界</b>”，一个100%技术干货的公众号
+
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Flink实时任务性能调优 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Flink实时任务性能调优</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h1>前言</h1> 
+<p>通常我们在开发完Flink任务提交运行后，需要对任务的参数进行一些调整，通常需要调整的情况是任务消费速度跟不上数据写入速度，从而导致实时任务出现反压、内存GC频繁（FullGC）频繁、内存溢出导致TaskManager被Kill。</p> 
+<p>今天讲一下Flink任务中常见的性能场景及解决思路。</p> 
+<h1>反压</h1> 
+<p>在Flink任务中多个Task之间需要进行数据交换，在流式计算中数据的生产方的生产速度和消费方的消费速度不匹配时，可能会导致计算节点OOM或丢失数据，在Flink中通过反压机制平衡数据生产方和消费方的处理速度，以求系统达到整体的平衡。</p> 
+<p>实时任务出现反压时，在Blink版本中做了大量的改进，从资源使用、作业调优、日志查询等维度新增了大量功能，使得用户可以更方便的对Flink作业进行运维，Vertex 增加了InQueue，OutQueue等多项指标，可以方便的追踪数据的反压、过滤及倾斜情况通常，我们可以通过在Flink Web UI中观察出现红色的Vertex节点及其上下游，重点需要关注的指标是Out Queue的占用率，当Out Queue占用率高表示该节点的下游节点消费能力不足，需要重点调解该下游节点的计算资源（已贡献社区）。</p> 
+<p>如果是老的Flink版本，可以先在 Flink web ui 中，定位到具体的算子之后，查看 <strong><code>BackPressure</code> </strong>模块，通过颜色和数值来判断任务的繁忙和反压情况（若颜色为红色，表示当前算子繁忙，有反压的情况；若颜色为绿色，标识当前算子不繁忙，没有反压）。</p> 
+<p>如果你看到 subtasks 的状态为 <strong>OK</strong> 表示没有反压。<strong>HIGH</strong> 表示这个 subtask 被反压。状态用如下定义：</p> 
+<ul>
+<li>
+<strong>OK</strong>: 0% &lt;= 反压比例 &lt;= 10%</li>
+<li>
+<strong>LOW</strong>: 10% &lt; 反压比例 &lt;= 50%</li>
+<li>
+<strong>HIGH</strong>: 50% &lt; 反压比例 &lt;= 100%</li>
+</ul> 
+<p class="img-center"><img alt="" height="373" src="https://images2.imgbox.com/0d/e3/9DD0Wnlq_o.png" width="665"></p> 
+<h1>常见场景及解决思路</h1> 
+<h2>场景一、任务反压（算子消费瓶颈）</h2> 
+<p>典型场景为，一连串的计算节点都是红色，Out Queue都是100%，此时需要定位到最后一个Out Queue为100%的算子节点的下游节点，该节点的消费能力不达标，导致上游消息堆积。我们可以对该算子的资源进行调整，如 适当调大并发度，对应内存可适当调小，如果是窗口聚合节点则可以调大内存(在开窗场景下，window数据计算节点需要缓存窗口大小时长的数据，并在checkpoint时需要将窗口的中间状态存储，因此需要增加窗口计算节点的堆内存)</p> 
+<p></p> 
+<h2>场景二、任务无反压，但延迟高（source端瓶颈）</h2> 
+<p>这种情况表现为，整体没有出现明显反压，即所有计算节点的Out Queue都不高。</p> 
+<p>这种情况的出现，有可能是上游源头节点的并发度不够，如kafka的topic有三个分区，消费的时候，只开了一个并发，通常建议消费并发数和topic的分区一致。</p> 
+<p>如果增加source的并发度之后，延迟没有下降，则可能是在任务源头节点包含复杂计算，且该算子和源头并发一致，出现了合并任务链(operater chain)，此时可以考虑将source算子单独剥离出来，即调整source下游算子的并发度，解除合并任务链。</p> 
+<p></p> 
+<h2>场景三、任务异常（内存超用）</h2> 
+<p>实时任务异常Failover的情况下，我们需要关注任务是否因为某个TaskManager内存超用被kill的情况，如果发现异常日志中记录了：</p> 
+<blockquote> 
+ <p>"<span style="color:#fe2c24">org.apache.flink.runtime.io.network.netty.exception.RemoteTransportException: Connection unexpectedly closed by remote task manager 'null'. This might indicate that the remote task manager was lost</span>"</p> 
+</blockquote> 
+<p>则普遍情况是因为内存超用，我们需要根据异常信息中提示的任务节点，调整执行计划中对应节点的内存配置，具体可在WebUI中查看Exceptions模块中查看，其中Root Exception里面记录了最新一次发生的异常栈，Exception History中记录的是任务运行过程中所有发生的异常，以及每次异常的计算节点是哪些。</p> 
+<p></p> 
+<h2>场景四、GroupBy</h2> 
+<p>针对group by场景，可以通过配置minibatch，来提升吞吐，降低状态的访问，减少对下游的输出压力。</p> 
+<p>在Stram SQL纯流模式下，每进来一条数据都会去操作state，IO消耗较大，设置minibatch后，同一个key的一批数据只访问一次state，且只输出最新的一条数据，即减少了state的访问也减少了向下游的数据更新，minibatch的配置如下：</p> 
+<pre><code class="language-bash"># 1. 表示整个job允许延迟
+blink.miniBatch.allowLatencyMs=5000
+
+# 2. 单个batch的size
+blink.miniBatch.size=1000</code></pre> 
+<p class="img-center"><img alt="" height="233" src="https://images2.imgbox.com/2b/2b/NCT4XseG_o.png" width="287"></p> 
+<h2>场景五、任务重启，并设置重启时间（初始时间）</h2> 
+<p>这种情况一般出现在任务刚启动时有非常高的延迟，可能是因为在任务启动时或重启时设置了一个比较老的start time，导致任务从很早的时间开始拉取数据，会导致刚开始整个任务的qps非常高，在监控上的表现为一开始有很高的延迟，随后缓慢下降直到正常水平，若没有下降则可以适当增加资源，一般来说这种情况不需要特殊处理，可以根据实际需求来判断是否需要调整start time为当前时间。</p> 
+<p></p> 
+<h2>场景六、Time Interval Join 代替 双流Join</h2> 
+<p>建议在双流join的时候，使用时间窗口join，而不是双流join。</p> 
+<p>默认情况下双流join会将两条流的数据都缓存到状态中，默认状态存储时长为1.5天，状态太大会导致join算子性能低下。</p> 
+<p>而实际上大部分场景，join都是由时效性要求的，比如商品曝光1分钟引导的点击，其业务上隐含了数据的时效性关联条件，当数据失效后，它的状态是可以清理掉释放资源。</p> 
+<p><img alt="" height="612" src="https://images2.imgbox.com/72/b7/uzEexahh_o.png" width="1080"></p> 
+<p> </p> 
+<h1>总结</h1> 
+<ol>
+<li>判断是否出现反压，在反压节点定位算子，增加并发或调整cpu资源；</li>
+<li>若无明显反压，则可能是source端瓶颈，可以提升并发度，尽量和source源的分区数量一致，另外可以查看是否是因为source数据处理的算子逻辑太复杂，且和读算子并行一致出现合并任务链(operater chain)的情况，此时可以调整该计算算子的并行度，将source算子剥离出链。</li>
+<li>参数优化，配置minibatch（针对GroupBy），可提升吞吐，降低状态的访问次数，减少对下游的输出压力。</li>
+<li>双流join场景中使用Time Interval Join，而不是双流Join，双流Join会把状态保持1.5天，非常消耗资源。</li>
+<li>重置任务时，根据实际需求出发，若默认很久以前的数据可放弃，则可以调整start time为较近的时间。</li>
+<li>提升batchSize增加读写IO。</li>
+</ol> 
+<p>希望本文对你有帮助，请点个赞鼓励一下作者吧~ 谢谢！</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>把数据库里的未付款订单改成已付款，会发生什么 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">把数据库里的未付款订单改成已付款，会发生什么</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h2>导言</h2> 
+<p>不知道大家在网上购物的时候，有没有这样的念头，如果能把未付款的订单偷偷用一条SQL改成已付款，该多么美好啊。那么在实际开发过程中，我们应当如何保证数据库里的数据在保存后不会被偷偷更改？</p> 
+<h2>理论</h2> 
+<p>在介绍具体的内容之间，先介绍MD5算法，简单的来说，MD5能把任意大小、长度的数据转换成固定长度的一串字符，经常玩大型游戏的朋友应该都注意到过，各种补丁包、端游客户端之类的大型文件一般都附有一个MD5值，用于确保你下载文件的完整性。那么在这里，我们可以借鉴其思想，对订单的某些属性进行加密计算，得出来一个 MD5值一并保存在数据库当中。从数据库取出数据后第一时间进行校验，如果有异常更改，那么及时抛出异常进行人工处理。</p> 
+<h2>实现</h2> 
+<p>道理我都懂，但是我要如何做呢，别急，且听我一一道来。</p> 
+<p>这种需求听起来并不强绑定于某个具体的业务需求，这就要用到了我们熟悉的鼎鼎有名的AOP（面向切面编程）来实现。</p> 
+<p>首先定义四个类型的注解作为AOP的切入点。<code>@Sign</code>和<code>@Validate</code>都是作用在方法层面的，分别用于对方法的入参进行加签和验证方法的返回值的签名。<code>@SignField</code>用于注解关键的不容篡改的字段。<code>@ValidateField</code>用于注解保存计算后得出的签名值。</p> 
+<pre><code>@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Sign {
+}
+复制代码</code></pre> 
+<pre><code>@Target(ElementType.METHOD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Validate {
+}
+复制代码</code></pre> 
+<pre><code>@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface SignField {
+}
+复制代码</code></pre> 
+<pre><code>@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+public @interface ValidField {
+}
+复制代码</code></pre> 
+<p>以订单的实体为例 sn,amt,status,userId就是关键字段，绝不能允许有人在落单到数据库后对这些字段偷偷篡改。</p> 
+<pre><code>public class Order {
+    @SignField
+    private String sn;
+    @SignField
+    private String amt;
+    @SignField
+    private int status;
+    @SignField
+    private int userId;
+    @ValidField
+    private String sign;
+}
+复制代码</code></pre> 
+<p>下面就到了重头戏的部分，如何通过AOP来进行实现。</p> 
+<h3>1. 定义切入点</h3> 
+<pre><code>@Pointcut("execution(@com.example.demo.annotations.Sign * *(..))")
+public void signPointCut() {
+
+}
+
+@Pointcut("execution(@com.example.demo.annotations.Validate * *(..))")
+public void validatePointCut() {
+
+}
+复制代码</code></pre> 
+<h3>2.环绕切入点</h3> 
+<pre><code>@Around("signPointCut()")
+public Object signAround(ProceedingJoinPoint pjp) throws Throwable {
+    Object[] args = pjp.getArgs();
+    for (Object o : args) {
+        System.out.println(o);
+        sign(o);
+    }
+    Object res = pjp.proceed(args);
+    return res;
+}
+
+@Around("validatePointCut()")
+public Object validateAround(ProceedingJoinPoint pjp) throws Throwable {
+    Object[] args = pjp.getArgs();
+    Object res = pjp.proceed(args);
+    valid(res);
+    return res;
+}
+复制代码</code></pre> 
+<h3>3. 签名的实现</h3> 
+<p>1.获取需要签名字段</p> 
+<pre><code>private Map&lt;String, String&gt; getSignMap(Object o) throws IllegalAccessException {
+    Map&lt;String, String&gt; fieldNameToValue = new HashMap&lt;&gt;();
+    for (Field f : o.getClass().getDeclaredFields()) {
+        System.out.println(f.getName());
+        for (Annotation annotation : f.getDeclaredAnnotations()) {
+            if (annotation.annotationType().equals(SignField.class)) {
+                String value = "";
+                f.setAccessible(true);
+                fieldNameToValue.put(f.getName(), f.get(o).toString());
+            }
+        }
+    }
+    return fieldNameToValue;
+}
+复制代码</code></pre> 
+<p>2.计算出签名值，这里在属性名和属性值以外加入了我的昵称以防止他人猜测，同时使用了自定义的分隔符来加强密码强度。</p> 
+<pre><code>private String getSign(Map&lt;String, String&gt; fieldNameToValue) {
+    List&lt;String&gt; names = new ArrayList&lt;&gt;(fieldNameToValue.keySet());
+    StringBuilder sb = new StringBuilder();
+    for (String name : names)
+        sb.append(name).append("@").append(fieldNameToValue.get(name));
+    System.out.println(sb.append("日暮与星辰之间").toString());
+    String signValue = DigestUtils.md5DigestAsHex(sb.toString().getBytes(StandardCharsets.UTF_8));
+    return signValue;
+}
+复制代码</code></pre> 
+<ol><li>找到保存签名的字段</li></ol>
+<pre><code>private Field getValidateFiled(Object o) {
+    for (Field f : o.getClass().getDeclaredFields()) {
+        for (Annotation annotation : f.getDeclaredAnnotations()) {
+            if (annotation.annotationType().equals(ValidField.class)) {
+                return f;
+            }
+        }
+    }
+    return null;
+}
+复制代码</code></pre> 
+<ol><li>对保存签名的字段进行赋值</li></ol>
+<pre><code>public void sign(Object o) throws IllegalAccessException {
+    Map&lt;String, String&gt; fieldNameToValue = getSignMap(o);
+    if (fieldNameToValue.isEmpty()) {
+        return;
+    }
+    Field validateField = getValidateFiled(o);
+    if (validateField == null)
+        return;
+    String signValue = getSign(fieldNameToValue);
+    validateField.setAccessible(true);
+    validateField.set(o, signValue);
+}
+复制代码</code></pre> 
+<ol><li>对从数据库中取出的对象进行验证</li></ol>
+<pre><code>public void valid(Object o) throws IllegalAccessException {
+    Map&lt;String, String&gt; fieldNameToValue = getSignMap(o);
+    if (fieldNameToValue.isEmpty()) {
+        return;
+    }
+    Field validateField = getValidateFiled(o);
+    validateField.setAccessible(true);
+    String signValue = getSign(fieldNameToValue);
+    if (!Objects.equals(signValue, validateField.get(o))) {
+        throw new RuntimeException("数据非法");
+    }
+
+}
+复制代码</code></pre> 
+<h2>使用示例</h2> 
+<p>对将要保存到数据库的对象进行签名</p> 
+<pre><code>@Sign
+public Order save( Order order){
+    orderList.add(order);
+    return order;
+}
+复制代码</code></pre> 
+<p>验证从数据库中取出的对象是否合理</p> 
+<pre><code>@Validate
+public Order query(@ String sn){
+   return orderList.stream().filter(e -&gt; e.getSn().equals(sn)).findFirst().orElse(null);
+}</code></pre> 
+<p><br>  </p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

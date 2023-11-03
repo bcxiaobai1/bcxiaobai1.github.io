@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>智能合约开发实战——元交易（Metatransaction）系列二，元交易合约的实现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">智能合约开发实战——元交易（Metatransaction）系列二，元交易合约的实现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>引言</h1> 
+<p><a href="https://blog.csdn.net/shengzang1998/article/details/121251057">上文</a>中提到，普通的 ETH 交易并不能够做到让用户无需 gas 费，需要交易中嵌套一个交易，即元交易，来实现免 gas 费。</p> 
+<p>本文将分析开源库 <a href="https://github.com/OpenZeppelin/openzeppelin-contracts">OpenZeppelin/openzeppelin-contracts</a> 中的元交易合约的实现，让你能够快速入门元交易实现细节，从而能够自己对后续更多的相关技术深入探索。</p> 
+<h1>
+<a id="_5"></a>前置知识概述</h1> 
+<p>元交易会涉及到 ECDSA 与 EIP712 等知识，如果你是熟手，可以跳过此节内容，直接浏览具体实现分析部分。</p> 
+<h2>
+<a id="Hash_8"></a>Hash</h2> 
+<p>也称哈希、散列、数字摘要。通过哈希函数，可以将长短不一的信息转化为一段长度任意但可预测的（确定性的）结果。这是一类神奇的函数，可以将一大堆信息转变成一串短的，可作为摘要的数据 “指纹”。对于一个给定的输入而言，生成的 “指纹” 始终一致。如果你的原始数据中有任何细微的改动，生成的哈希值将大不相同。以太坊中采用的是 <code>Keccak-256</code> 算法。</p> 
+<h2>
+<a id="ECDSA_11"></a>ECDSA</h2> 
+<p>在密码学中，ECDSA（Elliptic Curve Digital Signature Algorithm，椭圆曲线数字签名算法）是使用椭圆曲线密码学的数字签名算法（DSA）的一个变种。</p> 
+<p>主要用于对数据（比如一个文件）创建数字签名，以便于你在不破坏它的安全性的前提下对它的真实性进行验证。可以将它想象成一个实际的签名，你可以识别部分人的签名，但是你无法在别人不知道的情况下伪造它。</p> 
+<p>你不应该将ECDSA与用来对数据进行加密的AES（高级加密标准）相混淆。ECDSA不会对数据进行加密、或阻止别人看到或访问你的数据，它可以防止的是确保数据没有被篡改。</p> 
+<p>如图所示，在以太坊中，ECDSA 用于对原始数据的 hash 值进行签名及恢复。<br> <img src="https://images2.imgbox.com/e7/94/TaI42hWN_o.png" alt="ECDSA 在 ETH 中的应用"><br> 将原始数据通过 hash 函数得到它的 hash 值后，用户 A 用自己的私钥对该 hash 值进行签名，得到 Signature（签名）。有了该签名与 hash 值，任何人都能够从中恢复出签名人的钱包地址，在这里用户 B 则恢复得到了用户 A 的钱包地址。</p> 
+<h2>
+<a id="EIP712_22"></a>EIP712</h2> 
+<p>Ethereum Improvement Proposals (EIPs)，你可以在这里查看所有的 <a href="https://eips.ethereum.org/">EIPs</a>。<a href="https://eips.ethereum.org/EIPS/eip-712">EIP712</a> （Ethereum typed structured data hashing and signing）以太坊类型的结构化数据哈希与签名。</p> 
+<p>如果我们只关心字节字符串的话，签名数据是一个已经解决了的问题。但不幸的是，在现实世界中，我们关心的是复杂而有意义的信息，对结构化数据进行哈希是非常重要的，错误会导致系统安全属性的丢失。</p> 
+<p>此 EIP 旨在提高链上使用的链下消息签名的可用性。我们看到越来越多的人采用链下消息签名，因为它节省了 gas 费，减少了区块链上的交易数量。当前签名消息是一个不透明的十六进制字符串，显示给用户，关于组成消息的项目的上下文很少。</p> 
+<p><img src="https://images2.imgbox.com/e1/9c/kKKzsKmF_o.png" alt="Sign the message"><br> EIP712 概述了一个编码数据及其结构的方案，该方案允许在签名时将数据显示给用户进行验证。下面是一个用户在签署 EIP712 消息时显示的示例。</p> 
+<p><img src="https://images2.imgbox.com/5f/77/FRKSHGrh_o.png" alt="Sign the typed structured message"></p> 
+<h1>
+<a id="_33"></a>元交易合约的实现</h1> 
+<p>此分析针对 <a href="https://github.com/OpenZeppelin/openzeppelin-contracts/tree/v4.3.2">openzeppelin-contracts v4.3.2 版本</a>。</p> 
+<pre><code class="prism language-solidity">contract MinimalForwarder is EIP712 {
+    using ECDSA for bytes32;
+
+    struct ForwardRequest {
+        address from;
+        address to;
+        uint256 value;
+        uint256 gas;
+        uint256 nonce;
+        bytes data;
+    }
+
+	constructor() EIP712("MinimalForwarder", "0.0.1") {}
+}
+</code></pre> 
+<p>ECDSA 是 openzeppelin 实现的一个 solidity 库，它实现了从 hash 值中恢复钱包地址的方法，将它应用在 bytes32 上，就可以直接在 bytes32 上调用 <code>recover</code> 方法。<code>recover</code> 函数签名：<code>function recover(bytes32 hash, bytes memory signature) internal pure returns (address)</code> 。</p> 
+<p>ForwardRequest 结构体定义了一个交易中用于签名的基本组成成分。与以太坊交易不同的是没有 <code>gasPrice</code>，因为智能合约的执行只关心 gas 的消耗。ForwardRequest 中 的 <code>nonce</code> 概念与以太坊类似，都是为了避免双花攻击，但这里的 <code>nonce</code> 仅由智能合约维护，跟普通的以太坊交易中的 <code>nonce</code> 无关。</p> 
+<p>构造函数中直接使用 EIP712 的构造函数进行初始化，EIP712 的构造函数签名为：<code>constructor(string memory name, string memory version)</code> ，其中 name 是合约名称，version 是合约版本，这将作为 EIP712 签名验证的一部分，它在部署时，将自动获取合约的地址、chainId 等信息。意味着，即便有相同的 ForwardRequest 结构体数据，但合约地址或区块链网络不同，也会导致签名无效。</p> 
+<pre><code class="prism language-solidity">mapping(address =&gt; uint256) private _nonces;
+
+function getNonce(address from) public view returns (uint256) {
+	return _nonces[from];
+}
+</code></pre> 
+<p>为了避免双花攻击，在智能合约中维护 <code>nonce</code> 是必要的。</p> 
+<pre><code class="prism language-solidity">bytes32 private constant _TYPEHASH =
+	keccak256("ForwardRequest(address from,address to,uint256 value,uint256 gas,uint256 nonce,bytes data)");
+
+function verify(ForwardRequest calldata req, bytes calldata signature) public view returns (bool) {
+	address signer = _hashTypedDataV4(
+            keccak256(abi.encode(_TYPEHASH, req.from, req.to, req.value, req.gas, req.nonce, keccak256(req.data)))
+    ).recover(signature);
+	return _nonces[req.from] == req.nonce &amp;&amp; signer == req.from;
+}
+</code></pre> 
+<p>看到 <code>verify</code> 函数，我们知道，要将钱包地址恢复，至少需要经过 ECDSA 的签名以及用于签名的原始数据，而此处，ECDSA 签名的原始数据就是经过 <code>abi</code> 编码的 <code>keccak256(abi.encode(_TYPEHASH, req.from, req.to, req.value, req.gas, req.nonce, keccak256(req.data)))</code> ForwardRequest 结构体数据的哈希值。再通过调用 ECDSA 库中的 recover 函数，传入签名，就能够恢复得到签名者的钱包地址。</p> 
+<p>通过 <code>_nonces[req.from] == req.nonce</code> 来确保交易的调用是顺序的，且不会遭受双花攻击。<code>signer == req.from</code> 避免签名者与实际元交易发送者不匹配。</p> 
+<p>接下来看，如何执行元交易。</p> 
+<pre><code class="prism language-solidity">function execute(ForwardRequest calldata req, bytes calldata signature)
+	public
+	payable
+	returns (bool, bytes memory)
+{
+	require(verify(req, signature), "MinimalForwarder: signature does not match request");
+	_nonces[req.from] = req.nonce + 1;
+
+	(bool success, bytes memory returndata) = req.to.call{gas: req.gas, value: req.value}(
+		abi.encodePacked(req.data, req.from)
+	);
+	// Validate that the relayer has sent enough gas for the call.
+	// See https://ronan.eth.link/blog/ethereum-gas-dangers/
+	assert(gasleft() &gt; req.gas / 63);
+
+	return (success, returndata);
+}
+</code></pre> 
+<p>在使用 <code>Address.call</code> 方法的时候，根据元交易参数，指定了 <code>call</code> 的 <code>gas</code> 与 <code>value</code> 值。需要注意的是，这里并不直接将元交易的 <code>data</code> 字段当作 <code>call</code> 操作的 <code>data</code>，而是将 <code>data</code> 与 <code>from</code> 进行 <code>abi</code> 编码后一起作为 <code>call</code> 操作的参数，这在目标合约（也就是 <code>req.to</code>）中会被解析，从而得到交易的发送者，在下面会详细讲解。</p> 
+<p><code>assert(gasleft() &gt; req.gas / 63)</code> 简单理解为避免中继器（代为执行元交易的人）恶意地或无意地使用足够低的 gas 使得交易执行成功，而元交易执行失败。详情可以在 <a href="https://ronan.eth.link/blog/ethereum-gas-dangers/">ethereum gas dangers</a> 中学习。</p> 
+<h1>
+<a id="ERC2771_111"></a>ERC2771</h1> 
+<p>要支持元交易，仅实现元交易智能合约是不够的，因为目标合约无法知道实际的元交易 <code>from</code> 是谁。如果没有额外的措施，它将只能够从 <code>msg.sender</code> 中获取，由于在元交易合约实现中，是通过 <code>Address.call</code> 调用的，因此将得到的发送者是元交易合约的地址。ERC2771 则解决了该问题。</p> 
+<pre><code class="prism language-solidity">abstract contract ERC2771Context is Context
+</code></pre> 
+<p>ERC2771Context 继承了 Context，而 Context 中简单封装了从 <code>msg.sender</code> 与 <code>msg.data</code> ，以便规范这两个功能的使用，且能够让其在子合约中修改其行为。要求使用 Context 合约获取 <code>msg</code> 相关的数据，而不是直接使用 <code>msg.sender</code> 等。</p> 
+<pre><code class="prism language-solidity">abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        return msg.data;
+    }
+}
+</code></pre> 
+<p>ERC2771Context 就修改了 Context 合约的方法。</p> 
+<pre><code class="prism language-solidity">function _msgSender() internal view virtual override returns (address sender) {
+	if (isTrustedForwarder(msg.sender)) {
+		// The assembly code is more direct than the Solidity version using `abi.decode`.
+		assembly {
+		sender := shr(96, calldataload(sub(calldatasize(), 20)))
+		}
+	} else {
+		return super._msgSender();
+	}
+}
+</code></pre> 
+<p>先通过 <code>isTrustedForwarder(msg.sender)</code> 验证元交易的调用方是期望的元交易合约地址。assembly 代码将上文的元交易合约中 <code>req.to.call{...}(abi.encodePacked(req.data, req.from))</code> 编码进的 <code>data</code> 部分内容的 <code>req.from</code> 获取到，然后再返回该值。</p> 
+<h1>
+<a id="_149"></a>元交易使用概览</h1> 
+<p>让我们来尝试简单使用元交易合约，要支持元交易，你所编写的合约必须继承 ERC2771Context。在这里简单实现一个 NFT 合约，在部署它之前，你必须先部署元交易合约，将元交易合约地址作为参数传递给 NFT 合约构造函数。</p> 
+<pre><code class="prism language-solidity">// SPDX-License-Identifier: GPL3.0
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+
+contract NFT is ERC2771Context, ERC721 {
+    using SafeMath for uint256;
+
+    uint256 private _currentTokenId = 0;
+
+    constructor(
+        string memory name,
+        string memory symbol,
+        address trustedForwarder
+    ) ERC721(name, symbol) ERC2771Context(trustedForwarder) {}
+
+    function safeMint() public virtual {
+        safeMint("");
+    }
+
+    function safeMint(bytes memory _data) internal virtual {
+        uint256 tokenId = _getNextTokenId();
+        _incrementTokenId();
+        _safeMint(_msgSender(), tokenId, _data);
+    }
+    
+    function getCurrTokenId() public virtual view returns (uint256) {
+        return _currentTokenId;
+    }
+
+    /**
+     * @dev calculates the next token ID based on value of _currentTokenId
+     * @return uint256 for the next token ID
+     */
+    function _getNextTokenId() internal virtual view returns (uint256) {
+        return _currentTokenId.add(1);
+    }
+
+    /**
+     * @dev increments the value of _currentTokenId
+     */
+    function _incrementTokenId() internal virtual {
+        _currentTokenId++;
+    }
+
+    function _msgSender() internal view virtual override(Context, ERC2771Context) returns (address) {
+        return ERC2771Context._msgSender();
+    }
+
+    function _msgData() internal view virtual override(Context, ERC2771Context) returns (bytes calldata) {
+        return ERC2771Context._msgData();
+    }
+}
+</code></pre> 
+<p>在这个示例中，如果 Alice 没有足够的 ETH 支付 gas 费，来铸造一个 NFT，她可以签署一个元交易，元交易的 <code>data</code> 是由 <code>abi.encodeWithSignature(functionSelector, parmas...)</code> 得到的，将该元交易递交给具有足够 ETH 的 Bob，Bob 调用元交易合约 <code>MinimalForwarder.execute(req, signature)</code>，从而让 Alice 的元交易成功执行。</p> 
+<p><a href="https://github.com/OpenZeppelin/openzeppelin-contracts/tree/v4.3.2/contracts/metatx">OpenZeppelin 的完整代码实现</a></p> 
+<h1>
+<a id="_214"></a>延伸阅读</h1> 
+<ul>
+<li><a href="https://blog.csdn.net/shengzang1998/article/details/121251057">智能合约开发实战——元交易（Metatransaction）系列一，什么是元交易？</a></li>
+<li><a href="https://blog.csdn.net/shengzang1998/article/details/121279061">智能合约开发实战——元交易（Metatransaction）系列三，前端如何发起元交易的代码讲解</a></li>
+</ul> 
+<h1>
+<a id="_218"></a>引用</h1> 
+<ul>
+<li><a href="https://ethfans.org/posts/ethereum-meta-transactions">以太坊元交易</a></li>
+<li><a href="https://en.wikipedia.org/wiki/Elliptic_Curve_Digital_Signature_Algorithm">维基百科</a></li>
+<li><a href="https://eips.ethereum.org/">EIPs</a></li>
+<li><a href="https://github.com/OpenZeppelin/openzeppelin-contracts/tree/v4.3.2/contracts/metatx">OpenZeppelin 的完整代码实现</a></li>
+</ul>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

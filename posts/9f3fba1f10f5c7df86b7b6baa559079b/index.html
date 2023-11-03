@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Android10 AudioRecord简单解析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android10 AudioRecord简单解析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h2 id="doc-title">AudioRecord简介:<br> 音频子系统,从音频输入设备录制音频PCM数据供应用层使用<br> 业务场景:蓝牙语音遥控器，带麦克风的摄像头，耳机等。应用拿到音频PCM数据可以直接播放(比如常见的录音apk，录音达人)<br> 或者对语音进行解析(语音转文字,语音助手应用)</h2> 
+<p>本文是对国科平台android10进行梳理，其它版本SDK可能有所差异，但总体框架是类似的<br> 涉及源码路径:<br> AudioRecord.java(frameworks/base/media/java/android/media/AudioRecord.java)<br> android_media_AudioRecord.cpp(frameworks/base/core/jni/android_media_AudioRecord.cpp)<br> AudioRecord.cpp(frameworks/av/media/libaudioclient/AudioRecord.cpp)<br> AudioSystem.cpp(frameworks/av/media/libaudioclient/AudioSystem.cpp)<br> AudioFlinger.cpp(frameworks/av/services/audioflinger/AudioFlinger.cpp)<br> AudioPolicyService.cpp(frameworks/av/services/audiopolicy/service/AudioPolicyService.cpp)<br> AudioPolicyInterfaceImpl.cpp(frameworks/av/services/audiopolicy/service/AudioPolicyInterfaceImpl.cpp)<br> AudioPolicyManager.cpp(frameworks/av/services/audiopolicy/managerdefault/AudioPolicyManager.cpp)<br> Engine.cpp(frameworks/av/services/audiopolicy/enginedefault/src/Engine.cpp)<br> AudioInputDescriptor.cpp(frameworks/av/services/audiopolicy/common/managerdefinitions/src/AudioInputDescriptor.cpp)<br> AudioPolicyClientImpl.cpp(frameworks/av/services/audiopolicy/service/AudioPolicyClientImpl.cpp)<br> main_audioserver.cpp(frameworks/av/media/audioserver/main_audioserver.cpp)<br> DeviceHalLocal.cpp(frameworks/av/media/libaudiohal/impl/DeviceHalLocal.cpp)<br> Threads.cpp(frameworks/av/services/audioflinger/Threads.cpp)</p> 
+<p>概述:<br> AudioRecord：audio系统对外的API类,负责音频数据采集(录音)<br> AudioFlinger: audio系统的工作引擎,管理输入输出流,和底层音频相关的硬件交互<br> AudioPolicyService: 音频策略服务,管理音频设备的选择和切换，管理音量等</p> 
+<p><strong>1.AudioRecord用例介绍:</strong></p> 
+<pre><code class="language-java">int recordBufferSize = AudioRecord.getMinBufferSize(16000,//采样率
+					   AudioFormat.CHANNEL_IN_STEREO,//声道数,双声道
+					   AudioFormat.ENCODING_PCM_16BIT//采样精度，一个采样点16bit，两个字节
+					   );
+//②创建AudioRecord
+AudioRecord audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC，//输入源，麦克风类型
+						16000，
+						AudioFormat.CHANNEL_IN_STEREO，
+						AudioFormat.ENCODING_PCM_16BIT，
+						recordBufferSize)；
+//③启动录音
+audioRecord.startRecording();
+//④读取录音数据
+audioRecord.read(data, 0, recordBufferSize);
+.......
+//⑤停止录音，释放底层资源
+audioRecord.stop()；
+audioRecord.release();</code></pre> 
+<p>Frame(帧):描述数据量大小，比如一帧等于多少字节, 在音频系统中 1单位Frame等于1个采样点字节数 X 声道数<br> (比如上面的采样精度 16BIT,双声道，那么一Frame就是 2X2=4字节)<br> 最小缓冲区大小=最低帧数∗声道数∗采样精度<br> (最小缓冲区大小也和底层硬件有关，比如硬件是否支持当前采样率，采样精度，硬件延时等情况，最后综合计算出一个大小)<br><strong>2.AudioRecord分析(java层)</strong><br> AudioRecord.java</p> 
+<pre><code class="language-java">public AudioRecord(int audioSource, int sampleRateInHz, int channelConfig, int audioFormat,
+            int bufferSizeInBytes){
+			//这个会调用下面这个同名重载的构造函数
+			}
+public AudioRecord(AudioAttributes attributes, AudioFormat format, int bufferSizeInBytes,
+            int sessionId) throws IllegalArgumentException {
+		//检查参数是否合法
+        audioParamCheck(attributes.getCapturePreset(), rate, encoding);
+        audioBuffSizeCheck(bufferSizeInBytes);
+		......
+		//到native层
+        int initResult = native_setup( new WeakReference&lt;AudioRecord&gt;(this),
+                mAudioAttributes, sampleRate, mChannelMask, mChannelIndexMask,
+                mAudioFormat, mNativeBufferSizeInBytes,
+                session, getCurrentOpPackageName(), 0 /*nativeRecordInJavaObj*/);
+    }</code></pre> 
+<p>android_media_AudioRecord.cpp</p> 
+<pre><code class="language-cpp">static jint
+android_media_AudioRecord_setup(JNIEnv *env, jobject thiz, jobject weak_this,
+        jobject jaa, jintArray jSampleRate, jint channelMask, jint channelIndexMask,
+        jint audioFormat, jint buffSizeInBytes, jintArray jSession, jstring opPackageName,
+        jlong nativeRecordInJavaObj)
+{
+	//前面主要是做了一些java层值到jni层值的转换
+	......
+	//创建native层的AudioRecord
+    lpRecorder = new AudioRecord(String16(opPackageNameStr.c_str()));
+	......
+	//调用 AudioRecord::set()
+    const status_t status = lpRecorder-&gt;set(paa-&gt;source,
+            sampleRateInHertz,
+            format,        // word length, PCM
+            localChanMask,
+            frameCount,
+            recorderCallback,// callback_t
+            lpCallbackData,// void* user
+            0,             // notificationFrames,
+            true,          // threadCanCallJava
+            sessionId,
+            AudioRecord::TRANSFER_DEFAULT,
+            flags,
+            -1, -1,        // default uid, pid
+            paa.get());
+	//native层AudioRecord保存到java层的mNativeRecorderInJavaObj变量中
+    setAudioRecord(env, thiz, lpRecorder);
+}</code></pre> 
+<p>java层AudioRecord总结:<br> 在构造函数中调用native层接口，创建native层的AudioRecord，后续的startRecording,read,stop,release等操作都是通过这个native层的AudioRecord去处理</p> 
+<p><strong>3.AudioRecord分析(native层)</strong><br> AudioRecord.cpp</p> 
+<pre><code class="language-cpp">//构造函数中对成员变量进行初始化
+AudioRecord::AudioRecord(const String16 &amp;opPackageName)
+    : mActive(false), mStatus(NO_INIT), mOpPackageName(opPackageName),
+      mSessionId(AUDIO_SESSION_ALLOCATE),
+      mPreviousPriority(ANDROID_PRIORITY_NORMAL), mPreviousSchedulingGroup(SP_DEFAULT),
+      mSelectedDeviceId(AUDIO_PORT_HANDLE_NONE), mRoutedDeviceId(AUDIO_PORT_HANDLE_NONE),
+      mSelectedMicDirection(MIC_DIRECTION_UNSPECIFIED),
+      mSelectedMicFieldDimension(MIC_FIELD_DIMENSION_DEFAULT)
+{
+}
+status_t AudioRecord::set(audio_source_t inputSource, uint32_t sampleRate,
+		audio_format_t format, audio_channel_mask_t channelMask, size_t frameCount,
+		callback_t cbf, void* user, uint32_t notificationFrames,
+		bool threadCanCallJava, audio_session_t sessionId,transfer_type transferType, 
+		audio_input_flags_t flags, uid_t uid, pid_t pid, 
+		const audio_attributes_t* pAttributes, audio_port_handle_t selectedDeviceId, 
+		audio_microphone_direction_t selectedMicDirection, float microphoneFieldDimension)
+{
+	//如果有回调函数,会启动AudioRecordThread 处理回调函数
+    if (cbf != NULL) {
+        mAudioRecordThread = new AudioRecordThread(*this);
+        mAudioRecordThread-&gt;run("AudioRecord", ANDROID_PRIORITY_AUDIO);
+    }
+    // create the IAudioRecord
+    status = createRecord_l(0 /*epoch*/, mOpPackageName);
+	......
+}
+status_t AudioRecord::createRecord_l(const Modulo&lt;uint32_t&gt; &amp;epoch, const String16&amp; opPackageName)
+{
+	......
+	//IAudioRecord record  通过Binder调用到AudioFlinger去初始化音频服务里录音相关的流程
+    record = audioFlinger-&gt;createRecord(input, output, &amp;status);
+	......
+    //audio_track_cblk_t* cblk 共享内存，
+	//音频数据从音频服务进程(AudioFlinger所在的进程)到客户端进程,通过共享内存来实现
+	//AudioRecordClientProxy类定义了一些操作共享内存的方法
+    mProxy = new AudioRecordClientProxy(cblk, buffers, mFrameCount, mFrameSize);
+}</code></pre> 
+<p>native层AudioRecord总结:<br> native层流程里主要拿到了两个客户端资源，一个是record,能和AudioFlinger里的一个RecordTrack类型的track交互，控制录音启动，停止等<br> 从底层硬件采集音频数据的工作是在音频服务进程中进行的，客户端拿到的这个record能通过远程调用的方式对录音流程进行控制<br> IAudioRecord是联系AudioRecord和AudioFlinger的纽带,IAudioRecord在AudioFlinger那边具体是什么,在后续的流程中会有解释<br><img alt="" src="https://images2.imgbox.com/37/3d/P83rZSFy_o.png"></p> 
+<p><img alt="" src="https://images2.imgbox.com/bb/db/OcZVcOIV_o.png"><br>                                           AudioRecord和AudioFlinger交互流程图</p> 
+<p><strong>4.AudioFlinger分析</strong><br> AudioFlinger驻留在audioserver进程中<br> main_audioserver.cpp</p> 
+<pre><code class="language-cpp">int main(int argc __unused, char **argv)
+{
+		......
+        sp&lt;ProcessState&gt; proc(ProcessState::self());
+        sp&lt;IServiceManager&gt; sm = defaultServiceManager();
+		//注册AudioFlinger和AudioPolicyService服务
+        AudioFlinger::instantiate();
+        AudioPolicyService::instantiate();
+		......
+        ProcessState::self()-&gt;startThreadPool();
+        IPCThreadState::self()-&gt;joinThreadPool();
+    }
+}</code></pre> 
+<p>AudioFlinger.cpp</p> 
+<pre><code class="language-cpp">sp&lt;media::IAudioRecord&gt; AudioFlinger::createRecord(const CreateRecordInput&amp; input,
+                                                   CreateRecordOutput&amp; output,
+                                                   status_t *status)
+{
+    sp&lt;RecordThread::RecordTrack&gt; recordTrack;
+    sp&lt;RecordHandle&gt; recordHandle;
+	......
+	//初始化open输入流   启动Record线程
+    lStatus = AudioSystem::getInputForAttr(&amp;input.attr, &amp;output.inputId,
+                                      input.riid,
+                                      sessionId,
+                                      clientPid,
+                                      clientUid,
+                                      input.opPackageName,
+                                      &amp;input.config,
+                                      output.flags, &amp;output.selectedDeviceId, &amp;portId);
+		......
+		//output.inputId是一个索引号, 根据索引号可以获取一个录音用的工作线程 RecordThread
+        RecordThread *thread = checkRecordThread_l(output.inputId);
+		......
+		//创建线程对应的recordTrack
+        recordTrack = thread-&gt;createRecordTrack_l(client, input.attr, &amp;output.sampleRate,
+						input.config.format, input.config.channel_mask, &amp;output.frameCount, 
+						sessionId, &amp;output.notificationFrameCount, callingPid, clientUid,
+						&amp;output.flags, input.clientInfo.clientTid, &amp;lStatus, portId,
+						input.opPackageName);
+	......
+    // RecordHandle继承BnAudioRecord实现了服务端,可对recordTrack进行一些流程上的控制(start stop啥的)
+    recordHandle = new RecordHandle(recordTrack);
+	......
+	//当recordHandle通过Binder服务被从 AudioFlinger送到 AudioRecord时， AudioRecord那边拿到的其实是客户端BpAudioRecord,这个和匿名Binder有关,详细可自行了解
+    return recordHandle;
+}</code></pre> 
+<p>AudioSystem.cpp<br> AudioSystem::getInputForAttr()流程跟踪</p> 
+<pre><code class="language-cpp">status_t AudioSystem::getInputForAttr(const audio_attributes_t *attr, 
+							audio_io_handle_t *input, audio_unique_id_t riid, 
+							audio_session_t session, pid_t pid, uid_t uid, 
+							const String16&amp; opPackageName, const audio_config_base_t *config,
+							audio_input_flags_t flags, audio_port_handle_t *selectedDeviceId, 
+							audio_port_handle_t *portId)
+{
+	//AudioSystem里的接口基本都是这样,封装了对AudioPolicyService(或者AudioFlinger)的远程调用，方便其它模块访问使用服务的功能
+    const sp&lt;IAudioPolicyService&gt;&amp; aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return NO_INIT;
+    return aps-&gt;getInputForAttr(attr, input, riid, session, pid, uid, opPackageName,config, flags, selectedDeviceId, portId);
+	}</code></pre> 
+<p> AudioPolicyInterfaceImpl.cpp  中实现了许多AudioPolicyService的接口</p> 
+<pre><code class="language-cpp">status_t AudioPolicyService::getInputForAttr(const audio_attributes_t *attr, 
+						audio_io_handle_t *input, audio_unique_id_t riid,
+						audio_session_t session,pid_t pid, uid_t uid, 
+						const String16&amp; opPackageName,  const audio_config_base_t *config, 
+						audio_input_flags_t flags, audio_port_handle_t *selectedDeviceId, 
+						audio_port_handle_t *portId)
+{
+	......
+    //检查客户端进程是否有录音权限   android.permission.RECORD_AUDIO
+    if (!recordingAllowed(opPackageName, pid, uid)){
+		......
+	}
+	//android.permission.CAPTURE_AUDIO_OUTPUT  比如通话录音情景
+    bool canCaptureOutput = captureAudioOutputAllowed(pid, uid);
+	......
+	//到AudioPolicyManager去, mAudioPolicyManager在AudioPolicyService构造函数中被初始化
+   status = mAudioPolicyManager-&gt;getInputForAttr(attr, input, riid, session, uid, config, flags, selectedDeviceId,
+                                                         &amp;inputType, portId);
+	......
+}</code></pre> 
+<p>AudioPolicyManager.cpp</p> 
+<pre><code class="language-cpp">status_t AudioPolicyManager::getInputForAttr(const audio_attributes_t *attr, 
+								audio_io_handle_t *input,  audio_unique_id_t riid, 
+								audio_session_t session, uid_t uid,  
+								const audio_config_base_t *config,  audio_input_flags_t flags,
+								audio_port_handle_t *selectedDeviceId, input_type_t *inputType,
+								audio_port_handle_t *portId)
+{
+		...... //忽略前面的一系列判断，一般情况会走到这里
+		//通过attributes 来拿到符合的输入设备
+        device = mEngine-&gt;getInputDeviceForAttributes(attributes, &amp;policyMix);
+		//通过输入设备和其它的音频参数，拿到一个符合的输入流
+    	*input = getInputForDevice(device, session, attributes, config, flags, policyMix);
+}</code></pre> 
+<p>Engine.cpp</p> 
+<pre><code class="language-cpp">sp&lt;DeviceDescriptor&gt; Engine::getInputDeviceForAttributes(const audio_attributes_t &amp;attr,
+                                                         sp&lt;AudioPolicyMix&gt; *mix) const
+{
+	......
+	//用source类型拿到一个输入设备的类型, 我们这里是 AUDIO_SOURCE_MIC
+    audio_devices_t deviceType = getDeviceForInputSource(attr.source);
+	......
+	//availableInputDevices是当前活跃(可用)的所有输入设备列表
+    return availableInputDevices.getDevice(deviceType,
+                                           String8(address.c_str()),
+                                           AUDIO_FORMAT_DEFAULT);
+}
+audio_devices_t Engine::getDeviceForInputSource(audio_source_t inputSource) const
+{
+	......
+    switch (inputSource) {
+    case AUDIO_SOURCE_DEFAULT:
+    case AUDIO_SOURCE_MIC:
+    if (availableDeviceTypes &amp; AUDIO_DEVICE_IN_BLUETOOTH_A2DP) {
+        device = AUDIO_DEVICE_IN_BLUETOOTH_A2DP;
+    } else if ((getForceUse(AUDIO_POLICY_FORCE_FOR_RECORD) == AUDIO_POLICY_FORCE_BT_SCO) &amp;&amp;
+        (availableDeviceTypes &amp; AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET)) {
+        device = AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET;
+    } else if (availableDeviceTypes &amp; AUDIO_DEVICE_IN_WIRED_HEADSET) {
+        device = AUDIO_DEVICE_IN_WIRED_HEADSET;
+    } else if (availableDeviceTypes &amp; AUDIO_DEVICE_IN_USB_HEADSET) {
+        device = AUDIO_DEVICE_IN_USB_HEADSET;
+    } else if (availableDeviceTypes &amp; AUDIO_DEVICE_IN_USB_DEVICE) {
+        device = AUDIO_DEVICE_IN_USB_DEVICE;
+    } else if (availableDeviceTypes &amp; AUDIO_DEVICE_IN_BUILTIN_MIC) {
+		//蓝牙语音遥控匹配到这个
+        device = AUDIO_DEVICE_IN_BUILTIN_MIC;
+    }
+    break;
+	.......
+    return device;
+}</code></pre> 
+<p>拿到输入设备后再回到AudioPolicyManager::getInputForAttr()中,下一步是通过输入设备打开一个输入流</p> 
+<pre><code class="language-cpp">audio_io_handle_t AudioPolicyManager::getInputForDevice(const sp&lt;DeviceDescriptor&gt; &amp;device,
+                                                        audio_session_t session,
+                                                        const audio_attributes_t &amp;attributes,
+                                                        const audio_config_base_t *config,
+                                                        audio_input_flags_t flags,
+                                                        const sp&lt;AudioPolicyMix&gt; &amp;policyMix)
+{
+	......
+    for (;;) {
+        //匹配audio_policy_configuration.xml中的解析到的 profile字段
+		//xml中描述定义了许多可用输入或者输出设备，AudioPolicyManager构造初始化时会解析该xml,并加载对应hal层so
+		//解析结果可通过 dumpsys media.audio_policy命令查看
+        profile = getInputProfile(device, profileSamplingRate, 
+					profileFormat, profileChannelMask, profileFlags);
+		......
+    }
+	//根据匹配到的参数构造一个输入流描述, mpClientInterface类型是AudioPolicyClient,用于直接和AudioFlinger交互的
+    sp&lt;AudioInputDescriptor&gt; inputDesc = new AudioInputDescriptor(profile, mpClientInterface);
+	......
+	//去打开输入流, 最后会走到 hal层so对应的 adev_open_output_stream()
+    status_t status = inputDesc-&gt;open(&amp;lConfig, device, halInputSource, profileFlags, &amp;input);
+	...
+    return input;
+}</code></pre> 
+<p>AudioInputDescriptor.cpp</p> 
+<pre><code class="language-cpp">status_t AudioInputDescriptor::open(const audio_config_t *config, 
+						const sp&lt;DeviceDescriptor&gt; &amp;device, audio_source_t source, 
+						audio_input_flags_t flags, audio_io_handle_t *input)
+{
+	......
+    //mpClientInterface类型是AudioPolicyClient, 也在AudioPolicyService构造函数中被初始化
+	//用于直接和AudioFlinger交互的
+    status_t status = mClientInterface-&gt;openInput(mProfile-&gt;getModuleHandle(), 
+										input, &amp;lConfig,  &amp;deviceType, 
+										mDevice-&gt;address(), source, flags);
+	......
+}</code></pre> 
+<p>AudioPolicyClientImpl.cpp</p> 
+<pre><code class="language-cpp">status_t AudioPolicyService::AudioPolicyClient::openInput(audio_module_handle_t module, 
+									audio_io_handle_t *input, audio_config_t *config, 
+									audio_devices_t *device, const String8&amp; address, 
+									audio_source_t source, audio_input_flags_t flags)
+{
+    sp&lt;IAudioFlinger&gt; af = AudioSystem::get_audio_flinger();
+	......
+	//调用到AudioFlinger::openInput()
+    return af-&gt;openInput(module, input, config, device, address, source, flags);
+}</code></pre> 
+<p>流程到这里,可以先稍微暂停总结一下，我们一开始在AudioFlinger::createRecord()中，然后调用AudioSystem::getInputForAttr()去拿一个输入流,但是流程经过一层又一层调用后，最后又回到了AudioFlinger。这也体现了android audio的设计框架，AudioPolicyService管理音频策略，它帮AudioFlinger去选了一个合适的输入设备，但最终打开设备，和底层audio模块交互，还得AudioFlinger自己来做,AudioFlinger是执行者。</p> 
+<p style="text-align:center"><img alt="" src="https://images2.imgbox.com/61/11/07QiIQHE_o.png"></p> 
+<p></p> 
+<p>AudioFlinger.cpp</p> 
+<pre><code class="language-cpp">status_t AudioFlinger::openInput(audio_module_handle_t module,
+					audio_io_handle_t *input, audio_config_t *config,
+					audio_devices_t *devices, const String8&amp; address,
+					audio_source_t source, audio_input_flags_t flags)
+{
+	......
+	//调用openInput_l() 打开输入流，启动一个thread
+    sp&lt;ThreadBase&gt; thread = openInput_l(
+            module, input, config, *devices, address, source, flags, AUDIO_DEVICE_NONE, String8{});
+}
+
+sp&lt;AudioFlinger::ThreadBase&gt; AudioFlinger::openInput_l(audio_module_handle_t module,
+								audio_io_handle_t *input, audio_config_t *config, 
+								audio_devices_t devices, const String8&amp; address,
+								audio_source_t source, audio_input_flags_t flags,
+								audio_devices_t outputDevice, 
+								const String8&amp; outputDeviceAddress)
+{
+	......
+	//inHwHal类型是 DeviceHalLocal
+    status_t status = inHwHal-&gt;openInputStream(
+            *input, devices, &amp;halconfig, flags, address.string(), source,
+            outputDevice, outputDeviceAddress, &amp;inStream);
+   ......
+			//RecordThread启动
+            sp&lt;RecordThread&gt; thread = new RecordThread(this,
+                                      inputStream,
+                                      *input,
+                                      primaryOutputDevice_l(),
+                                      devices,
+                                      mSystemReady
+                                      );
+            mRecordThreads.add(*input, thread);
+            return thread;
+}</code></pre> 
+<p>DeviceHalLocal.cpp</p> 
+<pre><code class="language-cpp">status_t DeviceHalLocal::openInputStream(audio_io_handle_t handle,
+				audio_devices_t devices, struct audio_config *config,
+				audio_input_flags_t flags, const char *address,
+				audio_source_t source,audio_devices_t /*outputDevice*/,
+				const char */*outputDeviceAddress*/,
+				sp&lt;StreamInHalInterface&gt; *inStream) {
+    audio_stream_in_t *halStream;
+	//到对应的audio hal层 so中, open_input_stream()
+    int openResult = mDev-&gt;open_input_stream(
+            mDev, handle, devices, config, &amp;halStream, flags, address, source);
+}</code></pre> 
+<p>总结: AudioFlinger 调用AudioSystem::getInputForAttr()后会走到AudioPolicyService(音频策略服务)<br> 策略服务综合各种条件(录音的参数, 可用输入设备, 结合实际场景选择一个合适的输入设备)。<br> AudioFlinger拿到输入设备后通过openInput() 去打开实际的输入流。auido hal层的so库，不同平台，不同项目会有差异<br> hardware/libhardware/modules/audio/audio_hw.c 是源码中默认的模板,可以看下代码结构</p> 
+<p>打开输入流，启动RecordThread后，还剩最后一个关键步骤，RecordTrack的创建:<br> Threads.cpp</p> 
+<pre><code class="language-cpp">sp&lt;AudioFlinger::RecordThread::RecordTrack&gt; AudioFlinger::RecordThread::createRecordTrack_l(
+		const sp&lt;AudioFlinger::Client&gt;&amp; client, const audio_attributes_t&amp; attr,
+		uint32_t *pSampleRate, audio_format_t format, audio_channel_mask_t channelMask,
+		size_t *pFrameCount, audio_session_t sessionId, size_t *pNotificationFrameCount,
+		pid_t creatorPid, uid_t uid, audio_input_flags_t *flags, pid_t tid, status_t *status,
+		audio_port_handle_t portId, const String16&amp; opPackageName)
+{
+		......
+    	//RecordThread里的 RecordTrack
+        track = new RecordTrack(this, client, attr, sampleRate,
+                      format, channelMask, frameCount,
+                      nullptr /* buffer */, (size_t)0 /* bufferSize */, sessionId, creatorPid, uid,
+                      *flags, TrackBase::TYPE_DEFAULT, opPackageName, portId);
+	......
+    return track;
+}</code></pre> 
+<p>创建的RecordTrack会被打包进RecordHandle,RecordHandle对应客户端通过Binder发送给AudioRecord<br> 这样AudioRecord就能和RecordTrack交互了，音频数据会通过RecordTrack送到AudioRecord</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Hyperledger Fabric Java Gateway配置解析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Hyperledger Fabric Java Gateway配置解析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-dracula">
+                    
+                        
+                    
+                    <blockquote> 
+ <p>Hyperledger Fabric 2.x之后逐步减少Java SDK API的使用频率，并希望大家的客户端开发集中使用Gateway来完成。本篇博客将从具体实现的角度带大家串一遍使用Gateway进行链码调用的流程。如果大家只是想直接开发的话，其实不用在意每个接口是如何实现的，直接查API文档看接口即可，我这篇里面结合了一些具体实现去讲解，有兴趣的可以看看。</p> 
+</blockquote> 
+<h1>
+<a id="1__2"></a>1. 场景理解</h1> 
+<p>Fabric提供两类客户端来与Fabric网络进行交互。一类是CLI，即命令行接口，我们在黑乎乎的窗口里敲类似于“peer [flag] ”这样的命令，以达到我们的目的；另一类则是基于API开发的客户端程序，以对Java语言的支持为例，Fabric早些时候提供了一整套Java SDK以供调用，通过Java SDK我们可以实现身份标识注册、链码部署、链码调用等多种功能，在1.4版本之后，Fabric推出了Java Gateway，以实现更清爽的编程风格，Gateway实际上相当于是对Java SDK接口的封装，其在功能上只支持链码执行、交易提交等操作，而不支持通道创建、身份标识注册等复杂功能。所以一套功能完善的客户端，往往会同时使用Gateway与SDK。</p> 
+<p>当然，上面讲的和本文没关系。我们今天的主要目标，是如何使用Gateway连接网络、调用链码、提交交易，以及弄清楚中间用到的类与方法之间的关系。在这之前，我们先要了解使用Gateway搭建客户端我们需要准备哪些材料。</p> 
+<p>首先，要想提交交易，我们需要以一个<strong>合法的身份标识（Identities）</strong> 去连接到Fabric网络。大家在创建Identies时，会为节点与账户分别生成密钥证书材料，这里的账户就是我们在客户端中需要的身份标识。与咱们熟悉的基于账号和密码的登录方式不同，Fabric中以私钥与证书（包含被信任实体签名后的公钥）标识一个身份Identity。因此，我们需要提供一个<strong>被当前通道所信任账户的注册证书与公钥</strong>。</p> 
+<p>其次，与peer节点进行通信，需要指定<strong>peer的endpoint（ip address : port）</strong>，Fabric通信过程通常启用TLS协议以确保安全，因此我们还需要提供<strong>上述账户的TLS证书</strong>。</p> 
+<p>最后，还需指定<strong>要调用的链码所在的通道，链码名称、调用的合约方法名称，以及要给方法传递的参数</strong>，这个自不必说。</p> 
+<p>材料配置齐全，我们就可以开始了。</p> 
+<h1>
+<a id="2__15"></a>2. 网关配置</h1> 
+<h2>
+<a id="21__gRPC_channel_16"></a>2.1 创建 gRPC channel</h2> 
+<p>gRPC里的类与方法其实不属于Gateway API。但是我们知道，Fabric网络中实体之间通信使用的就是gRPC。在Gateway API中，创建一个Gateway对象必须需要提供一个<code>gRPC channel</code>对象（gRPC channel这个类，与Fabric中的channel概念不同，可以理解为gRPC的一个连接，），并且同一个gRPC channel可以被用来创建多个Gateway对象。gRPC channel 在创建时，需要指定<code>目标端点的IP地址</code>与<code>端口号</code>，以及用于TLS协议的<code>TLS证书</code>，创建方法如下所示：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">ManagedChannel</span> <span class="token function">newGrpcConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">IOException</span><span class="token punctuation">,</span> <span class="token class-name">CertificateException</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//读取TLS证书</span>
+        <span class="token keyword">var</span> tlsCertReader <span class="token operator">=</span> <span class="token class-name">Files</span><span class="token punctuation">.</span><span class="token function">newBufferedReader</span><span class="token punctuation">(</span>tlsCertPath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">var</span> tlsCert <span class="token operator">=</span> <span class="token class-name">Identities</span><span class="token punctuation">.</span><span class="token function">readX509Certificate</span><span class="token punctuation">(</span>tlsCertReader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">//返回gRPC channel实例</span>
+        <span class="token keyword">return</span> <span class="token class-name">NettyChannelBuilder</span><span class="token punctuation">.</span><span class="token function">forTarget</span><span class="token punctuation">(</span>peerEndpoint<span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">sslContext</span><span class="token punctuation">(</span><span class="token class-name">GrpcSslContexts</span><span class="token punctuation">.</span><span class="token function">forClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">trustManager</span><span class="token punctuation">(</span>tlsCert<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">overrideAuthority</span><span class="token punctuation">(</span>overrideAuth<span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>上面用到的类<code>ManagedChannel</code> ，其实就是 gRPC Channel ，只是在其基础上做了封装，使用时需要注意。</p> 
+<h2>
+<a id="22_Gateway_32"></a>2.2 Gateway配置串讲</h2> 
+<p>Gateway支持我们以一个特定的身份与Fabric网络进行通信。在具体实现中，Gateway其实是一个接口，其被GatewayImpl类实现，</p> 
+<pre><code class="prism language-java"><span class="token comment">//截取自Gateway源码</span>
+<span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">GatewayImpl</span> <span class="token keyword">implements</span> <span class="token class-name">Gateway</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">GatewayClient</span> client<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">SigningIdentity</span> signingIdentity<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">GatewayImpl</span><span class="token punctuation">(</span><span class="token class-name">Builder</span> builder<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>signingIdentity <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">SigningIdentity</span><span class="token punctuation">(</span>builder<span class="token punctuation">.</span>identity<span class="token punctuation">,</span> builder<span class="token punctuation">.</span>hash<span class="token punctuation">,</span> builder<span class="token punctuation">.</span>signer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>client <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">GatewayClient</span><span class="token punctuation">(</span>builder<span class="token punctuation">.</span>grpcChannel<span class="token punctuation">,</span> builder<span class="token punctuation">.</span>optionsBuilder<span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//... ...此处省略</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>我们可以通过Gateway接口的静态方法newInstance()返回GatewayImpl类的内置类<code>Builder</code>的实例。</p> 
+<pre><code class="prism language-java"><span class="token comment">//截取自Gateway源码</span>
+<span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">Gateway</span> <span class="token keyword">extends</span> <span class="token class-name">AutoCloseable</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">static</span> <span class="token class-name">Builder</span> <span class="token function">newInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">GatewayImpl<span class="token punctuation">.</span>Builder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//Builder()是GatewayImpl类的内置类`Builder`的无参构造方法</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//... ...此处省略</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">//这就是Builder构造函数的内容，即上面调用的那个GatewayImpl.Builder()</span>
+<span class="token keyword">public</span> <span class="token class-name">Builder</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>signer <span class="token operator">=</span> <span class="token constant">UNDEFINED_SIGNER</span><span class="token punctuation">;</span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>hash <span class="token operator">=</span> <span class="token class-name">Hash</span><span class="token operator">::</span><span class="token function">sha256</span><span class="token punctuation">;</span>
+      <span class="token keyword">this</span><span class="token punctuation">.</span>optionsBuilder <span class="token operator">=</span> <span class="token class-name">DefaultCallOptions</span><span class="token punctuation">.</span><span class="token function">newBuiler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>Gateway的实现使用了Builder模式，Gateway接口的内部接口Gateway.Builder被GatewayImpl类的内部类Builder实现，支持我们分步对GatewayImpl对象添加所需要的属性。我们接下来围绕要为Gateway添加的属性，以及对应的Gateway.Builder接口中的方法展开介绍。</p> 
+<h3>
+<a id="221_Identity_69"></a>2.2.1 设置Identity</h3> 
+<p>用到的方法原型如下：</p> 
+<pre><code class="prism language-java"><span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> <span class="token function">identity</span><span class="token punctuation">(</span><span class="token class-name">Identity</span> identity<span class="token punctuation">)</span>
+</code></pre> 
+<p><strong>设置Identity其实就是向Gateway中导入账户的身份证书。<strong>传参类型 <strong>Identity</strong> 也是一个接口，该接口在Gateway实现中被</strong>X509Identity</strong>这个类所实现。我们需要构造并传进去的，也是这个<strong>X509Identity</strong>。这个类的构造方法比较简单，需要指定账户所属组织的<strong>mspID</strong>，以及<strong>X509Certificate</strong>。搞过这方面的应该会熟悉，<strong>X509Certificate</strong>这个类并不是Gateway实现的类，而是java.security.cert包里的类。创建一整个<strong>X509Identity</strong>类实例的方法可以参考下面：</p> 
+<pre><code class="prism language-java">
+<span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Identity</span> <span class="token function">newIdentity</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">IOException</span><span class="token punctuation">,</span> <span class="token class-name">CertificatException</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">// certPath为证书路径</span>
+        <span class="token keyword">var</span> certReader <span class="token operator">=</span> <span class="token class-name">Files</span><span class="token punctuation">.</span><span class="token function">newBufferedReader</span><span class="token punctuation">(</span>certPath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 创建 X509Certificate</span>
+        <span class="token keyword">var</span> certificate <span class="token operator">=</span> <span class="token class-name">Identities</span><span class="token punctuation">.</span><span class="token function">readX509Certificate</span><span class="token punctuation">(</span>certReader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">X509Identity</span><span class="token punctuation">(</span>mspID<span class="token punctuation">,</span> certificate<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里创建X509Certificate用到的，是<strong>Identities类</strong>中的方法，注意区分 <strong>Identity接口</strong> 和 <strong>Identities类</strong>。<strong>Identities类</strong>并没有实现 <strong>Identity接口</strong>，也没有自己的属性，而是实现了一些方便进行证书、密钥读写的静态方法。</p> 
+<h3>
+<a id="222_Signer_87"></a>2.2.2 设置Signer</h3> 
+<p>用到的方法原型如下：</p> 
+<pre><code class="prism language-java"><span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> <span class="token function">signer</span><span class="token punctuation">(</span><span class="token class-name">Signer</span> signer<span class="token punctuation">)</span>
+</code></pre> 
+<p><strong>设置Signer其实就是向Gateway中导入账户与证书相匹配的私钥。</strong> 只要熟悉了上面 Identity 的套路，Signer以及之后的其他设定都是类似的。传参类型中的<strong>Signer</strong>是一个接口，它只声明了一个方法，byte sign(byte[] digest)即对消息摘要进行签名。这个接口被<strong>ECPrivateKeySigner</strong> 类实现，整个Gateway实现中，实际负责签名的，便是这个<strong>ECPrivateKeySigner</strong> 类的实例。</p> 
+<pre><code class="prism language-java"><span class="token comment">//截取自Gateway源码</span>
+<span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">ECPrivateKeySigner</span> <span class="token keyword">implements</span> <span class="token class-name">Signer</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token class-name">Provider</span> <span class="token constant">PROVIDER</span> <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">BouncyCastleProvider</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token class-name">String</span> <span class="token constant">ALGORITHM_NAME</span> <span class="token operator">=</span> <span class="token string">"NONEwithECDSA"</span><span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">ECPrivateKey</span> privateKey<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">BigInteger</span> curveN<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">BigInteger</span> halfCurveN<span class="token punctuation">;</span>
+
+    <span class="token class-name">ECPrivateKeySigner</span><span class="token punctuation">(</span><span class="token class-name">ECPrivateKey</span> privateKey<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>privateKey <span class="token operator">=</span> privateKey<span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>curveN <span class="token operator">=</span> privateKey<span class="token punctuation">.</span><span class="token function">getParams</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getOrder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>halfCurveN <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>curveN<span class="token punctuation">.</span><span class="token function">divide</span><span class="token punctuation">(</span><span class="token class-name">BigInteger</span><span class="token punctuation">.</span><span class="token function">valueOf</span><span class="token punctuation">(</span><span class="token number">2L</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token function">sign</span><span class="token punctuation">(</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> digest<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">GeneralSecurityException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> rawSignature <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">generateSignature</span><span class="token punctuation">(</span>digest<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">ECSignature</span> signature <span class="token operator">=</span> <span class="token class-name">ECSignature</span><span class="token punctuation">.</span><span class="token function">fromBytes</span><span class="token punctuation">(</span>rawSignature<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        signature <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">preventMalleability</span><span class="token punctuation">(</span>signature<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> signature<span class="token punctuation">.</span><span class="token function">getBytes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// ... ...此处省略 generateSignature、preventMalleability的具体实现</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>那么怎么创建这个类呢？我们得借助另一个类，讨厌的命名又来了，这个类叫做<strong>Signers</strong>，和上面的<strong>Identities类</strong>相似，<strong>Signers</strong>没有自己的属性，而是给出了静态方法<strong>newPrivateKeySigner(PrivateKey privateKey)<strong>以供我们创建</strong>ECPrivateKeySigner</strong> 类。创建方法如下所示：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Signer</span> <span class="token function">newSigner</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">// keyPath是私钥路径</span>
+    <span class="token keyword">var</span> keyReader <span class="token operator">=</span> <span class="token class-name">Files</span><span class="token punctuation">.</span><span class="token function">newBufferedReader</span><span class="token punctuation">(</span>keyPath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 和2.2.1一样，使用Identies类中的方法读取私钥，并生成PrivateKey类型的私钥对象</span>
+    <span class="token keyword">var</span> privateKey <span class="token operator">=</span> <span class="token class-name">Identities</span><span class="token punctuation">.</span><span class="token function">readPrivateKey</span><span class="token punctuation">(</span>keyReader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 构造ECPrivateKeySigner实例</span>
+    <span class="token keyword">return</span> <span class="token class-name">Signers</span><span class="token punctuation">.</span><span class="token function">newPrivateKeySigner</span><span class="token punctuation">(</span>privateKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="223_gRPC_Channel_131"></a>2.2.3 设置gRPC Channel</h3> 
+<p>还记得2.1中我们创建的 <strong>gRPC Channel</strong> 吗？这里导进来就行，函数原型如下：</p> 
+<pre><code class="prism language-java"><span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> <span class="token function">connection</span><span class="token punctuation">(</span><span class="token class-name">Channel</span> grpcChannel<span class="token punctuation">)</span>
+</code></pre> 
+<h3>
+<a id="224_gRPC_137"></a>2.2.4 设置gRPC任务超时时间</h3> 
+<p>这一步是可选的，目的是为了设置各项任务的超时时间。这其中常用方法的函数原型如下：</p> 
+<pre><code class="prism language-java"><span class="token keyword">default</span> <span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> <span class="token function">evaluateOptions</span><span class="token punctuation">(</span><span class="token class-name">CallOption</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> options<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">default</span> <span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> <span class="token function">endorseOptions</span><span class="token punctuation">(</span><span class="token class-name">CallOption</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> options<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">default</span> <span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> <span class="token function">submitOptions</span><span class="token punctuation">(</span><span class="token class-name">CallOption</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> options<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">default</span> <span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> <span class="token function">commitStatusOptions</span><span class="token punctuation">(</span><span class="token class-name">CallOption</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> options<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>他们各自的作用在后面 <strong>3. 链码的执行与提交</strong> 部分会提到，我们先只需要知道他们各自设置了一项任务的超时时间。</p> 
+<p>这里我们先看看传入参数类型 <strong>CallOption</strong> 类，这个也是Gateway实现中独有的类，目的是设置gRPC运行时的行为，目前主要用来设置超时。我们可以通过 <strong>CallOption</strong> 类中的 <code>public static CallOption deadlineAfter(long duration, TimeUnit unit)</code> 方法来构建一个超时设置对象，<strong>并通过上面接口中声明的超时方法，将超时设置对象与特定的任务绑定到一起</strong>。例如，指定背书超时时间为5分钟可以这么写：</p> 
+<pre><code class="prism language-java"><span class="token comment">// builder是通过Gateway创建的一个GatewayImpl实例</span>
+builder<span class="token punctuation">.</span><span class="token function">endorseOptions</span><span class="token punctuation">(</span><span class="token class-name">CallOption</span><span class="token punctuation">.</span><span class="token function">deadlineAfter</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span><span class="token constant">SECONDS</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>现在我们已经完成了对Gateway属性的设置。</p> 
+<p><strong>其实从源码来看，我们在调用connect()方法之前，从始至终操作的就是同一个<code>Builder</code>对象，调用上面的设置方法，实际上是调用中GatewayImpl中<code>Builder内置类</code>的方法，以完成对该Builder对象中各个属性的设置。</strong> 可以拿connection方法举个例子：</p> 
+<pre><code class="prism language-java"><span class="token comment">// Builder为GatewayImpl的内置类</span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">Builder</span> <span class="token keyword">implements</span> <span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token class-name">Signer</span> <span class="token constant">UNDEFINED_SIGNER</span> <span class="token operator">=</span> <span class="token punctuation">(</span>digest<span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">UnsupportedOperationException</span><span class="token punctuation">(</span><span class="token string">"No signing implementation supplied"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token punctuation">;</span>
+        <span class="token keyword">private</span> <span class="token class-name">Channel</span> grpcChannel<span class="token punctuation">;</span>
+        <span class="token keyword">private</span> <span class="token class-name">Identity</span> identity<span class="token punctuation">;</span>
+        <span class="token keyword">private</span> <span class="token class-name">Signer</span> signer<span class="token punctuation">;</span>
+        <span class="token keyword">private</span> <span class="token class-name">Function</span><span class="token operator">&lt;</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">&gt;</span> hash<span class="token punctuation">;</span>
+        <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">DefaultCallOptions<span class="token punctuation">.</span>Builder</span> optionsBuilder<span class="token punctuation">;</span>
+
+        <span class="token keyword">public</span> <span class="token class-name">Builder</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>signer <span class="token operator">=</span> <span class="token constant">UNDEFINED_SIGNER</span><span class="token punctuation">;</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>hash <span class="token operator">=</span> <span class="token class-name">Hash</span><span class="token operator">::</span><span class="token function">sha256</span><span class="token punctuation">;</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>optionsBuilder <span class="token operator">=</span> <span class="token class-name">DefaultCallOptions</span><span class="token punctuation">.</span><span class="token function">newBuiler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+		<span class="token comment">//注意看这里，其实设置的是Builder类中的属性，并没有对外面的GatewayImpl对象的静态属性产生影响</span>
+        <span class="token keyword">public</span> <span class="token class-name">Builder</span> <span class="token function">connection</span><span class="token punctuation">(</span><span class="token class-name">Channel</span> grpcChannel<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Objects</span><span class="token punctuation">.</span><span class="token function">requireNonNull</span><span class="token punctuation">(</span>grpcChannel<span class="token punctuation">,</span> <span class="token string">"connection"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>grpcChannel <span class="token operator">=</span> grpcChannel<span class="token punctuation">;</span>
+            <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<p>每一次设置方法的调用，对于GatewayImpl对象的静态属性都没有造成实质更改(<strong><code>其实GatewayImpl没有什么静态属性哈哈哈</code></strong>）。当所有的设置配置完毕，可以通过调用<code>connect</code>方法应用上面的配置。我们看一下Builder类中 connect方法的实现：</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token class-name">GatewayImpl</span> <span class="token function">connect</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">GatewayImpl</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>connect()方法其实就是调用GatewayImpl类的有参构造方法，将Builder对象传入，以将其中的属性，配置到新创建的GatewayImpl对象中，并将这个对象返回。</p> 
+<h2>
+<a id="23_Gateway_191"></a>2.3 创建Gateway</h2> 
+<p>经过上面的讲解，这里直接给出一个创建Gateway的示例：</p> 
+<pre><code class="prism language-java">	<span class="token comment">//创建 gRPC channel</span>
+	<span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">ManagedChannel</span> <span class="token function">newGrpcConnection</span><span class="token punctuation">(</span><span class="token class-name">String</span> tlsCertPath<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">IOException</span><span class="token punctuation">,</span> <span class="token class-name">CertificateException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">var</span> tlsCertReader <span class="token operator">=</span> <span class="token class-name">Files</span><span class="token punctuation">.</span><span class="token function">newBufferedReader</span><span class="token punctuation">(</span>tlsCertPath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">var</span> tlsCert <span class="token operator">=</span> <span class="token class-name">Identities</span><span class="token punctuation">.</span><span class="token function">readX509Certificate</span><span class="token punctuation">(</span>tlsCertReader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token class-name">NettyChannelBuilder</span><span class="token punctuation">.</span><span class="token function">forTarget</span><span class="token punctuation">(</span>peerEndpoint<span class="token punctuation">)</span>
+            <span class="token punctuation">.</span><span class="token function">sslContext</span><span class="token punctuation">(</span><span class="token class-name">GrpcSslContexts</span><span class="token punctuation">.</span><span class="token function">forClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">trustManager</span><span class="token punctuation">(</span>tlsCert<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">overrideAuthority</span><span class="token punctuation">(</span>overrideAuth<span class="token punctuation">)</span>
+            <span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">// 创建X509Identity证书</span>
+	<span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Identity</span> <span class="token function">newIdentity</span><span class="token punctuation">(</span><span class="token class-name">String</span> certPath<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">IOException</span><span class="token punctuation">,</span> <span class="token class-name">CertificateException</span> <span class="token punctuation">{<!-- --></span>
+	    <span class="token keyword">var</span> certReader <span class="token operator">=</span> <span class="token class-name">Files</span><span class="token punctuation">.</span><span class="token function">newBufferedReader</span><span class="token punctuation">(</span>certPath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token keyword">var</span> certificate <span class="token operator">=</span> <span class="token class-name">Identities</span><span class="token punctuation">.</span><span class="token function">readX509Certificate</span><span class="token punctuation">(</span>certReader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">X509Identity</span><span class="token punctuation">(</span>mspID<span class="token punctuation">,</span> certificate<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">// 创建ECPrivateKeySigner对象</span>
+	<span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Signer</span> <span class="token function">newSigner</span><span class="token punctuation">(</span><span class="token class-name">String</span> keyPath<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+	    <span class="token keyword">var</span> keyReader <span class="token operator">=</span> <span class="token class-name">Files</span><span class="token punctuation">.</span><span class="token function">newBufferedReader</span><span class="token punctuation">(</span>keyPath<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token keyword">var</span> privateKey <span class="token operator">=</span> <span class="token class-name">Identities</span><span class="token punctuation">.</span><span class="token function">readPrivateKey</span><span class="token punctuation">(</span>keyReader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token keyword">return</span> <span class="token class-name">Signers</span><span class="token punctuation">.</span><span class="token function">newPrivateKeySigner</span><span class="token punctuation">(</span>privateKey<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">// 创建网关</span>
+	<span class="token keyword">public</span> <span class="token class-name">Gateway</span> <span class="token function">gateway</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token class-name">ManagedChannel</span> channel <span class="token operator">=</span> <span class="token function">newGrpcConnection</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token class-name">Gateway<span class="token punctuation">.</span>Builder</span> builder <span class="token operator">=</span> <span class="token class-name">Gateway</span><span class="token punctuation">.</span><span class="token function">newInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">identity</span><span class="token punctuation">(</span><span class="token function">newIdentity</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">signer</span><span class="token punctuation">(</span><span class="token function">newSigner</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">connection</span><span class="token punctuation">(</span>channel<span class="token punctuation">)</span>
+		                <span class="token punctuation">.</span><span class="token function">evaluateOptions</span><span class="token punctuation">(</span>options <span class="token operator">-&gt;</span> options<span class="token punctuation">.</span><span class="token function">withDeadlineAfter</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span><span class="token constant">SECONDS</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		                <span class="token punctuation">.</span><span class="token function">endorseOptions</span><span class="token punctuation">(</span>options <span class="token operator">-&gt;</span> options<span class="token punctuation">.</span><span class="token function">withDeadlineAfter</span><span class="token punctuation">(</span><span class="token number">15</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span><span class="token constant">SECONDS</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		                <span class="token punctuation">.</span><span class="token function">submitOptions</span><span class="token punctuation">(</span>options <span class="token operator">-&gt;</span> options<span class="token punctuation">.</span><span class="token function">withDeadlineAfter</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span><span class="token constant">SECONDS</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		                <span class="token punctuation">.</span><span class="token function">commitStatusOptions</span><span class="token punctuation">(</span>options <span class="token operator">-&gt;</span> options<span class="token punctuation">.</span><span class="token function">withDeadlineAfter</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span><span class="token constant">MINUTES</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span> builder<span class="token punctuation">.</span><span class="token function">connect</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<h1>
+<a id="3__226"></a>3. 链码执行与提交</h1> 
+<h2>
+<a id="31_GatewayImpl_227"></a>3.1 GatewayImpl类的属性</h2> 
+<p>为了将本文结合具体实现讲解开发方法的风格贯彻到底，在讲链码如何执行与提交之前，有必要对网关的具体实现类GatewayImpl再往下挖一步。首先我们回顾一下GatewayImpl的构造函数，就是<code>Gateway.Builder.connet(Builder builder)</code>方法里调用的那个。</p> 
+<pre><code class="prism language-java"><span class="token comment">//截取自Gateway源码</span>
+<span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">GatewayImpl</span> <span class="token keyword">implements</span> <span class="token class-name">Gateway</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">GatewayClient</span> client<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">SigningIdentity</span> signingIdentity<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">GatewayImpl</span><span class="token punctuation">(</span><span class="token class-name">Builder</span> builder<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>signingIdentity <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">SigningIdentity</span><span class="token punctuation">(</span>builder<span class="token punctuation">.</span>identity<span class="token punctuation">,</span> builder<span class="token punctuation">.</span>hash<span class="token punctuation">,</span> builder<span class="token punctuation">.</span>signer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>client <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">GatewayClient</span><span class="token punctuation">(</span>builder<span class="token punctuation">.</span>grpcChannel<span class="token punctuation">,</span> builder<span class="token punctuation">.</span>optionsBuilder<span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">//... ...此处省略</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>看到了吗，构造时，Builder对象中的identity（存储证书，<code>X509Identity类型</code>）、signer（存储私钥，<code>ECPrivateKeySigner类型</code>），会被用于创建<code>SigningIdentity类型</code>的成员变量signingIdentity；而<code>Grpc Channel</code>和<code>optionBuilder</code>（包含了我们上面绑定的每个超时对象以及对应的任务）会被用于创建<code>GatewayClient类型</code>的成员client。这两种类型也是Gateway实现的一部分，他们只是原封不动的把上述参数包含到了自己的属性当中，并且将功能的实现职责转移到了自己身上，其实本质上还是调用其对应类的方法实现的。讲起来绕，举个例子，看一下<code>SigningIdentity类型</code>的实现源码（看下里面注释）。</p> 
+<pre><code class="prism language-java"><span class="token comment">//截取自Gateway源码</span>
+<span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">SigningIdentity</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Identity</span> identity<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Function</span><span class="token operator">&lt;</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">&gt;</span> hash<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Signer</span> signer<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> creator<span class="token punctuation">;</span>
+
+    <span class="token class-name">SigningIdentity</span><span class="token punctuation">(</span><span class="token class-name">Identity</span> identity<span class="token punctuation">,</span> <span class="token class-name">Function</span><span class="token operator">&lt;</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">&gt;</span> hash<span class="token punctuation">,</span> <span class="token class-name">Signer</span> signer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>identity <span class="token operator">=</span> identity<span class="token punctuation">;</span> <span class="token comment">// X509Identity类型</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>hash <span class="token operator">=</span> hash<span class="token punctuation">;</span>	<span class="token comment">//这个Hash指定了使用的hash算法，在Builder构造函数时被指定为sha256</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>signer <span class="token operator">=</span> signer<span class="token punctuation">;</span> <span class="token comment">// ECPrivateKeySigner类型</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>creator <span class="token operator">=</span> <span class="token class-name">GatewayUtils</span><span class="token punctuation">.</span><span class="token function">serializeIdentity</span><span class="token punctuation">(</span>identity<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">public</span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token function">sign</span><span class="token punctuation">(</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> digest<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">.</span>signer<span class="token punctuation">.</span><span class="token function">sign</span><span class="token punctuation">(</span>digest<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//本质还是调用ECPrivateKeySigner对象的sign方法实现签名</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">GeneralSecurityException</span> var3<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span>var3<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>这两种类在之后各种类中，会被反复包含封装。我认为这才是Gateway真正重要的数据结构</strong>，即 <strong><code>身份</code></strong> + <strong><code>gRPC连接</code></strong>。</p> 
+<h2>
+<a id="32_NetworkContract_269"></a>3.2 获取Network与Contract</h2> 
+<p>在之前的步骤里，我们配置完成了Gateway，实现了客户端与Fabric网络连接方式的设置。然而想要调用链码，还需要指明需要连接到的通道名称，以及链码的名称、参数等。</p> 
+<p>在Gateway实现中，由<code>Network接口</code>指代一个通道中所有Fabric节点的集合，而<code>Contrac接口</code>指代一个特定的智能合约。通过<code>Gateway接口</code>中的<code>getNetwork(String networkName)</code>指定通道名称并返回<code>Network</code>类型对象（实际类型为<code>NetworkImpl</code>）。再通过Network接口中的<code>getConract(String chaincodeName)</code>方法指定链码名称并返回<code>Contract</code>类型对象（实际类型为<code>ContractImpl</code>）,借助Contract可以实现对链码的调用与交易的提交。</p> 
+<pre><code class="prism language-java"><span class="token comment">//gateway是之前生成的Gateway对象</span>
+<span class="token class-name">Network</span> network <span class="token operator">=</span> gateway<span class="token punctuation">.</span><span class="token function">getNetwork</span><span class="token punctuation">(</span>channelName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token class-name">Conract</span> contract <span class="token operator">=</span> gateway<span class="token punctuation">.</span><span class="token function">getContract</span><span class="token punctuation">(</span>chaincodeName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h2>
+<a id="33__279"></a>3.3 执行交易&amp;提交交易</h2> 
+<p>在Fabric 的 peer CLI工具中，peer chaincode 常用的<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         f 
+        
+       
+         l 
+        
+       
+         a 
+        
+       
+         g 
+        
+       
+      
+        flag 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.88888em;vertical-align: -0.19444em"></span><span class="mord mathdefault" style="margin-right: 0.10764em">f</span><span class="mord mathdefault" style="margin-right: 0.01968em">l</span><span class="mord mathdefault">a</span><span class="mord mathdefault" style="margin-right: 0.03588em">g</span></span></span></span></span> 有两个，一个是 <code>query</code>，另一个是 <code>invoke</code>。区别在于 <code>query</code> 只是预执行链码，并返回执行结果，这相当于向 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         p 
+        
+       
+         e 
+        
+       
+         e 
+        
+       
+         r 
+        
+       
+      
+        peer 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.19444em"></span><span class="mord mathdefault">p</span><span class="mord mathdefault">e</span><span class="mord mathdefault">e</span><span class="mord mathdefault" style="margin-right: 0.02778em">r</span></span></span></span></span> 查询当前账本内容（即所谓的 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         w 
+        
+       
+         o 
+        
+       
+         r 
+        
+       
+         l 
+        
+       
+         d 
+        
+       
+      
+        world 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em;vertical-align: 0em"></span><span class="mord mathdefault" style="margin-right: 0.02691em">w</span><span class="mord mathdefault">o</span><span class="mord mathdefault" style="margin-right: 0.02778em">r</span><span class="mord mathdefault" style="margin-right: 0.01968em">l</span><span class="mord mathdefault">d</span></span></span></span></span> <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         s 
+        
+       
+         t 
+        
+       
+         a 
+        
+       
+         t 
+        
+       
+         e 
+        
+       
+      
+        state 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.61508em;vertical-align: 0em"></span><span class="mord mathdefault">s</span><span class="mord mathdefault">t</span><span class="mord mathdefault">a</span><span class="mord mathdefault">t</span><span class="mord mathdefault">e</span></span></span></span></span>），而并不会真正的提交交易，链码的执行结果不会真正存储到账本中，因此也不需要做背书；而 <code>invoke</code>则是实实在在需要提交一个新的交易，背书、排序共识、VSCC验证、账本提交等过程一个都不能少。</p> 
+<p>在Fabric 的Java Gateway中也是类似。query在Gateway中叫做<code>evaluate</code>（执行），invoke在Gateway中叫<code>submit</code>（提交）。</p> 
+<p>我们可以通过<code>Contract接口</code>中提供的<code>evaluateTransaction</code>和<code>submitTransaction</code>简单的实现上面两个过程。假设我们要调用mychannel上名为bcerts的链码中的test方法，并传入参数arg1,arg2，则调用示例如下：</p> 
+<pre><code class="prism language-java"><span class="token class-name">Network</span> network <span class="token operator">=</span> gateway<span class="token punctuation">.</span><span class="token function">getNetwork</span><span class="token punctuation">(</span>mychannel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token class-name">Conract</span> contract <span class="token operator">=</span> gateway<span class="token punctuation">.</span><span class="token function">getContract</span><span class="token punctuation">(</span>bcerts<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">// 执行交易（第一个参数为方法名，后面的参数是方法的参数列表，可以是String类型也可以是byte数组类型</span>
+<span class="token comment">// 			但是要注意所有参数的类型要一致）</span>
+<span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> res_eval <span class="token operator">=</span> contract<span class="token punctuation">.</span><span class="token function">evaluateTransaction</span><span class="token punctuation">(</span><span class="token string">"test"</span><span class="token punctuation">,</span> arg1<span class="token punctuation">,</span> arg2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">// 提交交易</span>
+<span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> res_subm <span class="token operator">=</span> contract<span class="token punctuation">.</span><span class="token function">submitTransaction</span><span class="token punctuation">(</span><span class="token string">"test"</span><span class="token punctuation">,</span> arg1<span class="token punctuation">,</span> arg2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>但这只是简略的写法，<strong>执行交易和提交交易都是由一些子过程组成的</strong>，我们可以通过手动调用每个子过程，来实现更贴合我们需求的定制功能。在 <strong>3.4</strong> 和 <strong>3.5</strong> 中将会分别拆解上面两个过程。</p> 
+<h2>
+<a id="34__296"></a>3.4 执行交易拆解</h2> 
+<p>首先简单复习一下Fabric的交易提交流程。客户端会先构造一个Propoasl，发送给背书节点（指定的peer集合）做背书，背书（<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         e 
+        
+       
+         n 
+        
+       
+         d 
+        
+       
+         o 
+        
+       
+         r 
+        
+       
+         s 
+        
+       
+         e 
+        
+       
+      
+        endorse 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em;vertical-align: 0em"></span><span class="mord mathdefault">e</span><span class="mord mathdefault">n</span><span class="mord mathdefault">d</span><span class="mord mathdefault">o</span><span class="mord mathdefault" style="margin-right: 0.02778em">r</span><span class="mord mathdefault">s</span><span class="mord mathdefault">e</span></span></span></span></span>）相当于是把proposal里指定的链码执行一下，把结果（读写集）和对结果的签名打包，形成背书（<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         e 
+        
+       
+         n 
+        
+       
+         d 
+        
+       
+         o 
+        
+       
+         r 
+        
+       
+         s 
+        
+       
+         e 
+        
+       
+         m 
+        
+       
+         e 
+        
+       
+         n 
+        
+       
+         t 
+        
+       
+      
+        endorsement 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em;vertical-align: 0em"></span><span class="mord mathdefault">e</span><span class="mord mathdefault">n</span><span class="mord mathdefault">d</span><span class="mord mathdefault">o</span><span class="mord mathdefault" style="margin-right: 0.02778em">r</span><span class="mord mathdefault">s</span><span class="mord mathdefault">e</span><span class="mord mathdefault">m</span><span class="mord mathdefault">e</span><span class="mord mathdefault">n</span><span class="mord mathdefault">t</span></span></span></span></span>），发还给客户端。客户端收集到足够背书后，将所有背书与proposal组装成真正的Transaction（交易），发送给orderer进行排序。排序组织对交易进行排序，打包成块发送给peer，peer验证块中交易是否有效，在检查过后将背书里的读写集更新到账本中，并将块链接到区块链上。</p> 
+<p>在Gateway中，也是一样。执行交易（<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         e 
+        
+       
+         v 
+        
+       
+         a 
+        
+       
+         l 
+        
+       
+         u 
+        
+       
+         a 
+        
+       
+         t 
+        
+       
+         e 
+        
+       
+      
+        evaluate 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em;vertical-align: 0em"></span><span class="mord mathdefault">e</span><span class="mord mathdefault" style="margin-right: 0.03588em">v</span><span class="mord mathdefault">a</span><span class="mord mathdefault" style="margin-right: 0.01968em">l</span><span class="mord mathdefault">u</span><span class="mord mathdefault">a</span><span class="mord mathdefault">t</span><span class="mord mathdefault">e</span></span></span></span></span>）只需要客户端构造一个Proposal，然后交由peer执行，返回结果即可。因此上面的<code>evaluateTransaction</code>调用等价于：</p> 
+<pre><code class="prism language-java">contract<span class="token punctuation">.</span><span class="token function">newProposal</span><span class="token punctuation">(</span><span class="token string">"test"</span><span class="token punctuation">)</span>	<span class="token comment">//返回ProposalBuilder类型</span>
+		<span class="token punctuation">.</span><span class="token function">addArguments</span><span class="token punctuation">(</span>arg1<span class="token punctuation">,</span> arg2<span class="token punctuation">)</span>  <span class="token comment">//返回ProposalBuilder类型</span>
+		<span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span>  <span class="token comment">//返回Proposal类型</span>
+		<span class="token punctuation">.</span><span class="token function">evaluate</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//返回byte[]类型</span>
+</code></pre> 
+<p>这意味着，我们实际上是先构造了一个<code>ProposalBuilder</code>对象（注意这里的ProposalBuilder以及后面的诸多类型都为接口，我们不再细究实现接口的实际类型），通过这个对象指定调用链码名称和参数，然后再生成真正的<code>Proposal</code>对象，通过<code>Proposal</code>的<code>evaluate()</code>方法调用链码并返回链码在peer上的执行结果。</p> 
+<h2>
+<a id="35__308"></a>3.5 提交交易拆解</h2> 
+<p>同理。上面调用的<code>submitTransaction</code>方法同样可以拆分为以下几步。</p> 
+<pre><code class="prism language-java">contract<span class="token punctuation">.</span><span class="token function">newProposal</span><span class="token punctuation">(</span><span class="token string">"test"</span><span class="token punctuation">)</span>
+		<span class="token punctuation">.</span><span class="token function">addArguments</span><span class="token punctuation">(</span>arg1<span class="token punctuation">,</span> arg2<span class="token punctuation">)</span>
+		<span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">//返回Proposal类型</span>
+		<span class="token punctuation">.</span><span class="token function">endorse</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">//返回Transaction类型</span>
+		<span class="token punctuation">.</span><span class="token function">submit</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>	<span class="token comment">//返回交易提交结果byte[]类型</span>
+</code></pre> 
+<p>可以看到，Proposal被构造后，通过调用<code>endorse</code>方法向peer节点请求背书，并将提案与背书一并打包后形成<code>Transaction类型</code>的对象，我们可以通过<code>Transaction接口</code>中的<code>submit</code>方法提交交易，并接收结果。之前第二节里的超时设置，在这里对应上了吧？因为<code>endorse</code>，<code>submit</code>，<code>evaluate</code>等方法都是<strong>同步的</strong>，<strong>线程会在这里陷入阻塞</strong>，<strong>通过设置合理的超时时间，以停止等待，抛出异常</strong>。</p> 
+<p>但是，之前设置的还有一个<code>commit</code>任务的超时时间，这是什么呢？还有，有无异步的交易提交方法呢？下一节讲。</p> 
+<h2>
+<a id="36__322"></a>3.6 异步提交交易</h2> 
+<p>在 <strong>3.5</strong> 中我们得知，提案<code>Proposal</code>在调用<code>endorse</code>方法进行背书后，会被打包为交易<code>Transaction</code>类型，接下来将通过peer节点转发给orderer节点，进行排序共识，打包成块后发送给peer节点，以供验证（validate）和提交（commit），这里的提交分为两步，① 将块放到区块链上（无论交易是否有效，都会上链，无效交易会被打上无效标识）② 将背书中的读写集，存储到账本中（即数据库，默认为level-DB，可选用couch-DB）。排序和commit都是需要时间的，在某些场景下我们希望交易在发送到排序节点之后，立刻结束线程的阻塞，之后异步的获取commit的结果。</p> 
+<p><code>Transaction接口</code>提供了<code>submitAsync</code>方法来实现交易的异步提交。调用方法与submit方法相同，区别在于客户端与peer取得联系后，由peer节点将交易转发给orderer节点，之后立刻返回给客户端结果，返回的是一个<code>SubmittedTransaction类型</code>（接口）的对象。</p> 
+<p><code>SubmittedTransaction</code>接口继承了<code>Commit接口</code>，我们可以通过其提供的以下几种方法来进行后续操作：</p> 
+<p>① <code>byte[] getResult()</code><br> 获取交易结果，这个就类似于evaluate返回的内容。背书实际上就是peer节点对链码的预执行，由于这个方法返回的内容源自于背书，因此调用该方法无需等待交易Commit结束，而是可以直接获知的。这也是异步的意义之一，我们不必等到交易commit结束才能获知执行结果。<br> ② <code> Status getStatus()</code><br> 获取交易提交状态。该方法是阻塞方法，只有等到交易所在区块在peer上commit结束后，才能返回<code>Status类型</code>的结果。这个Status是Gateway提供的另一种接口，其提供的方法如下图所示：<br> <img src="https://images2.imgbox.com/d2/32/R4ZCcXca_o.png" alt="Status接口介绍"><br> 几种方法的用法在上面的Description字段中都有。我们较常的就是isSuccessful()，它可以告知我们交易是否commit成功。</p> 
+<p>下面将展示一个案例，在异步提交交易后，先获知结果，再检查交易是否提交成功：</p> 
+<pre><code class="prism language-java"><span class="token class-name">SubmittedTransaction</span> st <span class="token operator">=</span> contract<span class="token punctuation">.</span><span class="token function">newProposal</span><span class="token punctuation">(</span><span class="token string">"test"</span><span class="token punctuation">)</span>
+									<span class="token punctuation">.</span><span class="token function">addArguments</span><span class="token punctuation">(</span>arg1<span class="token punctuation">,</span> arg2<span class="token punctuation">)</span>
+									<span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">//返回Proposal类型</span>
+									<span class="token punctuation">.</span><span class="token function">endorse</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">//返回Transaction类型</span>
+									<span class="token punctuation">.</span><span class="token function">submitAsync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>	<span class="token comment">//返回SubmittedTransaction类型	</span>
+<span class="token comment">//获取交易结果</span>
+<span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> result <span class="token operator">=</span> st<span class="token punctuation">.</span><span class="token function">getResult</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//获取交易状态对象【阻塞】</span>
+<span class="token class-name">Status</span> status <span class="token operator">=</span> st<span class="token punctuation">.</span><span class="token function">getStatus</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//获知交易是否提交成功</span>
+<span class="token keyword">if</span><span class="token punctuation">(</span>status<span class="token punctuation">.</span><span class="token function">isSuccessful</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"交易提交成功！交易ID为"</span><span class="token operator">+</span> status<span class="token punctuation">.</span><span class="token function">getTransactionID</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> 
+	<span class="token string">"，交易所在区块号为："</span> <span class="token operator">+</span> status<span class="token punctuation">.</span><span class="token function">getBlockNumber</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h1>
+<a id="4__354"></a>4. 问题分享</h1> 
+<h2>
+<a id="41__355"></a>4.1 超时理解再谈</h2> 
+<p>我们之前设置的超时，其实都是远程过程调用的超时时间。远程过程调用的思想是使调用远程服务就像调用本地服务一样自然，但该方法的实际执行过程却是在peer节点上完成的，（例如Commit），当我们调用该方法超时后（实际上相当于远程Peer节点上的方法执行超时），那么这次本地调用将会抛出gRPC超时异常，以便程序意识到问题。</p> 
+<h2>
+<a id="42__Gateway_Client__357"></a>4.2 Gateway Client 请求背书原理（为什么整个过程没有指定过背书节点?）</h2> 
+<p>最后，再补充一个小问题。</p> 
+<p>有过使用CLI调用过链码的道友可能有经验，在使用peer chaincode invoke命令提交交易时，我们需要使用–peerAddresses指定背书节点，并在后面用–TLSRootCertFile指定与该背书节点通信所用的TLS根证书，当我们需要多个节点进行背书时时，CLI需要在命令中逐个指定。但是在用Gateway API开发客户端的时候，有没有发现除了指定要和哪个peer节点通信外，我们没有指定过任何和背书有关的信息？</p> 
+<p>既然如此，为什么我们的客户端也能成功背书？这项功能得益于<strong>服务发现</strong>（<a href="https://hyperledger-fabric.readthedocs.io/en/release-2.4/discovery-overview.html">Service Discovery</a>）。</p> 
+<p>客户端要想完成与Fabric网络交互的一系列任务，那么就有必要获知网络的拓扑以及相关通道的各种策略（例如背书策略）。早期这些是由程序员静态配置在客户端本地的，但是网络拓扑易变，一个成熟的客户端应用不可能每次连接都手动修改客户端的配置。因此开发者们搞出了服务发现这个东西。有关服务发现的具体理解与配置方法我后面会写一篇博客专门介绍，这里只是给大家讲一下Gateway Client提交交易如何借助服务发现来完成背书。</p> 
+<p>服务发现属于peer节点功能的一部分。可以通过服务发现获知网络拓扑、背书政策以及在线节点等内容。我们的Gateway客户端通过Peer节点调用<strong>服务发现</strong>来获取目标链码的背书策略，并且获知目前在线的可以满足背书政策的背书节点集合（包括IP地址和端口），Gateway默认选取满足背书政策且节点数量最少的一组节点发送背书请求，如果每个集合节点数量一样将随机选取。</p> 
+<p>因此如果背书失败，请检查节点状态以及服务发现是否启动。</p> 
+<h1>
+<a id="5__370"></a>5. 文档参考</h1> 
+<p>在下水平有限，如有不当之处，烦请不吝赐教。</p> 
+<p>[1]<a href="https://hyperledger-fabric.readthedocs.io/en/release-2.4/discovery-overview.html"> Fabirc 服务发现官方文档 </a><br> [2] <a href="https://hyperledger.github.io/fabric-gateway/main/api/java/">Hyperledger Fabric Java Gateway API文档</a><br> [3] <a href="https://github.com/hyperledger/fabric-samples">Hyperledger Fabric Samples示例程序</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

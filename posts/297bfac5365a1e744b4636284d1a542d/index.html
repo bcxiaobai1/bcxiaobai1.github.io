@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【Byzer】Python Daemon 暴增的问题排查 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Byzer】Python Daemon 暴增的问题排查</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_0"></a>背景</h2> 
+<h3>
+<a id="Byzer__2"></a>Byzer 介绍</h3> 
+<p>Byzer 作为一门面向 Data 和 AI 的新一代编程语言。具体信息可以点击下面链接了解：https://docs.byzer.org/#/byzer-lang/zh-cn/introduction/byzer_lang_design</p> 
+<p>修复如下 Github issues：<br> https://github.com/byzer-org/byzer-lang/issues/1652</p> 
+<h3>
+<a id="_9"></a>问题描述</h3> 
+<p>后台发现 daemon 进程增长很快！而正常情况是一个<code>python env</code> 应该只有一个进程。</p> 
+<p>下图可以看到多个 daemon：<br> <img src="https://images2.imgbox.com/2a/95/Wz1M35Fe_o.jpg" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_18"></a>影响范围</h2> 
+<p>大致从 <code>driver</code> 节点的系统资源分析了一下，发现问题比较严重，注意有以下几点：</p> 
+<ul>
+<li>进程常驻，不会自动销毁，会导致创建过多导致 CPU 过高</li>
+<li>占用内存较高，跟 daemon 中任务使用的资源有关</li>
+<li>大量 <code>IDEL</code> 进程，实际运行很短，然后就进入阻塞状态</li>
+</ul> 
+<p>下面是具体的分析过程。</p> 
+<p>经过大量验证，发现问题属于偶发现象，daemon 会长时间驻留内存，直到 <code>Byzer</code> 引擎重启。从下图可以看到，启动时间<code>3：34</code> 和 <code>8：26</code>都有泄露的进程，并且不会自动销毁。</p> 
+<p><img src="https://images2.imgbox.com/8f/1e/TFE2mOiH_o.png" alt="在这里插入图片描述"></p> 
+<p>于是我打算尝试 kill 进程后，对比基线看看对系统资源的影响。</p> 
+<p><img src="https://images2.imgbox.com/7c/8a/UelosyLX_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/93/e4/uUccaFZs_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/34/4c/y53H6zfn_o.png" alt="在这里插入图片描述"></p> 
+<p>可以发现，第一次 kill 直接释放了 1.4G 左右的内存，后面的任务没有释放那么多，但都是有不同程度的释放。 因为我执行的 python 任务有的是空跑，有的比较吃资源，应该跟 daemon 任务使用的资源是相关的。</p> 
+<p>查看当前进程资源和堆栈情况。</p> 
+<p>使用 <code>pstree</code>，查看相关进程：</p> 
+<p><img src="https://images2.imgbox.com/9f/b6/mhPHlMHG_o.png" alt="在这里插入图片描述"></p> 
+<p>发现几个特点，在 java 端使用 <code>bash -c</code> 创建 daemon 的进程只有一个，即问题大概率出现在<code>python</code> 侧。泄露的这些 daemon，都有相同的 <code>ppid</code>，应该是在 daemon 中 <code>fork</code> 出来的新进程，而且前面 <code>ps</code> 命令看到的状态 <code>S1</code>也印证了这一点。</p> 
+<p><img src="https://images2.imgbox.com/2a/95/Wz1M35Fe_o.jpg" alt="在这里插入图片描述"></p> 
+<p>通过使用 python 工具 <code>py-spy</code> 排查堆栈：</p> 
+<pre><code class="prism language-Shell">sudo py-spy top --pid  76366
+</code></pre> 
+<blockquote> 
+ <p><code>top</code>: 实时查看每个函数运行时间并统计</p> 
+</blockquote> 
+<p>显示如下：</p> 
+<p><img src="https://images2.imgbox.com/bb/49/s9OWP7l7_o.png" alt="在这里插入图片描述"></p> 
+<p>观察上图中实时统计的峰顶，发现是卡在了 <code>_poll_connectivity</code> 上面，对应的代码是下面这行：</p> 
+<pre><code class="prism language-scala"><span class="token keyword">while</span> True<span class="token operator">:</span>
+
+    event <span class="token operator">=</span> channel<span class="token punctuation">.</span>watch_connectivity_state<span class="token punctuation">(</span>connectivity<span class="token punctuation">,</span>
+
+                                             time<span class="token punctuation">.</span>time<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">0.2</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>google 了一下发现一个类似的讨论：</p> 
+<p>https://github.com/grpc/grpc/issues/3064</p> 
+<p>应该是进程阻塞在了完成队列上面。再往上追溯没有找到具体的调用了，需要后续对 <code>pyjava</code> 代码详细分析…</p> 
+<h2>
+<a id="_107"></a>问题复现</h2> 
+<p>因为该问题是偶发的，我尝试了比较多的方式复现该问题。一开始测试了正常的任务，包括不同的 <code>python env</code> 配置下 daemon 的表现，<code>dataMode</code>设置为 data 和 model 时的表现，<code>runIn</code> 在 driver 和 executor 时的表现，不同的<code>schema</code> 时的表现，发现如果代码逻辑正常daemon是不会增长的。于是看了下报错时任务的表现，定位到<code>schema</code>（即输出表结构）是错误的时候，且运行在 driver 端，会出现该问题。</p> 
+<p>设置一个错误的类型，并在 driver 执行（executor 抛异常不会导致 daemon 增长）：</p> 
+<pre><code class="prism language-Python">!python env "PYTHON_ENV=source activate ray1.8.0";
+
+!python conf "schema=st(field(top,map(string,string)))";
+
+!python conf "runIn=driver";
+
+!python conf "dataMode=model";
+
+
+
+run command as Ray.`` where 
+
+inputTable="command"
+
+and outputTable="output"
+
+and code='''
+
+from pyjava.api.mlsql import RayContext, PythonContext
+
+context.build_result([{"top": {"a": "string"}}])
+
+''';
+</code></pre> 
+<p>执行后会得到一个异常，堆栈信息如下：</p> 
+<pre><code class="prism language-Kotlin">Error while decoding: java.lang.UnsupportedOperationException
+
+createexternalrow(staticinvoke(class org.apache.spark.sql.catalyst.util.ArrayBasedMapData$, ObjectType(interface scala.collection.Map), toScalaMap, staticinvoke(class scala.collection.mutable.WrappedArray$, ObjectType(interface scala.collection.Seq), make, mapobjects(lambdavariable(MapObject, StringType, true, -1), lambdavariable(MapObject, StringType, true, -1).toString, input[0, map&lt;string,string&gt;, true].keyArray, None).array, true, false), staticinvoke(class scala.collection.mutable.WrappedArray$, ObjectType(interface scala.collection.Seq), make, mapobjects(lambdavariable(MapObject, StringType, true, -2), lambdavariable(MapObject, StringType, true, -2).toString, input[0, map&lt;string,string&gt;, true].valueArray, None).array, true, false), true, false), StructField(top,MapType(StringType,StringType,true),true))
+
+java.lang.RuntimeException: Error while decoding: java.lang.UnsupportedOperationException
+
+createexternalrow(staticinvoke(class org.apache.spark.sql.catalyst.util.ArrayBasedMapData$, ObjectType(interface scala.collection.Map), toScalaMap, staticinvoke(class scala.collection.mutable.WrappedArray$, ObjectType(interface scala.collection.Seq), make, mapobjects(lambdavariable(MapObject, StringType, true, -1), lambdavariable(MapObject, StringType, true, -1).toString, input[0, map&lt;string,string&gt;, true].keyArray, None).array, true, false), staticinvoke(class scala.collection.mutable.WrappedArray$, ObjectType(interface scala.collection.Seq), make, mapobjects(lambdavariable(MapObject, StringType, true, -2), lambdavariable(MapObject, StringType, true, -2).toString, input[0, map&lt;string,string&gt;, true].valueArray, None).array, true, false), true, false), StructField(top,MapType(StringType,StringType,true),true))
+
+org.apache.spark.sql.catalyst.encoders.ExpressionEncoder$Deserializer.apply(ExpressionEncoder.scala:186)
+
+tech.mlsql.ets.Ray.$anonfun$distribute_execute$20(Ray.scala:182)
+
+scala.collection.Iterator$$anon$10.next(Iterator.scala:459)
+
+scala.collection.Iterator$$anon$11.next(Iterator.scala:494)
+
+scala.collection.Iterator.foreach(Iterator.scala:941)
+
+scala.collection.Iterator.foreach$(Iterator.scala:941)
+
+scala.collection.AbstractIterator.foreach(Iterator.scala:1429)
+
+scala.collection.generic.Growable.$plus$plus$eq(Growable.scala:62)
+
+scala.collection.generic.Growable.$plus$plus$eq$(Growable.scala:53)
+
+scala.collection.mutable.ListBuffer.$plus$plus$eq(ListBuffer.scala:184)
+
+scala.collection.mutable.ListBuffer.$plus$plus$eq(ListBuffer.scala:47)
+
+scala.collection.TraversableOnce.to(TraversableOnce.scala:315)
+
+scala.collection.TraversableOnce.to$(TraversableOnce.scala:313)
+
+scala.collection.AbstractIterator.to(Iterator.scala:1429)
+
+scala.collection.TraversableOnce.toList(TraversableOnce.scala:299)
+
+scala.collection.TraversableOnce.toList$(TraversableOnce.scala:299)
+
+scala.collection.AbstractIterator.toList(Iterator.scala:1429)
+
+tech.mlsql.ets.Ray.distribute_execute(Ray.scala:180)
+
+tech.mlsql.ets.Ray.train(Ray.scala:56)
+
+tech.mlsql.dsl.adaptor.TrainAdaptor.parse(TrainAdaptor.scala:116)
+
+streaming.dsl.ScriptSQLExecListener.execute$1(ScriptSQLExec.scala:408)
+
+streaming.dsl.ScriptSQLExecListener.exitSql(ScriptSQLExec.scala:447)
+
+streaming.dsl.parser.DSLSQLParser$SqlContext.exitRule(DSLSQLParser.java:296)
+
+org.antlr.v4.runtime.tree.ParseTreeWalker.exitRule(ParseTreeWalker.java:47)
+
+org.antlr.v4.runtime.tree.ParseTreeWalker.walk(ParseTreeWalker.java:30)
+
+org.antlr.v4.runtime.tree.ParseTreeWalker.walk(ParseTreeWalker.java:28)
+
+streaming.dsl.ScriptSQLExec$._parse(ScriptSQLExec.scala:160)
+
+streaming.dsl.ScriptSQLExec$.parse(ScriptSQLExec.scala:147)
+
+streaming.rest.RestController.$anonfun$script$1(RestController.scala:153)
+
+tech.mlsql.job.JobManager$.run(JobManager.scala:74)
+
+tech.mlsql.job.JobManager$$anon$1.run(JobManager.scala:91)
+
+java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1149)
+
+java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+
+java.lang.Thread.run(Thread.java:748)
+</code></pre> 
+<h2>
+<a id="_227"></a>问题定位</h2> 
+<p>看到多个daemon被创建第一反应是不是什么原因导致java侧创建python daemon的脚本被多次执行。</p> 
+<p>控制创建daemon的逻辑如下：</p> 
+<pre><code class="prism language-Shell">private val pythonWorkers = mutable.HashMap[(String, Map[String, String]), PythonWorkerFactory]()
+
+
+
+def createPythonWorker(pythonExec: String, envVars: Map[String, String], conf: Map[String, String]): java.net.Socket = {
+
+  synchronized {
+
+    val key = (pythonExec, envVars)
+
+    pythonWorkers.getOrElseUpdate(key, new PythonWorkerFactory(pythonExec, envVars, conf)).create()
+
+  }
+</code></pre> 
+<p>可以看到，如果一个<code>python worker factory</code>已经创建了，就会被缓存到<code>pythonWorkers</code> 中。因为key只有pythonExec, envVars，没有 hint 中设置的 <code>python conf</code>，如果用户 pythonExec 中 <code>code</code> 和 <code>python env</code> 环境没有变化，就会取到创建好的 <code>python worker factory</code>，而 daemon进程相关信息就是保存在 factory 中的。*</p> 
+<p>经过断点调试，也确实印证了前面观察的结果，java 侧只创建了一次 daemon，因为相同<code>conda</code> 环境时，的的确确是从缓存中取到的，即使上一次执行报错。而不同的 <code>conda</code> 环境确实也会导致daemon增长，但属于正常且可控的。具体的代码逻辑梳理成了单独的文档：<a href="https://www.jianshu.com/p/3c36ae92f35b">Ray插件java侧代码走读</a></p> 
+<p>回过头来仔细看了一下异常堆栈，发现是在函数<code>stage1_schema_encoder</code>执行时报错（也是问题的所在），因为返回的结果不能转换为<code>map</code>结构。可以看代码如下：</p> 
+<pre><code class="prism language-Kotlin">    val javaContext = new JavaContext()
+
+    val commonTaskContext = new AppContextImpl(javaContext, batch)
+
+    val columnarBatchIter = batch.compute(Iterator(newIter), 0, commonTaskContext)
+
+    val data = columnarBatchIter.flatMap { batch =&gt;
+
+      batch.rowIterator.asScala.map(f =&gt;
+
+        stage1_schema_encoder(f)
+
+      )
+
+    }.toList
+
+    javaContext.markComplete
+
+    javaContext.close
+
+    val rdd = session.sparkContext.makeRDD[Row](data)
+
+    session.createDataFrame(rdd, stage1_schema)
+
+}
+</code></pre> 
+<p>而后面对于 javaContext 状态和关闭的操作因为异常没有被执行到，我于是 dig 到如下的错误case。</p> 
+<ul>
+<li>不更新 context 状态会导致 monitor 不会去杀掉僵尸的进程;</li>
+<li>而不手动关闭，会导致 daemon 一直阻塞在完成队列上。</li>
+</ul> 
+<p>具体的 dig 流程在下面阐述。</p> 
+<h3>
+<a id="javaContextmarkComplete_306"></a>javaContext.markComplete</h3> 
+<p>我们知道 Byzer 是会自动 check 和关闭无用 worker 的，但是如果状态没有被设置为完成或者异常，会导致monitor不会去自动杀掉任务，因为 while 条件<code>!context.isInterrupted &amp;&amp; !context.isCompleted</code>永真，后续是否可以加一下任务超时控制？</p> 
+<pre><code class="prism language-JavaScript">override def monitor(callback: () =&gt; Unit) = {
+
+  (taskKillTimeout: Long, pythonExec: String, envVars: Map[String, String], worker: Socket) =&gt; {
+
+    // Kill the worker if it is interrupted, checking until task completion.
+
+    // TODO: This has a race condition if interruption occurs, as completed may still become true.
+
+    while (!context.isInterrupted &amp;&amp; !context.isCompleted) {
+
+      Thread.sleep(2000)
+
+    }
+
+    if (!context.isCompleted) {
+
+      Thread.sleep(taskKillTimeout)
+
+      if (!context.isCompleted) {
+
+        try {
+
+          // Mimic the task name used in `Executor` to help the user find out the task to blame.
+
+          val taskName = s"${context.partitionId}"
+
+          logWarning(s"Incomplete task $taskName interrupted: Attempting to kill Python Worker")
+
+          PythonWorkerFactory.destroyPythonWorker(pythonExec, envVars, worker)
+
+        } catch {
+
+          case e: Exception =&gt;
+
+            logError("Exception when trying to kill worker", e)
+
+        }
+
+      }
+
+    }
+
+  }
+
+}
+</code></pre> 
+<h3>
+<a id="javaContextclose_362"></a>javaContext.close</h3> 
+<p>关闭方法也比较重要，dig 了一下发现是关闭 arrow vector 和 arrow allocator：</p> 
+<pre><code class="prism language-Scala">val allocator =
+
+  ArrowUtils.rootAllocator.newChildAllocator("toBatchIterator", 0, Long.MaxValue)
+
+
+
+val root = VectorSchemaRoot.create(arrowSchema, allocator)
+
+val unloader = new VectorUnloader(root)
+
+val arrowWriter = ArrowWriter.create(root)
+
+
+
+context match {
+
+  case c: AppContextImpl =&gt; c.innerContext.asInstanceOf[JavaContext].addTaskCompletionListener { _ =&gt;
+
+    root.close()
+
+    allocator.close()
+
+  }
+</code></pre> 
+<p>我于是做了如下修改（右边为修改后的代码）：<br> <img src="https://images2.imgbox.com/54/68/o5806aEo_o.png" alt="在这里插入图片描述"><br> 在将两行操作移到了 finally 位置，并设置一个比较容易理解的异常 message。</p> 
+<hr> 
+<h2>
+<a id="Join_Byzer_Community_403"></a>Join Byzer Community</h2> 
+<p>加入我们的slack channel！</p> 
+<p>https://join.slack.com/t/byzer-org/shared_invite/zt-10qgl60dg-lX4fFggaHyHB6GtUmer_xw</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

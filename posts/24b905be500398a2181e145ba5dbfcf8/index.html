@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Elasticsearch写入数据的过程是什么样的？以及是如何快速更新索引数据的？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Elasticsearch写入数据的过程是什么样的？以及是如何快速更新索引数据的？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h3>
+<a id="_0"></a>前言</h3> 
+<p>最近面试过程中遇到问Elasticsearch的问题不少，这次总结一下，然后顺便也了解一下Elasticsearch内部是一个什么样的结构，毕竟总不能就只了解个倒排索引吧。本文标题就是我遇到过的两个问题，所以此次基本上只是围绕着这两个问题来总结。</p> 
+<h3>
+<a id="ES_3"></a>ES写入数据</h3> 
+<h4>
+<a id="ES_4"></a>在介绍写入数据的过程时，先明确一下ES中的一些关键性的概念：</h4> 
+<ul>
+<li>
+<font color="red">Clouster</font>：集群，由一到N个Elasticsearch服务节点组成。</li>
+<li>
+<font color="red">Node</font>：节点，组成Elasticsearch集群的基本单元，单个集群内节点名称唯一。通常一个节点中分配一道多个分片。</li>
+<li>
+<font color="red">Shards</font>：分片，当ES的索引数据过大时，会进行水平拆分，拆分出来的每一个单元都称为分片。<font color="#008000">在进行写入数据的时候，会通过路由来确定具体写到哪个分片上，所以在创建索引的时候就要确定好分片数量，并且一旦确定不可更改</font>。索引数据在经过分片后，在数据管理和性能上都有很大提升，并且每一个分片都是一个Lucende的索引，<strong>每个分片都必须有一个主分片和零到多个副分片</strong>。</li>
+<li>
+<font color="red">Replicas</font>：副本或备份，副本是指对主分片的备份分片，无论是主分片还是副本分片都可以对外提供查询服务。<strong>但是写入操作时是先写入主分片，然后再分发到副本上。</strong><br> <strong>当主分片不可用时会在副本分片上选举一个作为主分片，因此副本不仅可以保证系统的高可用性，还可以提升搜索时的并发性能（主副分片都可以提供查询</strong>）。但并不是副本越多越好，副本数量过多会导致数据同步的负担过大。</li>
+</ul> 
+<blockquote> 
+ <p>分片数 <em>（副本数+1）= 所需的最大节点数<br> 举例：你计划5个分片和1个副本，那么所需要的最大的节点数为：5</em>（1+1）=10个节点。</p> 
+</blockquote> 
+<ul>
+<li>
+<font color="red">Index</font>：索引，由一个和多个分片组成，单个集群内索引名字是唯一的。</li>
+<li>
+<font color="red">Type</font>：类型，指索引内部的逻辑分区，一般是通过Type的名字来进行分区，若是查询条件中没有该值，则说明在整个索引中执行查询。</li>
+<li>
+<font color="red">Document</font>：文档，ES索引中的每一条数据都称为一个Document，基本上和关系型数据库中的一个记录意思相同，通过<font color="red">_id</font>，在Type内进行唯一标识。</li>
+<li>
+<font color="red">Settings</font>：对集群中索引的设定，例如默认的分片数量，副本数等信息。</li>
+<li>
+<font color="red">Mapping</font>：这里的Mapping类似于，关系型数据库的表结构信息，这里面包含了索引中字段的存储类型，分词方式，是否分词等信息。<br> Elasticsearch中的Mapping是可以动态识别的，Elasticsearch字段的数据格式识别它的类型，但是若是需要对Filed字段进行特殊设置时，就需要手动创建Mapping了。注意：<strong>一个Mapping一旦创建成功后，若是已经存储了数据了，就不可以修改了。</strong>
+</li>
+<li>
+<font color="red">Analyzer</font>：字段的分词方式的定义，<strong>一个Analyzer，通常由一个Tokenizer，零到多个Filter组成</strong>。例如默认的标准Analyzer包含一个标准的Analyzer和三个Filter（Standard Token Filter、Lower Case Token Filter、Stop Token Filter）。</li>
+</ul> 
+<h4>
+<a id="Elasticsearch_20"></a>Elasticsearch的节点分类</h4> 
+<ul>
+<li>
+<font color="blue">Master Node（主节点）</font>：主节点主要负责创建索引，删除索引，分配分片，追踪集群中的节点状态等工作。在配置文件中设置node.master=true 来将该节点设置成候选主节点，在集群中只有候选主节点才有选举权和被选举权。</li>
+<li>
+<font color="blue">Data Node（数据节点）</font>：数据节点负责数据的存储和相关具体操作，例如索引数据的创建，更新，搜索，聚合等操作。因此，数据节点对机器的要求比较高无论是在磁盘空间还是CPU、内存、I/O性能等。<br> <font color="#008000">集群在扩大后，需要增加更多的数据节点来提高可用性，在配置文件中通过node.data=true 来设置当前节点为数据节点。</font>
+</li>
+<li>
+<font color="blue">Client Node（客户端节点）</font>：客户端节点是既不做候选主节点也不做数据节点的节点，只负责请求的分发、汇总等。<font color="#008000">若是单独增加这种节点主要是更多地为了提高并发性。</font>
+</li>
+<li>
+<font color="blue">Tribe Node（部落节点）：</font>部落节点可以跨越多个集群，它可以接收每个集群的状态，然后合并成一个全局集群状态。</li>
+<li>
+<font color="blue">Coordinating Node（协调节点）</font>：协调节点只是一个角色，并不是指具体的某个集群节点，也没法通过配置来指定某个节点为协调节点，这也就说明集群中任何一个节点都可以是协调节点。<br> 例如：<font color="#E9967A">节点A接收到用户的查询请求，会把查询语句分发到其他节点，然后合并各个节点返回查询结果，最后将完成的聚合结果返回给用户。这个请求中节点A的扮演的就是协调节点的角色。</font>
+</li>
+</ul> 
+<p>还有就是集群节点有三个颜色状态：<strong>绿色、黄色、红色</strong>。</p> 
+<ul>
+<li>
+<font color="gree">绿色</font>：代表健康状态，所有的主副分片都可正常工作，集群100%健康。</li>
+<li>
+<font color="#FFD700">黄色</font>：预警，所有的主分片都可以正常工作，但是至少有一个副分片是不能正常工作的。虽然集群能正常工作，但是高可用性已经有所降低。</li>
+<li>
+<font color="red">红色</font>：异常，集群不可正常使用。集群中至少有一个分片的主分片和全部副分片不可用。此时虽然查询操作可以返回数据，但也只是返回可用分片的那部分数据，并非全部的正确数据。若此时写请求打到异常分片会造成数据丢失。</li>
+</ul> 
+<h4>
+<a id="_34"></a>写入过程</h4> 
+<p><strong>Elasticsearch</strong>写入数据到索引的过程大致是这样的：</p> 
+<p><img src="https://images2.imgbox.com/05/6e/CFiYPlLC_o.png" alt="写入过程"></p> 
+<ul>
+<li><font color="#008000">首先客户端会根据配置的连接节点，通过轮询的方式选择一个coordinate节点。</font></li>
+<li><font color="#4B0082">coordinate节点通过路由函数（<code>shard = hash(routing)%number_of_primary_shards</code>），计算出数据应该落到那个shard中，根据coordinate节点上维护的shard信息，将请求发送到Node1上。</font></li>
+<li><font color="#CD5C5C">Node1先校验索引数据，然后在主分片上执行请求，执行成功后，将请求并行转发到副本集存在Node2、Node3。</font></li>
+<li><font color="#8470FF">Node2、Node3写入成功数据成功后，发送ack信息给主分片所在的Node1节点。</font></li>
+<li><font color="#0000CD">Node1节点再将ack信息发送给coordinate节点。</font></li>
+<li><font color="#008000">coordinate 节点 发送ack节点给客户端。</font></li>
+</ul> 
+<p>在主分片上执行写入请求的过程如下：</p> 
+<p><img src="https://images2.imgbox.com/2a/b0/lKFY1LSY_o.png" alt="写入分片"></p> 
+<ol>
+<li>当有数据写入时，为了提升写速度，也是先将数据写入到内存（Memory Buffer）中的；</li>
+<li>因为先写入了内存所以为了保证内存中的数据不丢失，也会同时写入Translog到内存中。</li>
+<li>每隔一定时间（可配置）将数据从Memory Buffer中<code>refresh</code>到<code>FileSystemCache</code>中，生成<strong>segment</strong>文件，一旦生成segment文件，就能通过索引查询到了。</li>
+<li>refresh完，memory buffer就清空了。Translog 也是从buffer flush到磁盘中。</li>
+<li>定期/定量从FileSystemCache中,结合Translog内容flush index到磁盘中。做增量flush的。</li>
+</ol> 
+<p>因为Elasticsearch的这个刷盘机制，也说明并非是一个实时的搜索引擎。</p> 
+<h3>
+<a id="_59"></a>更新数据</h3> 
+<p>在早期的全文检索中为整个文档建立了很大的倒排索引，并将其写入到磁盘。如果索引有更新，就需要重新全量创建一个索引来替换原来的索引。</p> 
+<p>这种方式在数据量很大时效率很低，并且由于创建一次索引的成本很高，所以对数据的更新不能过于频繁，也就不能保证实效性。</p> 
+<h4>
+<a id="_64"></a>分段存储</h4> 
+<p>在搜索中引入了段（<strong>segment</strong>）的概念（<strong>将一个索引文件拆分为多个子文件，则每个子文件叫做段</strong>），<strong>每个段都是一个独立的可被搜索的数据集，并且段具有不变性，一旦索引的数据被写入硬盘，就不可修改</strong>。</p> 
+<p>由于Elasticsearch中的每个分片包含多个<strong>segment</strong>（段），每一个<strong>segment</strong>都是一个倒排索引；因此在在查询的时，会把所有的<strong>segment</strong>查询结果汇总归并为最终的分片查询结果返回。</p> 
+<h5>
+<a id="Elasticsearch_69"></a>那么在这种分段存储的模式下Elasticsearch是如何进行数据操作的呢？</h5> 
+<ul>
+<li>
+<strong><font color="#008000">新增：</font></strong> 当有新的数据需要插入索引时，由于段的不可变性，会新建一个段来存储新增数据。</li>
+<li>
+<strong><font color="red">删除：</font></strong> <strong>也是由于段的不可变，所以删除的时候会新增一个.del文件，专门用来存储被删除的数据id。这样虽然查询的时候还是能查到，但是在进程查询结果汇总的时候会将已删除的数据id过滤掉。</strong>
+</li>
+<li>
+<strong><font color="blue">更新：</font></strong> 更新操作其实就是删除和新增的组合操作，先在.del文件中积累旧数据，然后在新段中添加一条更新后的数据。</li>
+</ul> 
+<h5>
+<a id="_74"></a>分段存储的优点和缺点</h5> 
+<div align="center">
+ <font color="#008000" size="5">segment优点</font>
+</div> 
+<ul>
+<li>
+<strong>读写都不用加锁</strong>，不直接更新数据，所以不用考虑多线程下读写不一致的问题。</li>
+<li>
+<strong>长驻内存</strong>，由于segment的不可变性，这样只要空间足够大，数据都是直接存储在内存中的。因此查询数据时直接访问内存，不用频繁操作磁盘。</li>
+<li>
+<strong>增量创建</strong>，分段可以做到增量创建索引，即轻量级的对索引进行改变，不用操作整个索引文件，这样在频繁更新数据时，使系统接近实时更新。</li>
+</ul> 
+<div align="center">
+ <font color="red" size="5">segment缺点</font>
+</div> 
+<ul>
+<li>
+<strong>删除</strong>，对段数据进行删除时，旧数据在.del文件中并不会马上删除。而旧数据只有等到段合并时才会被删除，这样会造成大量的空间浪费。</li>
+<li>
+<strong>更新</strong>，因为更新操作是有删除和新增组合而成，若是频繁的更新也会造成大量的空间浪费。</li>
+<li>
+<strong>新增</strong>，由于每次新增数据都是新建一个段，当段的数量过多时，对服务器的资源的消耗会非常大，查询性能也会受到影响。</li>
+<li>
+<strong>过滤</strong>，查询后的结果再汇总时需要对已删除的数据进行过滤，增加了系统的处理负担。</li>
+</ul> 
+<blockquote> 
+ <p><strong>这里要注意一点，并不是每新增一条记录（Document）就创建一个段（segment）的，而是数据先落到Memory Buffer中后，批量刷到Segment中的。</strong></p> 
+</blockquote> 
+<h4>
+<a id="_90"></a>段合并</h4> 
+<p>由于Memory Buffer中的数据在很短的时间（1s）内不断的进行刷盘，这样就会造成短时间内段的数量暴增，当索引中的段数量太多时不仅会严重消耗服务器资源，还会影响检索性能。</p> 
+<p>所以必须进行定期段合并操作，<strong>小的段被合并到大的段，然后这些大的段再被合并到更大的段。</strong></p> 
+<p>段合并的主要动作有两个：</p> 
+<ul>
+<li>对索引中的段进行分组，把大小相近的段分到一组。</li>
+<li>将属于同一分组的段合并成一个更大的段。</li>
+</ul> 
+<p>还有一个逻辑是<strong>段合并的时候会将那些旧的已删除文档从文件系统中清除。</strong></p> 
+<p><img src="https://images2.imgbox.com/c4/17/zyWpG6Er_o.png" alt="段合并"></p> 
+<h5>
+<a id="_102"></a>段合并的好处和问题</h5> 
+<div align="center">
+ <font color="#008000" size="5">segment合并的好处</font>
+</div> 
+<ul>
+<li>减少索引段的数量，提升的内存空间，从而提高了检索速度。</li>
+<li>减少索引的容量（文档数）——段合并会移除被标记为已删除的那些文档。提高了全文检索的速度，并移除了旧版本的数据。</li>
+</ul> 
+<div align="center">
+ <font color="red" size="5">segment合并带来的问题</font>
+</div> 
+<ul>
+<li>
+<strong>磁盘IO操作的代价</strong>；因为段合并操作是非常耗I/O的，因为需要从旧的索引段中读取数据然后合并到新的索引段。</li>
+<li>
+<strong>查询性能有一定影响</strong>；虽然说索引段合并的操作是异步进行的，但由于合并操作非常耗I/O，若合并时，正好也在进行大量的查询操作，在那些I/O处理速度慢的系统中，系统性能会受到影响。</li>
+</ul> 
+<h4>
+<a id="_113"></a>如何快速更新索引数据？</h4> 
+<p>通过对上面索引的分段存储和索引段合并的介绍，已经可以清楚的知道，在更新索引数据的时候，其实都是在操作索引段，对一段的索引数据进程操作，这样就能实现快速更新索引数据了。</p> 
+<h3>
+<a id="Elasticsearch__116"></a>Elasticsearch 的并发处理和数据一致性处理</h3> 
+<h4>
+<a id="Concurrency_117"></a>并发处理（Concurrency）</h4> 
+<p>Elasticsearch在接收到写请求时，是先将数据写入到主分片的，然后再将写请求同步到各个副本分片，但是同步这些副本分片的时间是无序的。</p> 
+<p>这个时候，Elasticsearch 就会采用<strong>乐观并发控制</strong>（Optimistic Concurrency Control）来保证新版本的数据不会被旧版本的数据覆盖。</p> 
+<p>这个乐观并发控制，就类似于Java的CAS机制，就是比较交换的意思。</p> 
+<p><strong>乐观并发控制（OCC）认为事务间的竞争并不激烈，所以任何事务来了就先执行，等到提交的时候再 检查一下数据有没有变化，若没有变化就直接提交，如果有变化就直接重试再提交</strong>。这种适用于写冲突比较少的场景。</p> 
+<h4>
+<a id="Consistency_126"></a>一致性（Consistency）</h4> 
+<div align="center">
+ <font color="Coral" size="5">写一致性</font>
+</div> 
+<p>Elasticsearch 集群保证写一致性的方式是在写之前检查有多少分片可供写入，若符合条件则执行写操作，否则会进行等待，等待符合条件，默认等待时间1分钟。</p> 
+<p><strong>满足写入分片的条件有如下三个配置</strong>：</p> 
+<ul>
+<li>
+<strong>One</strong>，代表只要主分片可用，就执行写操作。</li>
+<li>
+<strong>All</strong>，代表只有当主分片和所有副本分片可用时，才执行写操作。</li>
+<li>
+<strong>Quorum</strong>（k-wu-wo/reng，法定人数）：这是 Elasticsearch 的默认选项。当有大部分的分片可用时才允许写操作。其中，对“<strong>大部分</strong>”的计算公式为 <strong>int((primary+number_of_replicas)/2)+1。</strong> 意思是大于主副分片之和的二分之一才可以执行写操作。</li>
+</ul> 
+<div align="center">
+ <font color="LightSeaGreen" size="5">读写一致性</font>
+</div> 
+<p>Elasticsearch 集群保证读写一致性的方式是，将<strong>副本分片的同步方式设置为replication=Sync（默认值），指的是只有主分片和所有副本分片都写入成功后才返回请求结果。</strong></p> 
+<p>这种方式，可以保证后面的读请求无论请求到那个分片，返回的数据都是最新的版本。</p> 
+<p>但是<strong>为了提升写的效率也可以通过设置replication=async，这种模式是指，只要写入主分片成功，就返回写请求结果</strong>，降低了数据一致性提升了写的效率。</p> 
+<p>参考：<br> <a href="https://www.jianshu.com/p/28fb017be7a7">掌握它才说明你真正懂 Elasticsearch</a><br> 《深入理解Elasticsearch》<br> <a href="https://my.oschina.net/elastic6/blog/4398439">干货 |《深入理解Elasticsearch》读书笔记</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

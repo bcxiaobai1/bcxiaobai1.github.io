@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Java NIO为何导致堆外内存OOM了？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Java NIO为何导致堆外内存OOM了？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <p>某天报警：某台机器部署的一个服务突然无法访问。谨记第一反应登录机器查看日志，因为服务挂掉，很可能因OOM。这个时候在机器的日志中发现了如下的一些信息：</p> 
+<pre><code>nio handle failed java.lang.OutOfMemoryError: Direct buffer memory at org.eclipse.jetty.io.nio.xxxx
+
+at org.eclipse.jetty.io.nio.xxxx at org.eclipse.jetty.io.nio.xxxx
+</code></pre> 
+<p>表明确实为OOM，问题是哪个区导致的呢？可以看到是：<strong>Direct buffer memory</strong>，还看到一大堆jetty相关方法调用栈，仅凭这些日志，就能分析OOM原因。</p> 
+<h2>
+<a id="Direct_buffer_memory_10"></a>Direct buffer memory</h2> 
+<p>堆外内存，JVM堆内存之外的一块内存，不是由JVM管理，但Java代码却能在JVM堆外使用一些内存空间。这些空间就是Direct buffer memory，即直接内存，这块内存由os直接管理。但称其为直接内存有些奇怪，我没更爱称其为“堆外内存”。</p> 
+<p>Jetty作为JVM进程运行我们写好的系统的流程：</p> 
+<p><img src="https://images2.imgbox.com/f5/5e/P4E46a5q_o.png" alt=""></p> 
+<p>这次OOM是Jetty在使用堆外内存时导致。可推算得，Jetty可能在不停使用堆外内存，然后堆外内存空间不足，没法使用更多堆外内存，就OOM了。</p> 
+<p>Jetty不停使用堆外内存：</p> 
+<p><img src="https://images2.imgbox.com/e7/a0/RtTdwXJ9_o.png" alt=""></p> 
+<h2>
+<a id="OOM_24"></a>解决OOM的底层技术</h2> 
+<p>Jetty既然是用Java写的，那他是如何通过Java代码申请堆外内存的？然后这个堆外内存空间又如何释放呢？这涉及Java的NIO底层。</p> 
+<p>JVM的性能优化相对还是较为容易一些的，但若是解决OOM，除了一些弱智和简单的，如有人在代码里不停创建对象。其他很多生产的OOM问题，都有点技术难度，需要扎实技术。</p> 
+<h2>
+<a id="_30"></a>堆外内存是如何申请的，又是如何释放的？</h2> 
+<p>如在Java代码里要申请使用一块堆外内存空间，是使用DirectByteBuffer这个类，你可以通过这个类构建一个DirectByteBuffer的对象，这个对象本身是在JVM堆内存里的。</p> 
+<p>但是你在构建这个对象的同时，就会在堆外内存中划出来一块内存空间跟这个对象关联起来，我们看看下面的图，你就对他们俩的关系很清楚了。</p> 
+<p><img src="https://images2.imgbox.com/b7/5b/g3p55Nvg_o.png" alt=""></p> 
+<p>因此在分配堆外内存时，基本就这思路。</p> 
+<h2>
+<a id="_40"></a>如何释放堆外内存</h2> 
+<p>当你的DirectByteBuffer对象无人引用，成垃圾后，就会在某次YGC或Full GC时被回收。</p> 
+<p>只要回收一个DirectByteBuffer对象，就会释放其关联的堆外内存：</p> 
+<p><img src="https://images2.imgbox.com/18/e5/V4ZqOrYs_o.png" alt=""></p> 
+<h2>
+<a id="_48"></a>那为何还出现堆外内存溢出？</h2> 
+<p>若你创建很多DirectByteBuffer对象，占了大量堆外内存，然后这些DirectByteBuffer对象还无GC线程来回收，那就不会释放呀！</p> 
+<p>当堆外内存都被大量DirectByteBuffer对象关联使用，若你再要使用额外堆外内存，就报内存溢出！何时会出现大量DirectByteBuffer对象一直存活，导致大量堆外内存无法释放？</p> 
+<p>还可能是系统高并发，创建过多DirectByteBuffer，占用大量堆外内存，此时再继续想要使用堆外内存，就会OOM！但该系统显然不是这种情况。</p> 
+<h2>
+<a id="_56"></a>真正的堆外内存溢出原因</h2> 
+<p>可以用jstat观察线上系统运行情况，同时根据日志看看一些请求的处理耗时，分析过往gc日志，还看了一下系统各个接口的调用耗时后，分析思路如下。</p> 
+<p>首先看接口调用耗时，系统并发量不高，但他每个请求处理较耗时，平均每个请求需1s。</p> 
+<p>然后jstat发现，随系统不停被调用，会一直创建各种对象，包括Jetty本身不停创建DirectByteBuffer对象去申请堆外内存空间，接着直到Eden满，就会触发YGC：</p> 
+<p><img src="https://images2.imgbox.com/fb/18/AMQt1oJf_o.png" alt=""></p> 
+<p>但往往在进行GC的一瞬间，可能有的请求还没处理完，此时就有不少DirectByteBuffer对象处于存活状态，还没被回收，当然之前不少DirectByteBuffer对象对应的请求可能处理完毕了，他们就可以被回收了。</p> 
+<p>此时肯定会有一些DirectByteBuffer对象以及一些其他的对象是处于存活状态的，就需转入Survivor区。记得该系统上线时，内存分配极不合理，就给了年轻代一两百M，老年代却给七八百M，导致年轻代中的Survivor只有10M。因此往往在YGC后，一些存活下的对象（包括了一些DirectByteBuffer）会超过10M，没法放入Survivor，直接进入Old：</p> 
+<p><img src="https://images2.imgbox.com/fb/23/me8jTeWm_o.png" alt=""></p> 
+<p>于是反复的执行这样的过程，导致一些DirectByteBuffer对象慢慢进入Old，Old的DirectByteBuffer 对象越来越多，而且这些DirectByteBuffer都关联很多堆外内存：</p> 
+<p><img src="https://images2.imgbox.com/4d/39/dfxPegli_o.png" alt=""></p> 
+<p>这些老年代里的DirectByteBuffer其实很多都是可以回收的状态了，但是因为老年代一直没塞满，所以没触发full gc，也就自然不会回收老年代里的这些DirectByteBuffer了！当然老年代里这些没有被回收的DirectByteBuffer就一直关联占据了大量的堆外内存空间了！</p> 
+<p>直到最后，当你要继续使用堆外内存时，所有堆外内存都被老年代里大量的DirectByteBuffer给占用了，虽然他们可以被回收，但是无奈因为始终没有触发老年代的full gc，所以堆外内存也始终无法被回收掉。最后导致OOM！</p> 
+<h2>
+<a id="Java_NIO_82"></a>这Java NIO怎么看起来这么沙雕？</h2> 
+<p>Java NIO没考虑过会发生这种事吗？</p> 
+<p>考虑了！他知道可能很多DirectByteBuffer对象也许没人用了，但因未触发gc就导致他们一直占据堆外内存。Java NIO做了如下处理，每次分配新的堆外内存时，都调用System.gc()，提醒JVM主动执行以下GC，去回收掉一些垃圾没人引用的DirectByteBuffer对象，释放堆外内存空间。</p> 
+<p>只要能触发GC去回收掉一些没人引用的DirectByteBuffer，就会释放一些堆外内存，自然就可以分配更多对象到堆外内存。但因为我们又在JVM设置了：</p> 
+<pre><code class="prism language-bash">-XX:+DisableExplicitGC
+</code></pre> 
+<p>导致这System.gc()不生效，因此导致OOM。</p> 
+<h2>
+<a id="_96"></a>终极优化</h2> 
+<p>项目有如下问题：</p> 
+<ul>
+<li>内存设置不合理，导致DirectByteBuffer对象一直慢慢进入老年代，堆外内存一直无法释放</li>
+<li>设置了-XX:+DisableExplicitGC，导致Java NIO无法主动提醒去回收掉一些垃圾DIrectByteBuffer对象，也导致了无法释放堆外内存</li>
+</ul> 
+<p>对此就该：</p> 
+<ul>
+<li>合理分配内存，给年轻代更多内存，让Survivor区域有更大的空间</li>
+<li>放开-XX:+DisableExplicitGC这个限制，让System.gc()生效</li>
+</ul> 
+<p>优化后，DirectByteBuffer一般就不会不断进入老年代了。只要他停留在年轻代，随着young gc就会正常回收释放堆外内存了。</p> 
+<p>只要放开-XX:+DisableExplicitGC限制，Java NIO发现堆外内存不足了，自然会通过System.gc()提醒JVM去主动垃圾回收，回收掉一些DirectByteBuffer，进而释放堆外内存。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

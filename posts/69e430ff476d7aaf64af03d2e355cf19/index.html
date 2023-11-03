@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>探究MySQL的索引结构选型 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">探究MySQL的索引结构选型</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h2>前言</h2> 
+<p>本文将探究MySQL索引结构的技术选型，分析哈希表、二叉搜索树、AVL树、红黑树、B树与B+树各自的优缺点。</p> 
+<p>解释了MySQL最终选择B+树作为其索引的组织方式的原因，并在最后增加了3道常问的面试题。</p> 
+<hr>
+<h2>哈希表(Hash)</h2> 
+<p>哈希表查询数据的时间复杂度为O(1)，是一种高效的数据结构。面试中常问的HashMap就是基于哈希表的思想，对HashMap不太深入的同学，可以参考我的另外一篇文章<a class="link-info" href="https://blog.csdn.net/qq_33591903/article/details/108884467" title="HashMap夺命连环问">HashMap夺命连环问</a></p> 
+<p>例如将索引列作为key，对应行的物理地址作为value，非常适用于处理等值查询。</p> 
+<pre><code class="language-sql">select * from user where id=1;</code></pre> 
+<p>但哈希表显而易见的缺点就是，哈希表不适用于范围查找。</p> 
+<p>例如执行以下语句时，哈希表就无能为力了。</p> 
+<pre><code class="language-sql">select * from user where id&gt;1;</code></pre> 
+<hr>
+<h2>二叉搜索树(Binary Search Tree)</h2> 
+<p>经常刷LeetCode的同学，肯定是知道二叉搜索树的中序遍历是一个递增序列。</p> 
+<p>一颗二叉搜索树，每个节点最多只有2个子节点，左子节点的值小于父节点，右子节点的值大于父节点。</p> 
+<p><img alt="" height="346" src="https://images2.imgbox.com/8f/7c/MLRrUi5p_o.png" width="650"></p> 
+<p>在二叉搜索树中进行查询，可以利用到二分查找，因此查询的时间复杂度为O(logN)。</p> 
+<p>例如查找元素23时，先从根节点开始，因为23&gt;20，路由到右子节点32上。因为23&lt;32，路由到其左子节点23上，发现相等，查询结束。</p> 
+<p><img alt="" height="346" src="https://images2.imgbox.com/96/f6/KA26iVck_o.png" width="650"></p> 
+<p>仅需比较3次，就可以查询到想要的数据。</p> 
+<p>另外，二叉搜索树的插入与删除操作的时间复杂度也为O(logN)，有兴趣的同学可以做做LeetCode上的这道题<a class="link-info" href="https://leetcode-cn.com/problems/insert-into-a-binary-search-tree/" title="701. 二叉搜索树中的插入操作">701. 二叉搜索树中的插入操作</a></p> 
+<p>我们大可以将索引列作为节点的值，同样每个节点还有个用于保存相应行物理地址的变量。</p> 
+<p>二叉搜索树支持范围查找，例如对以下的sql语句</p> 
+<pre><code class="language-sql">select * from user where id&gt;12 and id&lt;32;</code></pre> 
+<p>首先利用二分查找到节点12，再对此节点进行中序遍历，在遍历到节点32时停止即可。</p> 
+<p>二叉搜索树在搜索、插入与删除保持较优的时间复杂度，而且又支持范围查找。那MySQL为啥没有使用它呢？</p> 
+<p>是因为二叉搜索树在插入、删除的过程中并不会保持自身的平衡！</p> 
+<p>例如我新增了3条用户数据，初始的树是这样的（节点的值为主键）：</p> 
+<p><img alt="" height="311" src="https://images2.imgbox.com/86/62/qbEXJcHg_o.png" width="411"></p> 
+<p>当我再次增加3条数据后，节点被依次加在右子树上，最终形成链表的结构。</p> 
+<p><img alt="" height="589" src="https://images2.imgbox.com/dd/99/6o6r3unl_o.png" width="617"></p> 
+<p>此时，二叉搜索树退化成了链表，时间复杂度由O(logN)提升到了O(N)，查询性能大大降低。</p> 
+<p>因此，我们迫切需要一种能够在变动中保持自平衡的二叉树。</p> 
+<hr>
+<h2>平衡二叉搜索树</h2> 
+<h3>AVL树</h3> 
+<p>AVL树就是一种自平衡的二叉搜索树，对于它的任意一个节点，其左子树高度与右子树高度差最大为1，因此就不存在二叉树退化为链表的极端情况。</p> 
+<p>下图就是一个AVL树：</p> 
+<p><img alt="" height="400" src="https://images2.imgbox.com/35/91/ESbwi7MK_o.png" width="650"></p> 
+<p>在往AVL树中插入节点时，需要通过左旋右旋操作来保证树的平衡性。</p> 
+<p>AVL树在查找、插入与删除操作的时间复杂度都为O(logN)。</p> 
+<p>AVL树追求极致的平衡性，因此就会进行多次的旋转。在插入与删除次数比较多时，达成平衡的代价甚至比使用它的收益还要大。</p> 
+<p>那有没有一种能够稍微降低点平衡性，却能带来较大的整体性能上提升的平衡二叉搜索树呢？</p> 
+<hr>
+<h3>红黑树</h3> 
+<p>红黑树也是一种平衡二叉搜索树，相比于AVL树。红黑树似乎对平衡性的追求没有那么执着，红黑树只要求最长路径不能超出最短路径的两倍。</p> 
+<p>在红黑树中，节点要么是红色，要么是黑色。根节点与叶子节点（NIL）都是黑色的，任意一个路径不能连续出现2个红色节点。从根节点出发的所有路径，黑色节点（不包含NIL）的数量都是相同的。</p> 
+<p><img alt="" height="400" src="https://images2.imgbox.com/69/bc/Jqr22XDo_o.png" width="650"></p> 
+<p>(不会有人没看出来，我拿的是一开始的那张图吧)</p> 
+<p style="text-align:center"><img alt="" height="105" src="https://images2.imgbox.com/13/a7/fB4BXNaK_o.jpg" width="108"></p> 
+<p>红黑树通过左旋、右旋与变色三种操作来保证一定的平衡性，相比于AVL树，红黑树的查询效率较低，但是删除与插入的效率大大提高，总体性能优于AVL树。</p> 
+<p>而且在实际的应用中，红黑树的应用更加广泛。例如HashMap在链表长度大于8时则转化为红黑树，TreeMap使用红黑树来对键值进行排序，IO多路复用中epoll使用红黑树来对Socket进行管理。</p> 
+<p></p> 
+<p>那MySQL为啥没有使用红黑树来组织索引数据呢？</p> 
+<p>如果索引数据能够一次性加载到内存中，那么使用红黑树是没有问题的。</p> 
+<p>问题就在于，索引数据无法一次性加载到内存中，因此索引数据需要分批加载。</p> 
+<p>假设要查询的数据位于叶子节点上，树高为n。第一次先把根节点加载到内存中，进行一次磁盘IO。当一直查询到叶子节点时，就需要进行n次IO。</p> 
+<p>当单表数据达到100万时，树的高度约为log1000000(以2为底)=20。一次磁盘IO平均耗时10ms，20次就是0.2秒。如果再考虑到范围查询、不走索引的查询与多表联查，速度慢得令人发指。</p> 
+<p>因此，我们现在的首要目标，就是降低IO次数，也就是降低树的高度。</p> 
+<hr>
+<h2>B树</h2> 
+<p>B树又称为B-树，注意不是B减树啊，“-”是一个连字符！！！</p> 
+<p>B树是一种多叉平衡搜索树，在节点总数相同的情况下，B树的高度明显低于二叉树。</p> 
+<p>B树有以下几个重要的特性：</p> 
+<ul>
+<li>每个节点可能存储多个元素，节点内元素是有序的，每一个元素也会对应一份数据行（当然也有可能是主键索引项，或者数据行的地址）。</li>
+<li>父节点中的元素不会出现在子节点当中</li>
+<li>叶子节点都在同一层，且之间没有通过指针相连</li>
+</ul>
+<p>一颗具有3个分叉的B树为：</p> 
+<p><img alt="" height="456" src="https://images2.imgbox.com/0b/93/D1xLmxvn_o.png" width="1200"></p> 
+<p>可以看到，B树的高度被压缩得很厉害。</p> 
+<p>另外一个方面，B树充分利用到了程序访问的局部性原理。也就是说，当程序访问磁盘或内存中的一份数据时，其周围的数据将会有很大概率在接下来被使用到。</p> 
+<p>因此，B数每个节点不会只存一个元素，而是存储多份。我们查询数据时，每进行一次IO，就会将B树的一个节点读进缓存中。这样在接下访问其周围的数据时，无需从磁盘读取，直接从缓存读取，缓存命中率大大提升。</p> 
+<p></p> 
+<p>也许会有人问？如果一个节点内存放大量元素，那么从磁盘读取的速度是否和个数相关，呈线性增长呢？</p> 
+<p>答案是不会的。第一次读取一个节点时，进行的是随机读，需要先进行磁盘寻道，是非常耗时的。之后读取其他的元素，是进行的顺序读。之所以进行顺序读，是因为一个节点内的元素被顺序存储在磁盘上的。顺序读是非常快速的，其效率可能千倍于随机读。</p> 
+<p></p> 
+<p>那么，在B树上读取索引项为21的流程是怎样的呢？</p> 
+<p><img alt="" height="471" src="https://images2.imgbox.com/ef/7e/B2wDLxzy_o.png" width="1200"></p> 
+<p>在节点内部，使用的是二分查找，用于找到下层指针。</p> 
+<p>看来B树能有效解决平衡二叉树io次数过多的问题，似乎已经能满足所有的要求了。</p> 
+<p>但是MySQL最终采用的B+树，而不是B树。</p> 
+<p style="text-align:center"><img alt="" height="131" src="https://images2.imgbox.com/b4/2a/eB2hJG9v_o.jpg" width="131"></p> 
+<p>相对来说，B树还有以下的不足：</p> 
+<ul>
+<li>每个节点不仅存索引项，又存具体的数据，那么每个节点可存放的索引项就比较少。索引项少，io次数就会变多。</li>
+<li>B树不能做到快速的范围查找，需要进行多次的查找，类似于中序遍历。</li>
+</ul>
+<p>为了改进B树，后来提出了B+树。</p> 
+<hr>
+<h2>B+树</h2> 
+<p>这个时候你又可以读作B加树了...</p> 
+<p>B+树有以下的特性：</p> 
+<ul>
+<li>非叶子节点只存放索引项，叶子节点既存放索引项，也存放具体的数据。</li>
+<li>叶子节点会存放当前所有的索引项，就是说，可以与父节点的索引项重复。</li>
+<li>叶子节点通过指针相连，形成有序的双向链表结构。</li>
+</ul>
+<p>一颗成熟的B+树，应该是有如下的作风：</p> 
+<p><img alt="" height="456" src="https://images2.imgbox.com/8b/06/DGcJXyrl_o.png" width="1200"></p> 
+<p>由于B+树叶子节点才存放数据行，因此每次的查询，都需要加载到叶子节点。而B树每个节点都存放数据行，每次的查询不一定非要到叶子节点。</p> 
+<p>所以这个时候会有人发出这样的疑问：B+树每次查询必须要深入到叶子节点，那么它的平均查询效率不是应该低于B树的吗？</p> 
+<p>如果在树高相同的情况下，确实是的。可实际情况是，在索引项相同的情况下，B+树的高度明显低于B树的，因为B+树的非叶子节点可以比B树存放更多的元素，毕竟少了数据行嘛。所以考虑到io成本加上范围查询，B+树的整体查询效率是优于B树的，但B+树对单个数据的查询效率是低于B树的。</p> 
+<p></p> 
+<p>B+树在范围查询上，是怎么表现出不错的性能的呢？</p> 
+<p>首先查找到范围下限，直接使用叶子节点的指针来加载下一个数据块，避免通过父节点来中转。在遍历到范围上限后，直接返回遍历到的所有数据即可。</p> 
+<p>B+树通过在叶子节点重复存储元素，其整体占用的空间其实是略高于B树的。但这点浪费的空间却能够换来巨大的性能提升，也是蛮不错的。</p> 
+<p>鉴于B+树用于以上的优点，MySQL最终采用了B+树作为索引的组织方式。</p> 
+<hr>
+<h2>各种数据结构的对比</h2> 
+<p>在这里直接以最简单明了的方式突出各个数据结构的优缺点：</p> 
+<table border="1" cellspacing="0"><tbody>
+<tr>
+<td style="background-color:#4f81bd;width:69.75pt"> <p style="margin-left:.0001pt;text-align:justify"><strong><span style="color:#ffffff"><strong>数据结构</strong></span></strong></p> </td>
+<td style="background-color:#4f81bd;width:266.4pt"> <p style="margin-left:.0001pt;text-align:justify"><strong><span style="color:#ffffff"><strong>特点</strong></span></strong></p> </td>
+<td style="background-color:#4f81bd;width:174pt"> <p style="margin-left:.0001pt;text-align:justify"><strong><span style="color:#ffffff"><strong>优点</strong></span></strong></p> </td>
+<td style="background-color:#4f81bd;width:225.6pt"> <p style="margin-left:.0001pt;text-align:justify"><strong><span style="color:#ffffff"><strong>缺点</strong></span></strong></p> </td>
+</tr>
+<tr>
+<td style="vertical-align:top;width:69.75pt"> <p style="margin-left:.0001pt;text-align:justify">哈希表</p> </td>
+<td style="vertical-align:top;width:266.4pt"> <p style="margin-left:.0001pt;text-align:justify">使用哈希算法，快速查找</p> </td>
+<td style="vertical-align:top;width:174pt"> <p style="margin-left:.0001pt;text-align:justify">查询效率O(1)</p> </td>
+<td style="vertical-align:top;width:225.6pt"> <p style="margin-left:.0001pt;text-align:justify">无法满足范围查找</p> </td>
+</tr>
+<tr>
+<td style="vertical-align:top;width:69.75pt"> <p style="margin-left:.0001pt;text-align:justify">二叉搜索树</p> </td>
+<td style="vertical-align:top;width:266.4pt"> <p style="margin-left:.0001pt;text-align:justify">使用二分查找算法，效率较高，且基本实现范围查找</p> </td>
+<td style="vertical-align:top;width:174pt"> <p style="margin-left:.0001pt;text-align:justify">正常情况下，操作效率为O(logN)</p> </td>
+<td style="vertical-align:top;width:225.6pt"> <p style="margin-left:.0001pt;text-align:justify">极端情况下退化为链表</p> </td>
+</tr>
+<tr>
+<td style="vertical-align:top;width:69.75pt"> <p style="margin-left:.0001pt;text-align:justify">AVL树</p> </td>
+<td style="vertical-align:top;width:266.4pt"> <p style="margin-left:.0001pt;text-align:justify">通过左旋、右旋实现严格自平衡</p> </td>
+<td style="vertical-align:top;width:174pt"> <p style="margin-left:.0001pt;text-align:justify">保持自平衡，操作效率为O(logN)</p> </td>
+<td style="vertical-align:top;width:225.6pt"> <p style="margin-left:.0001pt;text-align:justify">追求极致的平衡，因此旋转效率低，IO次数多</p> </td>
+</tr>
+<tr>
+<td style="vertical-align:top;width:69.75pt"> <p style="margin-left:.0001pt;text-align:justify">红黑树</p> </td>
+<td style="vertical-align:top;width:266.4pt"> <p style="margin-left:.0001pt;text-align:justify">通过左旋、右旋与变色实现非严格自平衡</p> </td>
+<td style="vertical-align:top;width:174pt"> <p style="margin-left:.0001pt;text-align:justify">不追求极致平衡，整体性能高</p> </td>
+<td style="vertical-align:top;width:225.6pt"> <p style="margin-left:.0001pt;text-align:justify">实现复杂，IO次数多</p> </td>
+</tr>
+<tr>
+<td style="vertical-align:top;width:69.75pt"> <p style="margin-left:.0001pt;text-align:justify">B树</p> </td>
+<td style="vertical-align:top;width:266.4pt"> <p style="margin-left:.0001pt;text-align:justify">多叉查找，一个节点存放多个索引项，也存放具体数据</p> </td>
+<td style="vertical-align:top;width:174pt"> <p style="margin-left:.0001pt;text-align:justify">树的高度较低，IO次数少</p> </td>
+<td style="vertical-align:top;width:225.6pt"> <p style="margin-left:.0001pt;text-align:justify">IO次数、范围查找还有优化的空间</p> </td>
+</tr>
+<tr>
+<td style="vertical-align:top;width:69.75pt"> <p style="margin-left:.0001pt;text-align:justify">B+树</p> </td>
+<td style="vertical-align:top;width:266.4pt"> <p style="margin-left:.0001pt;text-align:justify">非叶子节点仅存放索引项，叶子节点为双向链表</p> </td>
+<td style="vertical-align:top;width:174pt"> <p style="margin-left:.0001pt;text-align:justify">树的高度更低，IO次数更少</p> </td>
+<td style="vertical-align:top;width:225.6pt"> <p style="margin-left:.0001pt;text-align:justify">存储重复索引项，内存空间占用相对多一点</p> </td>
+</tr>
+</tbody></table>
+<p></p> 
+<hr>
+<p><strong style="color:#4f4f4f;font-size:22px">加餐</strong></p> 
+<h3>
+<br> 使用二级索引查询数据，经历的io次数怎么算？</h3> 
+<p>二级索引也是使用B+树来组织的，其叶子节点不是存储具体的数据行，而是存储的主键值。</p> 
+<p>先通过在二级索引中查询到主键值，再进行回表查询主键索引树，所以一共需要经历的io次数=二级索引树io次数+主键索引树次数</p> 
+<p></p> 
+<p>有些同学可能会有一点想法，为什么二级索引的叶子节点不直接存储具体的数据，再回表一次不是降低了效率吗？</p> 
+<p>一个表会有多个索引，如果每个索引数都保存一份全表数据，数据冗余度就会非常高！</p> 
+<p></p> 
+<h3>3层的B+树，大概可以存放多少条数据？</h3> 
+<p>InnoDB每次会从磁盘中读取一页的数据，一页大小为16KB，当然可以通过参数设置，因此B+树中一个节点的大小一般也为16KB。</p> 
+<p>假设这16KB全部用来存储节点数据，当然其中会有一小部分用来存储元数据，可以忽略不计。</p> 
+<p></p> 
+<p>B+树中的一个节点，包含索引项与指向下层的指针。</p> 
+<p>如果此时以int类型的主键作为索引项，int类型占用4个字节，指针占用6个字节。因此根节点拥有的索引项数为16KB/10B=16*1024/10=1638个。</p> 
+<p>则根节点拥有1638个子节点，且第二层也是非叶子节点，因此第二层能存放的索引项数为1638*1638约等于268万个。</p> 
+<p>第三层为叶子节点，叶子节点存放索引项、前驱后驱指针与具体数据，具体的数据肯定是比索引项与指针大得多的，这时候就统一按一行数据1KB计算，也就是一个叶子节点可以保存16条数据。</p> 
+<p>那么3层的B+数总共可以保存的数据行为2683044*16≈4千万条。</p> 
+<p>当然，2层的B+树可以保存的数据行为1638*16≈3万条。</p> 
+<p></p> 
+<h3>为什么MongoDB直接使用B树？</h3> 
+<p>MySQL作为一种关系型数据库，大部分的情况下会进行多表联查，多表联查就涉及到对某个表的遍历。而B+树叶子节点存在双向指针，对遍历支持友好。</p> 
+<p>而MongoDB作为一种非关系的文档数据库，使用一种类似json格式来保存数据，在以上的背景下，MongoDB认为单次查询比范围查询使用更加广泛。B树的每个节点都保存具体数据，因此可能在跟节点直接查找到数据就返回，单次查询效率高于B+树。</p> 
+<p></p> 
+<p>不过有意思的一点是，MongoDB和MySQL一样，底层均使用了可插拔的存储引擎。MongoDB其默认的引擎为WiredTiger，其引擎作者自身表明了内部其实是使用B+树来作为索引的组织方式的，详情见这篇文章<a class="link-info" href="http://source.wiredtiger.com/3.2.1/tune_page_size_and_comp.html">http://source.wiredtiger.com/3.2.1/tune_page_size_and_comp.html</a></p> 
+<p>我希望以这篇文章为开端，激发各位读者对新知识的探究。其实结论对错并不重要，可贵的是探讨的过程。</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

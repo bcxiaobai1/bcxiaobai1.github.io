@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>一次元数据空间内存溢出的排查记录 | 京东云技术团队 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">一次元数据空间内存溢出的排查记录 | 京东云技术团队</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p>在应用中，我们使用的 <code>SpringData</code> ES的 <code>ElasticsearchRestTemplate</code>来做查询，使用方式不对，导致每次ES查询时都新实例化了一个查询对象，会加载相关类到元数据中。最终长时间运行后元数据出现内存溢出；</p> 
+<p>问题原因：<strong>类加载过多</strong>，导致元数据OOM。非类实例多或者大对象问题；</p> 
+<p>排查方式：</p> 
+<p>查看JVM运行情况，发现元数据满导致内存溢出；<br> 导出内存快照，通过<strong>OQL</strong>快速定位肇事者；<br> 排查对应类的使用场景和加载场景（重点序列化反射场景）；</p> 
+<h2>
+<a id="_10"></a>起源</h2> 
+<p>06-15 下午正摩肩擦掌的备战着晚上8点。收到预发机器的一个GC次数报警。</p> 
+<pre><code>
+【警告】UMP JVM监控
+【警告】异步（async采集点：async.jvm.info（别名：jvm监控）15:42:40至15:42:50【xx.xx.xx.xxx(10174422426)(未知分组)】，JVM监控FullGC次数=2次[偏差0%]，超过1次FullGC次数&gt;=2次
+【时间】2023-06-15 15:42:50
+【类型】UMP JVM监控
+</code></pre> 
+<p>第一时间诧异了下。该应用主要作用是接MQ消息和定时任务，同时任务和MQ都和线上做了隔离，也没有收到大流量的告警。</p> 
+<p>先看了下对应JVM监控：</p> 
+<p><img src="https://images2.imgbox.com/3c/4b/7tGVLmxR_o.png" alt=""></p> 
+<p>只看上面都怀疑是监控异常（之前用文件采集的时候有遇到过，看CPU确实有波动。但堆基本无涨幅，怀疑非堆。）<br> <img src="https://images2.imgbox.com/86/96/gEMR9XPy_o.png" alt=""></p> 
+<h2>
+<a id="_31"></a>问题排查</h2> 
+<h3>
+<a id="_33"></a>定位分析</h3> 
+<p>既然怀疑非堆，我们先通过 <code>jstat</code>来看看情况</p> 
+<pre><code>  S0     S1     E      O      M     CCS    YGC     YGCT    FGC    FGCT     GCT   
+  0.00   0.00   0.89   3.67  97.49  97.96    854   23.720   958  615.300  639.020
+  0.00   0.00   0.89   3.67  97.49  97.96    854   23.720   958  615.300  639.020
+  0.00   0.00   0.89   3.67  97.49  97.96    854   23.720   958  615.300  639.020
+  0.00   0.00   0.89   3.67  97.49  97.96    854   23.720   958  615.300  639.020
+  0.00   0.00   0.89   3.67  97.49  97.96    854   23.720   958  615.300  639.020
+</code></pre> 
+<p>M列代表了metaspace的使用率，当前已经 <code>97.49%</code> 进一步印证了我们的猜测。</p> 
+<p>接下来通过 <code>jmap</code> 导出内存快照分析。这里我习惯使用 <code>Visual VM</code> 进行分析。<br> <img src="https://images2.imgbox.com/2b/a2/FoH0Hkli_o.png" alt=""></p> 
+<p>在这里我们看到有 <code>118588</code> 个类被加载了。正常业务下不会有这么多类。</p> 
+<p>这里我们走了很多弯路。</p> 
+<p>首先查看内存对象，根据类的实例数排了个序，试图看看是否是某个或某些类实例过多导致。</p> 
+<p><img src="https://images2.imgbox.com/33/93/GRmrBLIc_o.png" alt=""></p> 
+<p>这里一般是<strong>排查堆异常</strong>时使用，可以看大对象和某类的实例数，但我们的问题是<strong>类加载过多。非类实例对象多或者大</strong>。这里排除。</p> 
+<p>后续还尝试了直接使用 <code>Visual VM</code> 的聚合按包路径统计，同时排序。收效都甚微。看不出啥异常来。</p> 
+<p>这里我们使用 <code>OQL</code> 来进行查询统计。</p> 
+<p>语句如下：</p> 
+<pre><code>var packageClassSizeMap = {};
+// 遍历统计以最后一个逗号做分割
+heap.forEachClass(function (it) {
+    var packageName = it.name.substring(0, it.name.lastIndexOf('.'));
+    if (packageClassSizeMap[packageName] != null) {
+        packageClassSizeMap[packageName] = packageClassSizeMap[packageName] + 1;
+    } else {
+        packageClassSizeMap[packageName] = 1;
+    }
+});
+// 排序 因为Visual VM的查询有数量限制。
+var sortPackageClassSizeMap = [];
+map(sort(Object.keys(packageClassSizeMap), function (a, b) {
+    return packageClassSizeMap[b] - packageClassSizeMap[a]
+}), function (it) {
+    sortPackageClassSizeMap.push({
+        package: it,
+        classSize: packageClassSizeMap[it]
+    })
+});
+sortPackageClassSizeMap;
+</code></pre> 
+<p>执行效果如下：</p> 
+<p><img src="https://images2.imgbox.com/f5/b9/fk3xAaN2_o.png" alt=""></p> 
+<p>可以看到，<code>com.jd.bapp.match.sync.query.es.po</code> 下存在 <code>92172</code> 个类。这个包下，不到20个类。这时我们在回到开始查看类的地方。看看该路径下都是些什么类。</p> 
+<p>这里附带一提，直接根据路径获取对应的类数量：</p> 
+<pre><code>var packageClassSizeMap = {};
+// 遍历统计以最后一个逗号做分割
+heap.forEachClass(function (it) {
+    var packageName = it.name.substring(0, it.name.lastIndexOf('.'));
+    // 加路径过滤版
+    if (packageName.indexOf('com.jd.bapp.match.sync.query.es.po')){
+        if (packageClassSizeMap[packageName] != null) {
+            packageClassSizeMap[packageName] = packageClassSizeMap[packageName] + 1;
+        } else {
+            packageClassSizeMap[packageName] = 1;
+        }
+    }
+});
+
+sortPackageClassSizeMap;
+</code></pre> 
+<p>查询 <code>com.jd.bapp.match.sync.query.es.po</code> 路径下的classes</p> 
+<p><img src="https://images2.imgbox.com/88/e2/kxpUxcrL_o.png" alt=""></p> 
+<p>我们可以看到:</p> 
+<ul>
+<li>每个ES的Po对象存在大量类加载，在后面有拼接Instantiator_xxxxx</li>
+<li>部分类有实例，部分类无实例。（count为实例数）</li>
+</ul> 
+<p>从上面得到的信息得出是ES相关查询时出现的。我们本地debug查询跟踪下。</p> 
+<h3>
+<a id="_128"></a>抽丝剥茧</h3> 
+<p>这里列下主要排查流程</p> 
+<p>在应用中，我们使用的 <code>SpringData</code> ES的 <code>ElasticsearchRestTemplate</code>来做查询，主要使用方法 <code>org.springframework.data.elasticsearch.core.ElasticsearchRestTemplate#search</code></p> 
+<p>重点代码如下：</p> 
+<pre><code>public &lt;T&gt; SearchHits&lt;T&gt; search(Query query, Class&lt;T&gt; clazz, IndexCoordinates index) {
+    // 初始化request
+    SearchRequest searchRequest = requestFactory.searchRequest(query, clazz, index);
+    // 获取值
+    SearchResponse response = execute(client -&gt; client.search(searchRequest, RequestOptions.DEFAULT));
+  
+    SearchDocumentResponseCallback&lt;SearchHits&lt;T&gt;&gt; callback = new ReadSearchDocumentResponseCallback&lt;&gt;(clazz, index);
+    // 转换为对应类型
+    return callback.doWith(SearchDocumentResponse.from(response));
+}
+</code></pre> 
+<h4>
+<a id="_149"></a>加载</h4> 
+<p>首先看初始化request的逻辑</p> 
+<ul><li> <p><code>org.springframework.data.elasticsearch.core.RequestFactory#searchRequest</code></p> 
+  <ul><li> <p>首先是： <code>org.springframework.data.elasticsearch.core.RequestFactory#prepareSearchRequest</code></p> 
+    <ul><li> <p>这里有段代码是对搜索结果的排序处理： <code>prepareSort(query, sourceBuilder, getPersistentEntity(clazz));</code> 重点就是这里的 <code>getPersistentEntity(clazz)</code><br> 这段代码主要会识别当前类是否已经加载过，没有加载过则加载到内存中：</p> <pre><code>@Nullable
+private ElasticsearchPersistentEntity&lt;?&gt; getPersistentEntity(@Nullable Class&lt;?&gt; clazz) {
+	// 从convert上下文中获取判断该类是否已经加载过，如果没有加载过，就会重新解析加载并放入上下文
+	return clazz != null ? elasticsearchConverter.getMappingContext().getPersistentEntity(clazz) : null;
+}
+</code></pre> </li></ul> </li></ul> </li></ul> 
+<p>具体加载的实现见： <code>具体实现见：org.springframework.data.mapping.context.AbstractMappingContext#getPersistentEntity(org.springframework.data.util.TypeInformation&lt;?&gt;)</code></p> 
+<pre><code>	/*
+	 * (non-Javadoc)
+	 * @see org.springframework.data.mapping.model.MappingContext#getPersistentEntity(org.springframework.data.util.TypeInformation)
+	 */
+	@Nullable
+	@Override
+	public E getPersistentEntity(TypeInformation&lt;?&gt; type) {
+
+		Assert.notNull(type, "Type must not be null!");
+
+		try {
+			read.lock();
+			// 从上下文获取当前类
+			Optional&lt;E&gt; entity = persistentEntities.get(type);
+			// 存在则返回
+			if (entity != null) {
+				return entity.orElse(null);
+			}
+		} finally {
+			read.unlock();
+		}
+		if (!shouldCreatePersistentEntityFor(type)) {
+			try {
+				write.lock();
+				persistentEntities.put(type, NONE);
+			} finally {
+				write.unlock();
+			}
+			return null;
+		}
+		if (strict) {
+			throw new MappingException("Unknown persistent entity " + type);
+		}
+		// 不存在时，添加该类型到上下文
+		return addPersistentEntity(type).orElse(null);
+	}
+</code></pre> 
+<h4>
+<a id="_209"></a>使用</h4> 
+<p>上述是加载流程。执行查询后，我们还需要进行一次转换。这里就到了使用的地方：<code>org.springframework.data.elasticsearch.core.ElasticsearchRestTemplate#search中 callback.doWith(SearchDocumentResponse.from(response));</code></p> 
+<p>这里这个方法会请求内部的 <code>doWith</code> 方法。实现如下：</p> 
+<pre><code>@Nullable
+public T doWith(@Nullable Document document) {
+
+    if (document == null) {
+        return null;
+    }
+    // 获取到待转换的类实例
+    T entity = reader.read(type, document);
+    return maybeCallbackAfterConvert(entity, document, index);
+}
+</code></pre> 
+<p>其中的 <code>reader.read</code> 会先从上下文中获取上述加载到上下文的类信息，然后读取</p> 
+<pre><code>	@Override
+	public &lt;R&gt; R read(Class&lt;R&gt; type, Document source) {
+		TypeInformation&lt;R&gt; typeHint = ClassTypeInformation.from((Class&lt;R&gt;) ClassUtils.getUserClass(type));
+		typeHint = (TypeInformation&lt;R&gt;) typeMapper.readType(source, typeHint);
+
+		if (conversions.hasCustomReadTarget(Map.class, typeHint.getType())) {
+			R converted = conversionService.convert(source, typeHint.getType());
+			if (converted == null) {
+				// EntityReader.read is defined as non nullable , so we cannot return null
+				throw new ConversionException("conversion service to type " + typeHint.getType().getName() + " returned null");
+			}
+			return converted;
+		}
+
+		if (typeHint.isMap() || ClassTypeInformation.OBJECT.equals(typeHint)) {
+			return (R) source;
+		}
+		// 从上下文获取之前加载的类
+		ElasticsearchPersistentEntity&lt;?&gt; entity = mappingContext.getRequiredPersistentEntity(typeHint);
+		// 获取该类信息
+		return readEntity(entity, source);
+	}
+</code></pre> 
+<p>读取会走 <code>org.springframework.data.elasticsearch.core.convert.MappingElasticsearchConverter#readEntity</code></p> 
+<p>先是读取该类的初始化器：<code>EntityInstantiator instantiator = instantiators.getInstantiatorFor(targetEntity);</code></p> 
+<ul><li> <p>是通过该类实现：<code>org.springframework.data.convert.KotlinClassGeneratingEntityInstantiator#createInstance</code></p> 
+  <ul><li>然后到：<code>org.springframework.data.mapping.model.ClassGeneratingEntityInstantiator#doCreateEntityInstantiator</code>
+</li></ul> </li></ul> 
+<pre><code>	/*
+	 * (non-Javadoc)
+	 * @see org.springframework.data.convert.ClassGeneratingEntityInstantiator#doCreateEntityInstantiator(org.springframework.data.mapping.PersistentEntity)
+	 */
+	@Override
+	protected EntityInstantiator doCreateEntityInstantiator(PersistentEntity&lt;?, ?&gt; entity) {
+
+		PreferredConstructor&lt;?, ?&gt; constructor = entity.getPersistenceConstructor();
+
+		if (ReflectionUtils.isSupportedKotlinClass(entity.getType()) &amp;&amp; constructor != null) {
+
+			PreferredConstructor&lt;?, ?&gt; defaultConstructor = new DefaultingKotlinConstructorResolver(entity)
+					.getDefaultConstructor();
+
+			if (defaultConstructor != null) {
+				// 获取对象初始化器
+				ObjectInstantiator instantiator = createObjectInstantiator(entity, defaultConstructor);
+
+				return new DefaultingKotlinClassInstantiatorAdapter(instantiator, constructor);
+			}
+		}
+
+		return super.doCreateEntityInstantiator(entity);
+	}
+</code></pre> 
+<p>这里先请求内部的：<code>createObjectInstantiator</code></p> 
+<pre><code>	/**
+	 * Creates a dynamically generated {@link ObjectInstantiator} for the given {@link PersistentEntity} and
+	 * {@link PreferredConstructor}. There will always be exactly one {@link ObjectInstantiator} instance per
+	 * {@link PersistentEntity}.
+	 *
+	 * @param entity
+	 * @param constructor
+	 * @return
+	 */
+	ObjectInstantiator createObjectInstantiator(PersistentEntity&lt;?, ?&gt; entity,
+			@Nullable PreferredConstructor&lt;?, ?&gt; constructor) {
+
+		try {
+			// 调用生成
+			return (ObjectInstantiator) this.generator.generateCustomInstantiatorClass(entity, constructor).newInstance();
+		} catch (Exception e) {
+			throw new RuntimeException(e);
+		}
+	}
+</code></pre> 
+<p>获取对象生成实例：<code>generateCustomInstantiatorClass</code> 这里获取类名称，会追加 <code>_Instantiator_</code>和对应类的 <code>hashCode</code></p> 
+<pre><code>
+		/**
+		 * Generate a new class for the given {@link PersistentEntity}.
+		 *
+		 * @param entity
+		 * @param constructor
+		 * @return
+		 */
+		public Class&lt;?&gt; generateCustomInstantiatorClass(PersistentEntity&lt;?, ?&gt; entity,
+				@Nullable PreferredConstructor&lt;?, ?&gt; constructor) {
+			// 获取类名称
+			String className = generateClassName(entity);
+			byte[] bytecode = generateBytecode(className, entity, constructor);
+
+			Class&lt;?&gt; type = entity.getType();
+
+			try {
+				return ReflectUtils.defineClass(className, bytecode, type.getClassLoader(), type.getProtectionDomain(), type);
+			} catch (Exception e) {
+				throw new IllegalStateException(e);
+			}
+		}
+
+		private static final String TAG = "_Instantiator_";
+
+		/**
+		 * @param entity
+		 * @return
+		 */
+		private String generateClassName(PersistentEntity&lt;?, ?&gt; entity) {
+			// 类名+TAG+hashCode
+			return entity.getType().getName() + TAG + Integer.toString(entity.hashCode(), 36);
+		}
+</code></pre> 
+<p>到此我们元数据中的一堆 拼接了 <code>Instantiator_xxxxx</code> 的类来源就破案了。</p> 
+<h3>
+<a id="_354"></a>真相大白</h3> 
+<p>对应问题产生的问题也很简单。</p> 
+<pre><code>// 每次search前 都new了个RestTemplate，导致上下文发生变化，每次重新生成加载
+new ElasticsearchRestTemplate(cluster);
+</code></pre> 
+<p>这里我们是双集群模式，每次请求时会由负载决定使用那一个集群。之前在这里每次都 <code>new</code>了一个待使用集群的实例。</p> 
+<p>内部的上下文每次初始化后都是空的。</p> 
+<ul><li> <p>请求查询ES</p> 
+  <ul><li> <p>初始化ES查询</p> 
+    <ul>
+<li>上下文为空</li>
+<li>加载类信息（hashCode发生变化）</li>
+<li>获取类信息（重计算类名）</li>
+<li>重新加载类到元数据</li>
+</ul> </li></ul> </li></ul> 
+<p>最终长时间运行后元数据空间溢出；</p> 
+<h2>
+<a id="_378"></a>事后结论</h2> 
+<p>1.当时的临时方案是重启应用，元数据区清空，同时临时也可以放大元数据区大小。</p> 
+<p>2.元数据区的类型卸载或回收，8以后已经不使用了。</p> 
+<p>3.元数据区的泄漏排查思路：找到加载多的类，然后排查使用情况和可能的加载场景，一般在各种序列化反射场景。</p> 
+<p>4.快速排查可使用我们的方案。使用OQL来完成。</p> 
+<p>5.监控可以考虑加载类实例监控和元数据空间使用大小监控和对应报警。可以提前发现和处理。</p> 
+<p>6.ES查询在启动时对应集群内部初始化一个查询实例。使用那个集群就使用对应的集群查询实例。</p> 
+<h2>
+<a id="_392"></a>附录</h2> 
+<p><strong>VisualVM</strong>下载地址：<a href="https://visualvm.github.io/" title="下载地址">https://visualvm.github.io/</a></p> 
+<p><strong>OQL</strong>： Object Query Language 可参看<a href="https://www.devdoc.net/javaxe/visualvm-1.3.7/oqlhelp.html">在VisualVM中使用OQL分析</a></p> 
+<p>获取路径下类加载数量，从高到低排序</p> 
+<pre><code>var packageClassSizeMap = {};
+// 遍历统计以最后一个逗号做分割
+heap.forEachClass(function (it) {
+    var packageName = it.name.substring(0, it.name.lastIndexOf('.'));
+    if (packageClassSizeMap[packageName] != null) {
+        packageClassSizeMap[packageName] = packageClassSizeMap[packageName] + 1;
+    } else {
+        packageClassSizeMap[packageName] = 1;
+    }
+});
+// 排序 因为Visual VM的查询有数量限制。
+var sortPackageClassSizeMap = [];
+map(sort(Object.keys(packageClassSizeMap), function (a, b) {
+    return packageClassSizeMap[b] - packageClassSizeMap[a]
+}), function (it) {
+    sortPackageClassSizeMap.push({
+        package: it,
+        classSize: packageClassSizeMap[it]
+    })
+});
+sortPackageClassSizeMap;
+</code></pre> 
+<p>获取某个路径下类加载数量</p> 
+<pre><code>var packageClassSizeMap = {};
+// 遍历统计以最后一个逗号做分割
+heap.forEachClass(function (it) {
+    var packageName = it.name.substring(0, it.name.lastIndexOf('.'));
+    // 加路径过滤版
+    if (packageName.indexOf('com.jd.bapp.match.sync.query.es.po')){
+        if (packageClassSizeMap[packageName] != null) {
+            packageClassSizeMap[packageName] = packageClassSizeMap[packageName] + 1;
+        } else {
+            packageClassSizeMap[packageName] = 1;
+        }
+    }
+});
+
+sortPackageClassSizeMap;
+</code></pre> 
+<h2>
+<a id="_444"></a>特别鸣谢</h2> 
+<p>感谢黄仕清和Jdos同学提供的技术支持。</p> 
+<blockquote> 
+ <p>作者：京东零售 王建波</p> 
+ <p>来源：京东云开发者社区</p> 
+</blockquote>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

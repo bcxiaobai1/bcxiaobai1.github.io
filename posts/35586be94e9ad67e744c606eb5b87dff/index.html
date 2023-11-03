@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>用RANSAC算法实现干扰严重的直线拟合~ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">用RANSAC算法实现干扰严重的直线拟合~</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>1.说到直线拟合，一般是用最小二乘啦，在opencv里面就是用cv.fitLine来完成，首先简单介绍一下该函数：</p> 
+<p>cv.fitLine(points, distType, param, reps, aeps[, line]) -&gt; line</p> 
+<p>points：点集坐标</p> 
+<p>distType：距离度量的方法，有cv.DIST_L2，cv.DIST_L1等等，L2就是距离r平方的一半，L1就是距离r，其它的可以参考opencv官方文档</p> 
+<figure class="image">
+ <img alt="" height="763" src="https://images2.imgbox.com/c1/7d/9vtQcQbv_o.png" width="1200">
+ <figcaption>
+  取自opencv官方文档
+ </figcaption>
+</figure>
+<p>param：就是上图里面的那些c，L1、L2的话就用不到啦，填0即可</p> 
+<p>reps：原点精度要求（即返回值里面的x，y，也就是直线上的一个点），一般用0.01</p> 
+<p>aeps：角度精度要求（即返回值里面的vx，vy），一般也用0.01</p> 
+<p>返回值：vx, vy, x, y。x,y即直线上一个点的坐标，而vy/vx就是斜率，它其实对应的方程如下：</p> 
+<p><img alt="" height="1119" src="https://images2.imgbox.com/e4/8b/YNrZP9D9_o.png" width="1200"></p> 
+<p></p> 
+<p>接下来简单试一下：</p> 
+<pre><code>pts = np.array([[1, 0], [0, 1]])
+vx, vy, x, y = cv.fitLine(pts, cv.DIST_L2, 0, 0.01, 0.01)
+print('vx = {}, vy = {}, x = {}, y= {}'.format(vx, vy, x, y))</code></pre> 
+<p></p> 
+<p>输出结果：vx = [0.70710677], vy = [-0.70710677], x = [0.5], y= [0.5]</p> 
+<p>如果像下面这样，给坐标再套一层，其实也行，其实这个多套了一层的就是发现轮廓返回的数据格式（即cv.findContours）。</p> 
+<pre><code>pts = np.array([[[1, 0]], [[0, 1]]])
+vx, vy, x, y = cv.fitLine(pts, cv.DIST_L2, 0, 0.01, 0.01)
+print('vx = {}, vy = {}, x = {}, y= {}'.format(vx, vy, x, y))</code></pre> 
+<p>2.如果要拟合直线的点集并没有什么干扰那是很简单的，直接用这个函数就行了，比如下图，左边就是我画的一条线，中间再擦除一点东西，其实没有什么干扰，右边就是拟合结果画出来的直线，肯定没什么问题了。</p> 
+<p><img alt="" height="808" src="https://images2.imgbox.com/cc/ab/2YRZrBSY_o.png" width="953"></p> 
+<p> 先放上测试代码，没啥好说的，看注释里面的说明：</p> 
+<pre><code>import cv2 as cv
+import numpy as np
+import math
+import time
+
+
+src = None
+xb = None
+yb = None
+vx = None
+vy = None
+draw_mode = 0
+
+
+def fitline_callback(event, x, y, flags, param):
+    global xb, yb, src, draw_mode, vx, vy
+
+    if xb == x or yb == y:
+        return
+
+    # 模式0：画直线，模式1：橡皮擦，点一下擦个圆，模式2：直线拟合
+    if event == cv.EVENT_MBUTTONDOWN:
+        draw_mode += 1
+        draw_mode %= 3
+        return
+
+    if draw_mode == 0:
+        if event == cv.EVENT_LBUTTONDOWN:
+            xb = x
+            yb = y
+        elif event == cv.EVENT_LBUTTONUP:
+            cv.line(src, (xb, yb), (x, y), (255, 0, 0), 1, cv.LINE_AA)
+            cv.imshow('src', src)
+    elif draw_mode == 1:
+        if event == cv.EVENT_LBUTTONDOWN:
+            cv.circle(src, (x, y), 5, (0, 0, 0), -1, cv.LINE_AA)
+            cv.imshow('src', src)
+    elif draw_mode == 2:
+        if event == cv.EVENT_LBUTTONDOWN:
+            src_test = np.copy(src)
+            gray = cv.cvtColor(src_test, cv.COLOR_BGR2GRAY)
+
+            # 这边就是获得图上像素值不为0的点集坐标，为啥是::-1？因为行号是y坐标，列数是x坐标，得倒过来才行啦。
+            # x，y是分开的，所以得用dstack把它们拼起来，这个跟torch.cat差不多哦，不明白的话可以看我的上一篇博客~~
+            pts = np.dstack(np.where(gray &gt; 0)[::-1]).reshape(-1, 2)
+
+            start_time = time.time()
+            vx, vy, x, y = cv.fitLine(pts, cv.DIST_L2, 0, 0.01, 0.01)
+            end_time = time.time()
+            print("耗时{}秒".format((end_time - start_time)))
+
+            lefty = int((-x * vy / vx) + y)  # 这个就是x=0时，y是多少
+            righty = int(((src.shape[1] - x) * vy / vx) + y)  # 这个是x等于图像宽度时，y是多少，参考我上面那个直线方程的图就明白了
+            cv.line(src_test, (src.shape[1] - 1, righty), (0, lefty), (0, 255, 0), 1, cv.LINE_AA)
+            cv.imshow('src_test', src_test)
+
+
+
+def fitline_test():
+    global src
+    src = np.zeros((500, 800, 3), dtype=np.uint8)
+    cv.namedWindow('src', cv.WINDOW_AUTOSIZE)
+    cv.imshow('src', src)
+    cv.setMouseCallback('src', fitline_callback, None)
+    cv.waitKey(0)
+    cv.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    fitline_test()
+</code></pre> 
+<p>接下来加了一些干扰进去，发现就不行了。 </p> 
+<p><img alt="" height="801" src="https://images2.imgbox.com/ef/50/XF2mJUgY_o.png" width="1103"></p> 
+<p> 2.那么有什么办法能把那些干扰去掉呢，这里就用一个叫做“随机抽样一致性（RANSAC）”的算法，首先声明一下：这个方法好不好用不敢说，如果有什么更好的方法欢迎在评论区指点。</p> 
+<p>首先说两个名词：</p> 
+<p>局内项：即都是在主要的那条直线上的点</p> 
+<p>局外项：即干扰项，或者说是错误项</p> 
+<p>假设局内项占总数百分比为w，我一次随机抽选n个点进行拟合，那么n个点都是局内项的概率就是w^n(w的n次方，这里就用^表示次方了)<br> n个点里至少有一个是局外项的概率（其实就是有局外项的概率啦）即1-w^n</p> 
+<p>一共尝试k次，即第一次选n个点拟合一下，第二次再选n个点拟合一下，。。。直到第k次，那么这k次都有局外项的概率就是(1-w^n)^k</p> 
+<p>所以k次里面至少有一次没有局外项的概率就是1-(1-w^n)^k，即置信概率c，稍微有那么一点点绕哈，一步步想就想明白了，这个概论就是我们最终要的概率，我们要求不高，我们就指望这k次里面出现一次都是局内项就行了，这个概率越高，我们的成功率就越高了，所以在实际使用过程中，我们可以把c设高一点，比如设为0.98，即98%</p> 
+<p>等等，还并没有说完，k次里面出现了一次全是局内项的情况有啥用呢？我们每一次抽选n个点的时候，用它们拟合直线（就用cv.fitline就蛮好），拟合出来之后，剩余的点（就是没抽选的点）都需要计算一下跟这条直线的距离，如果距离大于阈值（设置的阈值，比如2个像素值），那就是局外项，否则就是局内项，统计局内项的个数，这个个数如果越大，那就说明这次选的n个点就越可能都是局内项。所以呢最终我们要的就是局内项最多的那一次的选择。是不是很有道理的样子！</p> 
+<p>再等下，还有一个问题没解决，就是这个k到底是多少呢，上面说了c=1-(1-w^n)^k，c、n明显是我们自己决定了，比如置信概率c定为0.98，n就选为2（两点就是一条直线了麻），w我们多半不会知道明确的w值，但我们可以估计啊。比如局外项差不多在10分之1，那w就可以估到0.8（求稳），估0.9其实也可以（算起来更快哦），现在只有k一个变量了，那k就可以解了。不过为了说明我们求解的意义，以及实际我们需要的k到底是比这个解大？还是比这个解小？（其实实际需要抽样的次数肯定是大于等于k了），我们还是演算一下。</p> 
+<p>直接上图，P就是至少有一次都是局内项的概率，现在P要大于c，解到红框处时，k到底是大于一个值呢，还是小于一个值呢，看图的右边，底数明显小于1，此指数函数如右图所示，函数值y要小于1-C，x明显是要大于一个值了。</p> 
+<p><img alt="" height="970" src="https://images2.imgbox.com/04/a1/SjhwqjNE_o.png" width="1121"></p> 
+<p> </p> 
+<p> 先放一下实验效果，中间就是直接用fitline拟合，右边是用RANSAC算法拟合，效果还不错。<img alt="" height="800" src="https://images2.imgbox.com/58/10/r7GSG3wa_o.png" width="1200"></p> 
+<p>运行时间如下，第一次耗时就是直接用fitline了，第二次耗时是用RANSAC， 我设的c是0.98，w是0.6，抽样点数是2，计算出的k(iter_num)是8，并不需要试多少次，所以蛮快的。</p> 
+<p>声明一下，不同电脑运行速度不一样啊，白天我用的老古董台式机还要0.05秒的样子，看来那CPU是真不行了。</p> 
+<p> <img alt="" height="139" src="https://images2.imgbox.com/68/5a/vC6Qq40a_o.png" width="645"></p> 
+<p> 接下来直接上代码，具体实现跟上面说的完成一样，就是试k次，每次计算局内项，最终采用局内项最多的那一次。直接上全部代码，测试代码有更新（把采用ransac的方法加进去了），ransac拟合直线的函数就是fitline_ransac</p> 
+<pre><code>import cv2 as cv
+import numpy as np
+import math
+import time
+
+
+def get_distance_line_and_p_batch(vx, vy, p0, p1_list):
+    """
+    求点到直线距离
+    :param vx:
+    :param vy:
+    :param p0: 线上点
+    :param p1: 线外点
+    :return:
+    """
+    # print("vx = {}, vy = {}, p0 = {}, p1 = {}".format(vx, vy, p0, p1))
+    x0, y0 = p0
+
+    B0 = [vy * x0 - vx * y0] * len(p1_list)
+    B1 = [vx * p1[0] + vy * p1[1] for p1 in p1_list]
+
+    A = np.array([[vy, -vx], [vx, vy]], dtype=np.float32)
+    B = np.array([B0, B1], dtype=np.float32)
+    ret, X = cv.solve(A, B, flags=cv.DECOMP_LU)
+    x2 = X[0, :]
+    y2 = X[1, :]
+
+    x1 = np.array([p1[0] for p1 in p1_list], dtype=np.float32)
+    y1 = np.array([p1[1] for p1 in p1_list], dtype=np.float32)
+
+    return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5, x2, y2
+
+
+def fitline_ransac(pts, distance, confidence, correct_rate, fit_use_num=2):
+    """
+    拟合直线
+    :param pts:
+    :param distance:
+    :param confidence: 置信度
+    :param correct_rate: 估计局内项所占比率
+    :param fit_use_num: 一次拟合所用点数
+    :return:
+    """
+    iter_num = int(math.log(1 - confidence, 1 - correct_rate ** fit_use_num))
+    pts = np.float32(pts)
+
+    print("iter_num = {}".format(iter_num))
+
+    inliers = None
+    inliers_num = 0
+
+    for i in range(iter_num):
+        tmp_pts = pts[np.random.choice(pts.shape[0], fit_use_num)]
+        tmp_vx, tmp_vy, tmp_x, tmp_y = cv.fitLine(tmp_pts, cv.DIST_L2, 0, 0.01, 0.01)
+        tmp_vx = tmp_vx[0]
+        tmp_vy = tmp_vy[0]
+        tmp_x = tmp_x[0]
+        tmp_y = tmp_y[0]
+
+        tmp_distance, _, _ = get_distance_line_and_p_batch(tmp_vx, tmp_vy, (tmp_x, tmp_y), pts)
+        tmp_inliers = np.uint8(tmp_distance &lt;= distance)  # 小于等于阈值的就是局内项
+        tmp_inliers_num = np.sum(tmp_inliers)
+
+        if inliers_num &lt; tmp_inliers_num:  # 如果当前这次抽样的局内项更大，那就采用当前这一次
+            inliers_num = tmp_inliers_num
+            inliers = tmp_inliers
+
+    # 之前两个点的拟合只是为了排除局外项，再用所有局内项拟合一次，结果更精确
+    tmp_pts = pts[inliers &gt; 0]
+    vx, vy, x, y = cv.fitLine(tmp_pts, cv.DIST_L2, 0, 0.01, 0.01)
+
+    print("total_num = {}, inliers_num = {}".format(pts.shape[0], inliers_num))
+
+    return vx, vy, x, y
+
+
+src = None
+xb = None
+yb = None
+vx = None
+vy = None
+draw_mode = 0
+
+
+def fitline_callback(event, x, y, flags, param):
+    global xb, yb, src, draw_mode, vx, vy
+
+    if xb == x or yb == y:
+        return
+
+    # 模式0：画直线，模式1：橡皮擦，点一下擦个圆，模式2：直线拟合
+    if event == cv.EVENT_MBUTTONDOWN:
+        draw_mode += 1
+        draw_mode %= 3
+        return
+
+    if draw_mode == 0:
+        if event == cv.EVENT_LBUTTONDOWN:
+            xb = x
+            yb = y
+        elif event == cv.EVENT_LBUTTONUP:
+            cv.line(src, (xb, yb), (x, y), (255, 0, 0), 1, cv.LINE_AA)
+            cv.imshow('src', src)
+    elif draw_mode == 1:
+        if event == cv.EVENT_LBUTTONDOWN:
+            cv.circle(src, (x, y), 5, (0, 0, 0), -1, cv.LINE_AA)
+            cv.imshow('src', src)
+    elif draw_mode == 2:
+        if event == cv.EVENT_LBUTTONDOWN:
+            src_test = np.copy(src)
+            gray = cv.cvtColor(src_test, cv.COLOR_BGR2GRAY)
+
+            # 这边就是获得图上像素值不为0的点集坐标，为啥是::-1？因为行号是y坐标，列数是x坐标，得倒过来才行啦。
+            # x，y是分开的，所以得用dstack把它们拼起来，这个跟torch.cat差不多哦，不明白的话可以看我的上一篇博客~~
+            pts = np.dstack(np.where(gray &gt; 0)[::-1]).reshape(-1, 2)
+
+            start_time = time.time()
+            vx, vy, x, y = cv.fitLine(pts, cv.DIST_L2, 0, 0.01, 0.01)
+            end_time = time.time()
+            print("耗时{}秒".format((end_time - start_time)))
+
+            lefty = int((-x * vy / vx) + y)  # 这个就是x=0时，y是多少
+            righty = int(((src.shape[1] - x) * vy / vx) + y)  # 这个是x等于图像宽度时，y是多少，参考我上面那个直线方程的图就明白了
+            cv.line(src_test, (src.shape[1] - 1, righty), (0, lefty), (0, 255, 0), 1, cv.LINE_AA)
+            cv.imshow('src_test', src_test)
+
+            src_test = np.copy(src)
+
+            start_time = time.time()
+            vx, vy, x, y = fitline_ransac(pts, 2, 0.98, 0.6, 2)
+            end_time = time.time()
+            print("耗时{}秒".format((end_time - start_time)))
+
+            lefty = int((-x * vy / vx) + y)
+            righty = int(((src.shape[1] - x) * vy / vx) + y)
+            cv.line(src_test, (src.shape[1] - 1, righty), (0, lefty), (0, 255, 0), 1, cv.LINE_AA)
+            cv.imshow('src_test1', src_test)
+
+
+def fitline_test():
+    global src
+    src = np.zeros((500, 800, 3), dtype=np.uint8)
+    cv.namedWindow('src', cv.WINDOW_AUTOSIZE)
+    cv.imshow('src', src)
+    cv.setMouseCallback('src', fitline_callback, None)
+    cv.waitKey(0)
+    cv.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    fitline_test()
+</code></pre> 
+<p>还有一点没有具体说的就是：算局内项局外项的时候不是得算点和直线距离吗，这个怎么算？其实很简单啦，求点到直线的垂线的交点，然后算两点距离就是点线距离啦（不过好像还有更简单的哦，可能直接就能得到点线距离的公式，得研究研究~~）。这里就不详述了，求点线距离的函数先直接给到代码里，即get_distance_line_and_p_batch。如果感兴趣，见听下回分解，单独水一篇“点线距离”</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

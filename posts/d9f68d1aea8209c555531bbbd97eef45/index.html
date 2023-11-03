@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>源码分析-Activity的启动流程 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">源码分析-Activity的启动流程</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>以android 6.0源码为参考，其他版本api会稍有不同</p> 
+<p>在Activity中，启动一个Activity的方法</p> 
+<p></p> 
+<pre><code>@Override
+public void startActivity(Intent intent) {
+    this.startActivity(intent, null);
+}</code></pre> 
+<p>调用其重载2个参数的方法</p> 
+<p></p> 
+<pre><code>public void startActivity(Intent intent, @Nullable Bundle options) {
+    if (options != null) {
+        startActivityForResult(intent, -1, options);
+    } else {
+        // Note we want to go through this call for compatibility with
+        // applications that may have overridden the method.
+        startActivityForResult(intent, -1);
+    }
+}</code></pre> 
+<p>startActivity()最终调用的也是startActivityForResult()方法</p> 
+<pre><code>public void startActivityForResult(@RequiresPermission Intent intent, int requestCode,
+        @Nullable Bundle options) {
+    if (mParent == null) {
+        options = transferSpringboardActivityOptions(options);
+        Instrumentation.ActivityResult ar =
+            mInstrumentation.execStartActivity(
+                this, mMainThread.getApplicationThread(), mToken, this,
+                intent, requestCode, options);
+        if (ar != null) {
+            mMainThread.sendActivityResult(
+                mToken, mEmbeddedID, requestCode, ar.getResultCode(),
+                ar.getResultData());
+        }
+        if (requestCode &gt;= 0) {
+            mStartedActivity = true;
+        }
+
+        cancelInputsAndStartExitTransition(options);
+        // TODO Consider clearing/flushing other event sources and events for child windows.
+    } else {
+        if (options != null) {
+            mParent.startActivityFromChild(this, intent, requestCode, options);
+        } else {
+            // Note we want to go through this method for compatibility with
+            // existing applications that may have overridden it.
+            mParent.startActivityFromChild(this, intent, requestCode);
+        }
+    }
+}</code></pre> 
+<p>Instrumentation的execStartActivity()方法</p> 
+<p></p> 
+<pre><code>public ActivityResult execStartActivity(
+        Context who, IBinder contextThread, IBinder token, Activity target,
+        Intent intent, int requestCode, Bundle options) {
+    IApplicationThread whoThread = (IApplicationThread) contextThread;
+    Uri referrer = target != null ? target.onProvideReferrer() : null;
+    if (referrer != null) {
+        intent.putExtra(Intent.EXTRA_REFERRER, referrer);
+    }
+    if (mActivityMonitors != null) {
+        synchronized (mSync) {
+            final int N = mActivityMonitors.size();
+            for (int i=0; i&lt;N; i++) {
+                final ActivityMonitor am = mActivityMonitors.get(i);
+                if (am.match(who, null, intent)) {
+                    am.mHits++;
+                    if (am.isBlocking()) {
+                        return requestCode &gt;= 0 ? am.getResult() : null;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    try {
+        intent.migrateExtraStreamToClipData();
+        intent.prepareToLeaveProcess();
+        int result = ActivityManagerNative.getDefault()
+            .startActivity(whoThread, who.getBasePackageName(), intent,
+                    intent.resolveTypeIfNeeded(who.getContentResolver()),
+                    token, target != null ? target.mEmbeddedID : null,
+                    requestCode, 0, null, options);
+        checkStartActivityResult(result, intent);
+    } catch (RemoteException e) {
+        throw new RuntimeException("Failure from system", e);
+    }
+    return null;
+}</code></pre> 
+<p>ActivityManagerNative.getDefault().startActivity是进程间的通信,进入ActivityManagerService中的startActivity方法</p> 
+<pre><code>@Override
+public final int startActivity(IApplicationThread caller, String callingPackage,
+        Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode,
+        int startFlags, ProfilerInfo profilerInfo, Bundle options) {
+    return startActivityAsUser(caller, callingPackage, intent, resolvedType, resultTo,
+        resultWho, requestCode, startFlags, profilerInfo, options,
+        UserHandle.getCallingUserId());
+}</code></pre> 
+<p>调用startActivityAsUser()方法</p> 
+<pre><code>@Override
+public final int startActivityAsUser(IApplicationThread caller, String callingPackage,
+        Intent intent, String resolvedType, IBinder resultTo, String resultWho, int requestCode,
+        int startFlags, ProfilerInfo profilerInfo, Bundle options, int userId) {
+    enforceNotIsolatedCaller("startActivity");
+    userId = handleIncomingUser(Binder.getCallingPid(), Binder.getCallingUid(), userId,
+            false, ALLOW_FULL_ONLY, "startActivity", null);
+    // TODO: Switch to user app stacks here.
+    return mStackSupervisor.startActivityMayWait(caller, -1, callingPackage, intent,
+            resolvedType, null, null, resultTo, resultWho, requestCode, startFlags,
+            profilerInfo, null, null, options, false, userId, null, null);
+}</code></pre> 
+<p>进入ActivityStackSupervisor的startActivityMayWait()方法</p> 
+<pre><code>final int startActivityMayWait(IApplicationThread caller, int callingUid,
+        String callingPackage, Intent intent, String resolvedType,
+        IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
+        IBinder resultTo, String resultWho, int requestCode, int startFlags,
+        ProfilerInfo profilerInfo, WaitResult outResult, Configuration config,
+        Bundle options, boolean ignoreTargetSecurity, int userId,
+        IActivityContainer iContainer, TaskRecord inTask) {
+    // Refuse possible leaked file descriptors
+    if (intent != null &amp;&amp; intent.hasFileDescriptors()) {
+        throw new IllegalArgumentException("File descriptors passed in Intent");
+    }
+    boolean componentSpecified = intent.getComponent() != null;
+
+    //...
+
+        int res = startActivityLocked(caller, intent, resolvedType, aInfo,
+                voiceSession, voiceInteractor, resultTo, resultWho,
+                requestCode, callingPid, callingUid, callingPackage,
+                realCallingPid, realCallingUid, startFlags, options, ignoreTargetSecurity,
+                componentSpecified, null, container, inTask);
+                
+      //...
+
+        return res;
+    }
+}</code></pre> 
+<p>进入startActivityLocked方法</p> 
+<p></p> 
+<pre><code>final int startActivityLocked(IApplicationThread caller,
+        Intent intent, String resolvedType, ActivityInfo aInfo,
+        IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
+        IBinder resultTo, String resultWho, int requestCode,
+        int callingPid, int callingUid, String callingPackage,
+        int realCallingPid, int realCallingUid, int startFlags, Bundle options,
+        boolean ignoreTargetSecurity, boolean componentSpecified, ActivityRecord[] outActivity,
+        ActivityContainer container, TaskRecord inTask) {
+    int err = ActivityManager.START_SUCCESS;
+
+    ProcessRecord callerApp = null;
+    
+    abort |= !mService.mIntentFirewall.checkStartActivity(intent, callingUid,
+            callingPid, resolvedType, aInfo.applicationInfo);
+
+    doPendingActivityLaunchesLocked(false);
+
+    err = startActivityUncheckedLocked(r, sourceRecord, voiceSession, voiceInteractor,
+            startFlags, true, options, inTask);
+
+    if (err &lt; 0) {
+        // If someone asked to have the keyguard dismissed on the next
+        // activity start, but we are not actually doing an activity
+        // switch...  just dismiss the keyguard now, because we
+        // probably want to see whatever is behind it.
+        notifyActivityDrawnForKeyguard();
+    }
+    return err;
+}</code></pre> 
+<p>进入startActivityUncheckedLocked方法</p> 
+<pre><code>final int startActivityUncheckedLocked(final ActivityRecord r, ActivityRecord sourceRecord,
+        IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor, int startFlags,
+        boolean doResume, Bundle options, TaskRecord inTask) {
+    final Intent intent = r.intent;
+    final int callingUid = r.launchedFromUid;
+
+    ActivityStack.logStartActivity(EventLogTags.AM_CREATE_ACTIVITY, r, r.task);
+    targetStack.mLastPausedActivity = null;
+    targetStack.startActivityLocked(r, newTask, doResume, keepCurTransition, options);
+    if (!launchTaskBehind) {
+        // Don't set focus on an activity that's going to the back.
+        mService.setFocusedActivityLocked(r, "startedActivity");
+    }
+    return ActivityManager.START_SUCCESS;
+}</code></pre> 
+<p>targetStack是ActivityStack(activity栈)，进入startActivityLocked()方法，</p> 
+<pre><code>final void startActivityLocked(ActivityRecord r, boolean newTask,
+        boolean doResume, boolean keepCurTransition, Bundle options) {
+    TaskRecord rTask = r.task;
+    final int taskId = rTask.taskId;
+    
+    //...
+    if (doResume) {
+        mStackSupervisor.resumeTopActivitiesLocked(this, r, options);
+    }
+}</code></pre> 
+<p>进入ActivityStackSupervisor的resumeTopActivitiesLocked方法</p> 
+<pre><code>boolean resumeTopActivitiesLocked(ActivityStack targetStack, ActivityRecord target,
+        Bundle targetOptions) {
+    if (targetStack == null) {
+        targetStack = mFocusedStack;
+    }
+    // Do targetStack first.
+    boolean result = false;
+    if (isFrontStack(targetStack)) {
+        result = targetStack.resumeTopActivityLocked(target, targetOptions);
+    }
+
+    for (int displayNdx = mActivityDisplays.size() - 1; displayNdx &gt;= 0; --displayNdx) {
+        final ArrayList&lt;ActivityStack&gt; stacks = mActivityDisplays.valueAt(displayNdx).mStacks;
+        for (int stackNdx = stacks.size() - 1; stackNdx &gt;= 0; --stackNdx) {
+            final ActivityStack stack = stacks.get(stackNdx);
+            if (stack == targetStack) {
+                // Already started above.
+                continue;
+            }
+            if (isFrontStack(stack)) {
+                stack.resumeTopActivityLocked(null);
+            }
+        }
+    }
+    return result;
+}</code></pre> 
+<p>进入ActivityStack的resumeTopActivityLocked方法</p> 
+<pre><code>final boolean resumeTopActivityLocked(ActivityRecord prev) {
+    return resumeTopActivityLocked(prev, null);
+}
+
+final boolean resumeTopActivityLocked(ActivityRecord prev, Bundle options) {
+    if (mStackSupervisor.inResumeTopActivity) {
+        // Don't even start recursing.
+        return false;
+    }
+
+    boolean result = false;
+    try {
+        // Protect against recursion.
+        mStackSupervisor.inResumeTopActivity = true;
+        if (mService.mLockScreenShown == ActivityManagerService.LOCK_SCREEN_LEAVING) {
+            mService.mLockScreenShown = ActivityManagerService.LOCK_SCREEN_HIDDEN;
+            mService.updateSleepIfNeededLocked();
+        }
+        result = resumeTopActivityInnerLocked(prev, options);
+    } finally {
+        mStackSupervisor.inResumeTopActivity = false;
+    }
+    return result;
+}</code></pre> 
+<p>进入resumeTopActivityInnerLocked()方法</p> 
+<pre><code>private boolean resumeTopActivityInnerLocked(ActivityRecord prev, Bundle options) {
+    
+    //...
+    
+    boolean dontWaitForPause = (next.info.flags&amp;ActivityInfo.FLAG_RESUME_WHILE_PAUSING) != 0;
+    boolean pausing = mStackSupervisor.pauseBackStacks(userLeaving, true, dontWaitForPause);
+    if (mResumedActivity != null) {
+        if (DEBUG_STATES) Slog.d(TAG_STATES,
+                "resumeTopActivityLocked: Pausing " + mResumedActivity);
+        pausing |= startPausingLocked(userLeaving, false, true, dontWaitForPause);
+    }
+    if (pausing) {
+        if (DEBUG_SWITCH || DEBUG_STATES) Slog.v(TAG_STATES,
+                "resumeTopActivityLocked: Skip resume: need to start pausing");
+        if (next.app != null &amp;&amp; next.app.thread != null) {
+            mService.updateLruProcessLocked(next.app, true, null);
+        }
+        if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+        return true;
+    }
+    
+    if (DEBUG_STATES) Slog.d(TAG_STATES, "resumeTopActivityLocked: Restarting " + next);
+    mStackSupervisor.startSpecificActivityLocked(next, true, true);
+
+    if (DEBUG_STACK) mStackSupervisor.validateTopActivitiesLocked();
+    return true;
+}</code></pre> 
+<p>进入startPausingLocked方法</p> 
+<pre><code>final boolean startPausingLocked(boolean userLeaving, boolean uiSleeping, boolean resuming,
+        boolean dontWait) {
+    
+    ActivityRecord prev = mResumedActivity;
+    if (prev.app != null &amp;&amp; prev.app.thread != null) {
+        if (DEBUG_PAUSE) Slog.v(TAG_PAUSE, "Enqueueing pending pause: " + prev);
+        try {
+            EventLog.writeEvent(EventLogTags.AM_PAUSE_ACTIVITY,
+                    prev.userId, System.identityHashCode(prev),
+                    prev.shortComponentName);
+            mService.updateUsageStats(prev, false);
+            prev.app.thread.schedulePauseActivity(prev.appToken, prev.finishing,
+                    userLeaving, prev.configChangeFlags, dontWait);
+        } catch (Exception e) {
+            // Ignore exception, if process died other code will cleanup.
+            Slog.w(TAG, "Exception thrown during pause", e);
+            mPausingActivity = null;
+            mLastPausedActivity = null;
+            mLastNoHistoryActivity = null;
+        }
+    } else {
+        mPausingActivity = null;
+        mLastPausedActivity = null;
+        mLastNoHistoryActivity = null;
+    }
+}</code></pre> 
+<p>prev.app.thread为ApplicationThread对象实例，ApplicationThread是ActivityThread的内部类，进入schedulePauseActivity方法</p> 
+<pre><code>public final void schedulePauseActivity(IBinder token, boolean finished,
+        boolean userLeaving, int configChanges, boolean dontReport) {
+    sendMessage(
+            finished ? H.PAUSE_ACTIVITY_FINISHING : H.PAUSE_ACTIVITY,
+            token,
+            (userLeaving ? 1 : 0) | (dontReport ? 2 : 0),
+            configChanges);
+}</code></pre> 
+<p>通过mH.sendMessage(msg)方法，进入handlePauseActivity</p> 
+<p></p> 
+<pre><code>case PAUSE_ACTIVITY:
+    Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "activityPause");
+    handlePauseActivity((IBinder)msg.obj, false, (msg.arg1&amp;1) != 0, msg.arg2,
+            (msg.arg1&amp;2) != 0);
+    maybeSnapshot();
+    Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+    break;</code></pre> 
+<pre><code>private void handlePauseActivity(IBinder token, boolean finished,
+        boolean userLeaving, int configChanges, boolean dontReport) {
+    ActivityClientRecord r = mActivities.get(token);
+    if (r != null) {
+        //Slog.v(TAG, "userLeaving=" + userLeaving + " handling pause of " + r);
+        if (userLeaving) {
+            performUserLeavingActivity(r);
+        }
+
+        r.activity.mConfigChangeFlags |= configChanges;
+        performPauseActivity(token, finished, r.isPreHoneycomb());
+
+        // Make sure any pending writes are now committed.
+        if (r.isPreHoneycomb()) {
+            QueuedWork.waitToFinish();
+        }
+
+        // Tell the activity manager we have paused.
+        if (!dontReport) {
+            try {
+                ActivityManagerNative.getDefault().activityPaused(token);
+            } catch (RemoteException ex) {
+            }
+        }
+        mSomeActivitiesChanged = true;
+    }
+}
+
+final Bundle performPauseActivity(ActivityClientRecord r, boolean finished,
+        boolean saveState) {
+    
+    try {
+        // Next have the activity save its current state and managed dialogs...
+        if (!r.activity.mFinished &amp;&amp; saveState) {
+            callCallActivityOnSaveInstanceState(r);
+        }
+        // Now we are idle.
+        r.activity.mCalled = false;
+        mInstrumentation.callActivityOnPause(r.activity);
+        EventLog.writeEvent(LOG_AM_ON_PAUSE_CALLED, UserHandle.myUserId(),
+                r.activity.getComponentName().getClassName());
+        if (!r.activity.mCalled) {
+            throw new SuperNotCalledException(
+                "Activity " + r.intent.getComponent().toShortString() +
+                " did not call through to super.onPause()");
+        }
+
+    } catch (SuperNotCalledException e) {
+        throw e;
+
+    } catch (Exception e) {
+        //...
+    }
+    r.paused = true;
+
+}</code></pre> 
+<p>进入Instrumentation的callActivityOnPause()方法</p> 
+<pre><code>public void callActivityOnPause(Activity activity) {
+    activity.performPause();
+}</code></pre> 
+<p>进入Activity的performPause()方法</p> 
+<pre><code>final void performPause() {
+    mDoReportFullyDrawn = false;
+    mFragments.dispatchPause();
+    mCalled = false;
+    onPause();
+    mResumed = false;
+    if (!mCalled &amp;&amp; getApplicationInfo().targetSdkVersion
+            &gt;= android.os.Build.VERSION_CODES.GINGERBREAD) {
+        throw new SuperNotCalledException(
+                "Activity " + mComponent.toShortString() +
+                " did not call through to super.onPause()");
+    }
+    mResumed = false;
+}</code></pre> 
+<p>Activity的 onPause(),也就是先暂停栈顶的activity实例</p> 
+<p>回到ApplicationThread的handlePauseActivity()方法中，performPauseActivity(token, finished, r.isPreHoneycomb())执行完后，执行</p> 
+<p>ActivityManagerNative.getDefault().activityPaused(token);</p> 
+<p>接着进入ActivityManagerService中的.activityPaused(token)方法</p> 
+<pre><code>@Override
+public final void activityPaused(IBinder token) {
+    final long origId = Binder.clearCallingIdentity();
+    synchronized(this) {
+        ActivityStack stack = ActivityRecord.getStackLocked(token);
+        if (stack != null) {
+            stack.activityPausedLocked(token, false);
+        }
+    }
+    Binder.restoreCallingIdentity(origId);
+}</code></pre> 
+<p>进入ActivityStack中的activityPausedLocked()方法</p> 
+<pre><code>final void activityPausedLocked(IBinder token, boolean timeout) {
+    if (DEBUG_PAUSE) Slog.v(TAG_PAUSE,
+        "Activity paused: token=" + token + ", timeout=" + timeout);
+
+    final ActivityRecord r = isInStackLocked(token);
+    if (r != null) {
+        mHandler.removeMessages(PAUSE_TIMEOUT_MSG, r);
+        if (mPausingActivity == r) {
+            if (DEBUG_STATES) Slog.v(TAG_STATES, "Moving to PAUSED: " + r
+                    + (timeout ? " (due to timeout)" : " (pause complete)"));
+            completePauseLocked(true);
+        } else {
+            EventLog.writeEvent(EventLogTags.AM_FAILED_TO_PAUSE,
+                    r.userId, System.identityHashCode(r), r.shortComponentName,
+                    mPausingActivity != null
+                        ? mPausingActivity.shortComponentName : "(none)");
+            if (r.finishing &amp;&amp; r.state == ActivityState.PAUSING) {
+                if (DEBUG_PAUSE) Slog.v(TAG,
+                        "Executing finish of failed to pause activity: " + r);
+                finishCurrentActivityLocked(r, FINISH_AFTER_VISIBLE, false);
+            }
+        }
+    }
+}
+
+final ActivityRecord finishCurrentActivityLocked(ActivityRecord r, int mode, boolean oomAdj) {
+    //...
+    mStackSupervisor.mFinishingActivities.add(r);
+    r.resumeKeyDispatchingLocked();
+    mStackSupervisor.getFocusedStack().resumeTopActivityLocked(null);
+    return r;
+}</code></pre> 
+<p>进入ActivityStackSupervisor中的resumeTopActivityLocked()，再次进入resumeTopActivityInnerLocked方法，执行到最后几行</p> 
+<p>mStackSupervisor.startSpecificActivityLocked(next, true, true);</p> 
+<p>进入ActivityStackSupervisor中的startSpecificActivityLocked()方法</p> 
+<pre><code>void startSpecificActivityLocked(ActivityRecord r,
+        boolean andResume, boolean checkConfig) {
+    // Is this activity's application already running?
+    ProcessRecord app = mService.getProcessRecordLocked(r.processName,
+            r.info.applicationInfo.uid, true);
+
+    r.task.stack.setLaunchTime(r);
+
+    if (app != null &amp;&amp; app.thread != null) {
+        try {
+            if ((r.info.flags&amp;ActivityInfo.FLAG_MULTIPROCESS) == 0
+                    || !"android".equals(r.info.packageName)) {
+                // Don't add this if it is a platform component that is marked
+                // to run in multiple processes, because this is actually
+                // part of the framework so doesn't make sense to track as a
+                // separate apk in the process.
+                app.addPackage(r.info.packageName, r.info.applicationInfo.versionCode,
+                        mService.mProcessStats);
+            }
+            realStartActivityLocked(r, app, andResume, checkConfig);
+            return;
+        } catch (RemoteException e) {
+            Slog.w(TAG, "Exception when starting activity "
+                    + r.intent.getComponent().flattenToShortString(), e);
+        }
+
+        // If a dead object exception was thrown -- fall through to
+        // restart the application.
+    }
+
+    mService.startProcessLocked(r.processName, r.info.applicationInfo, true, 0,
+            "activity", r.intent.getComponent(), false, false, true);
+}</code></pre> 
+<p>进入realStartActivityLocked，启动待启动的activity</p> 
+<pre><code>final boolean realStartActivityLocked(ActivityRecord r,
+        ProcessRecord app, boolean andResume, boolean checkConfig)
+        throws RemoteException {
+
+        app.forceProcessStateUpTo(mService.mTopProcessState);
+        app.thread.scheduleLaunchActivity(new Intent(r.intent), r.appToken,
+                System.identityHashCode(r), r.info, new Configuration(mService.mConfiguration),
+                new Configuration(stack.mOverrideConfig), r.compat, r.launchedFromPackage,
+                task.voiceInteractor, app.repProcState, r.icicle, r.persistentState, results,
+                newIntents, !andResume, mService.isNextTransitionForward(), profilerInfo);
+
+    return true;
+}</code></pre> 
+<p>进入ApplicationThread中的scheduleLaunchActivity()方法</p> 
+<pre><code>@Override
+public final void scheduleLaunchActivity(Intent intent, IBinder token, int ident,
+        ActivityInfo info, Configuration curConfig, Configuration overrideConfig,
+        CompatibilityInfo compatInfo, String referrer, IVoiceInteractor voiceInteractor,
+        int procState, Bundle state, PersistableBundle persistentState,
+        List&lt;ResultInfo&gt; pendingResults, List&lt;ReferrerIntent&gt; pendingNewIntents,
+        boolean notResumed, boolean isForward, ProfilerInfo profilerInfo) {
+
+    updateProcessState(procState, false);
+
+    ActivityClientRecord r = new ActivityClientRecord();
+
+    r.token = token;
+    r.ident = ident;
+    r.intent = intent;
+    r.referrer = referrer;
+    r.voiceInteractor = voiceInteractor;
+    r.activityInfo = info;
+    r.compatInfo = compatInfo;
+    r.state = state;
+    r.persistentState = persistentState;
+
+    r.pendingResults = pendingResults;
+    r.pendingIntents = pendingNewIntents;
+
+    r.startsNotResumed = notResumed;
+    r.isForward = isForward;
+
+    r.profilerInfo = profilerInfo;
+
+    r.overrideConfig = overrideConfig;
+    updatePendingConfiguration(curConfig);
+
+    sendMessage(H.LAUNCH_ACTIVITY, r);
+}</code></pre> 
+<p>通过mH.sendMessage(msg)，执行handleLaunchActivity</p> 
+<pre><code>case LAUNCH_ACTIVITY: {
+    Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "activityStart");
+    final ActivityClientRecord r = (ActivityClientRecord) msg.obj;
+
+    r.packageInfo = getPackageInfoNoCheck(
+            r.activityInfo.applicationInfo, r.compatInfo);
+    handleLaunchActivity(r, null);
+    Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+}</code></pre> 
+<pre><code>private void handleLaunchActivity(ActivityClientRecord r, Intent customIntent) {
+    // If we are getting ready to gc after going to the background, well
+    // we are back active so skip it.
+    unscheduleGcIdler();
+    mSomeActivitiesChanged = true;
+
+    if (r.profilerInfo != null) {
+        mProfiler.setProfiler(r.profilerInfo);
+        mProfiler.startProfiling();
+    }
+
+    // Make sure we are running with the most recent config.
+    handleConfigurationChanged(null, null);
+
+    if (localLOGV) Slog.v(
+        TAG, "Handling launch of " + r);
+
+    // Initialize before creating the activity
+    WindowManagerGlobal.initialize();
+
+    Activity a = performLaunchActivity(r, customIntent);
+
+    if (a != null) {
+        r.createdConfig = new Configuration(mConfiguration);
+        Bundle oldState = r.state;
+        handleResumeActivity(r.token, false, r.isForward,
+                !r.activity.mFinished &amp;&amp; !r.startsNotResumed);
+
+        if (!r.activity.mFinished &amp;&amp; r.startsNotResumed) {
+            try {
+                r.activity.mCalled = false;
+                mInstrumentation.callActivityOnPause(r.activity);
+                if (r.isPreHoneycomb()) {
+                    r.state = oldState;
+                }
+                if (!r.activity.mCalled) {
+                    throw new SuperNotCalledException(
+                        "Activity " + r.intent.getComponent().toShortString() +
+                        " did not call through to super.onPause()");
+                }
+
+            } catch (SuperNotCalledException e) {
+                throw e;
+
+            } catch (Exception e) {
+                if (!mInstrumentation.onException(r.activity, e)) {
+                    throw new RuntimeException(
+                            "Unable to pause activity "
+                            + r.intent.getComponent().toShortString()
+                            + ": " + e.toString(), e);
+                }
+            }
+            r.paused = true;
+        }
+    } else {
+        // If there was an error, for any reason, tell the activity
+        // manager to stop us.
+        try {
+            ActivityManagerNative.getDefault()
+                .finishActivity(r.token, Activity.RESULT_CANCELED, null, false);
+        } catch (RemoteException ex) {
+            // Ignore
+        }
+    }
+}</code></pre> 
+<p>进入performLaunchActivity</p> 
+<pre><code>private Activity performLaunchActivity(ActivityClientRecord r, Intent customIntent) {
+    // System.out.println("##### [" + System.currentTimeMillis() + "] ActivityThread.performLaunchActivity(" + r + ")");
+
+    ActivityInfo aInfo = r.activityInfo;
+    if (r.packageInfo == null) {
+        r.packageInfo = getPackageInfo(aInfo.applicationInfo, r.compatInfo,
+                Context.CONTEXT_INCLUDE_CODE);
+    }
+
+    ComponentName component = r.intent.getComponent();
+    if (component == null) {
+        component = r.intent.resolveActivity(
+            mInitialApplication.getPackageManager());
+        r.intent.setComponent(component);
+    }
+
+    if (r.activityInfo.targetActivity != null) {
+        component = new ComponentName(r.activityInfo.packageName,
+                r.activityInfo.targetActivity);
+    }
+
+    Activity activity = null;
+    try {
+        java.lang.ClassLoader cl = r.packageInfo.getClassLoader();
+        activity = mInstrumentation.newActivity(
+                cl, component.getClassName(), r.intent);
+        StrictMode.incrementExpectedActivityCount(activity.getClass());
+        r.intent.setExtrasClassLoader(cl);
+        r.intent.prepareToEnterProcess();
+        if (r.state != null) {
+            r.state.setClassLoader(cl);
+        }
+    } catch (Exception e) {
+        if (!mInstrumentation.onException(activity, e)) {
+            throw new RuntimeException(
+                "Unable to instantiate activity " + component
+                + ": " + e.toString(), e);
+        }
+    }
+
+    try {
+        Application app = r.packageInfo.makeApplication(false, mInstrumentation);
+
+        if (localLOGV) Slog.v(TAG, "Performing launch of " + r);
+        if (localLOGV) Slog.v(
+                TAG, r + ": app=" + app
+                + ", appName=" + app.getPackageName()
+                + ", pkg=" + r.packageInfo.getPackageName()
+                + ", comp=" + r.intent.getComponent().toShortString()
+                + ", dir=" + r.packageInfo.getAppDir());
+
+        if (activity != null) {
+            Context appContext = createBaseContextForActivity(r, activity);
+            CharSequence title = r.activityInfo.loadLabel(appContext.getPackageManager());
+            Configuration config = new Configuration(mCompatConfiguration);
+            if (DEBUG_CONFIGURATION) Slog.v(TAG, "Launching activity "
+                    + r.activityInfo.name + " with config " + config);
+            activity.attach(appContext, this, getInstrumentation(), r.token,
+                    r.ident, app, r.intent, r.activityInfo, title, r.parent,
+                    r.embeddedID, r.lastNonConfigurationInstances, config,
+                    r.referrer, r.voiceInteractor);
+
+            if (customIntent != null) {
+                activity.mIntent = customIntent;
+            }
+            r.lastNonConfigurationInstances = null;
+            activity.mStartedActivity = false;
+            int theme = r.activityInfo.getThemeResource();
+            if (theme != 0) {
+                activity.setTheme(theme);
+            }
+
+            activity.mCalled = false;
+            if (r.isPersistable()) {
+                mInstrumentation.callActivityOnCreate(activity, r.state, r.persistentState);
+            } else {
+                mInstrumentation.callActivityOnCreate(activity, r.state);
+            }
+            if (!activity.mCalled) {
+                throw new SuperNotCalledException(
+                    "Activity " + r.intent.getComponent().toShortString() +
+                    " did not call through to super.onCreate()");
+            }
+            r.activity = activity;
+            r.stopped = true;
+            if (!r.activity.mFinished) {
+                activity.performStart();
+                r.stopped = false;
+            }
+            if (!r.activity.mFinished) {
+                if (r.isPersistable()) {
+                    if (r.state != null || r.persistentState != null) {
+                        mInstrumentation.callActivityOnRestoreInstanceState(activity, r.state,
+                                r.persistentState);
+                    }
+                } else if (r.state != null) {
+                    mInstrumentation.callActivityOnRestoreInstanceState(activity, r.state);
+                }
+            }
+            if (!r.activity.mFinished) {
+                activity.mCalled = false;
+                if (r.isPersistable()) {
+                    mInstrumentation.callActivityOnPostCreate(activity, r.state,
+                            r.persistentState);
+                } else {
+                    mInstrumentation.callActivityOnPostCreate(activity, r.state);
+                }
+                if (!activity.mCalled) {
+                    throw new SuperNotCalledException(
+                        "Activity " + r.intent.getComponent().toShortString() +
+                        " did not call through to super.onPostCreate()");
+                }
+            }
+        }
+        r.paused = true;
+
+        mActivities.put(r.token, r);
+
+    } catch (SuperNotCalledException e) {
+        throw e;
+
+    } catch (Exception e) {
+        if (!mInstrumentation.onException(activity, e)) {
+            throw new RuntimeException(
+                "Unable to start activity " + component
+                + ": " + e.toString(), e);
+        }
+    }
+
+    return activity;
+}</code></pre> 
+<p>进入mInstrumentation.callActivityOnCreate(activity, r.state, r.persistentState);</p> 
+<p></p> 
+<pre><code>public void callActivityOnCreate(Activity activity, Bundle icicle,
+        PersistableBundle persistentState) {
+    prePerformCreate(activity);
+    activity.performCreate(icicle, persistentState);
+    postPerformCreate(activity);
+}</code></pre> 
+<p>进入Activity中的performCreate</p> 
+<pre><code>final void performCreate(Bundle icicle) {
+    onCreate(icicle);
+    mActivityTransitionState.readState(icicle);
+    performCreateCommon();
+}</code></pre> 
+<p>执行onCreate(icicle); 即启动新的Activity</p> 
+<p>至此，整个启动流程结束。</p> 
+<p>整个流程的跳转调用很复杂，可能要花好几天才能梳理清楚。刚开始看源码时，可以只看大致流程，看方法的名字猜它的功能，看不懂直接跳过，不然真的就石沉大海了。</p> 
+<p></p> 
+<p></p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

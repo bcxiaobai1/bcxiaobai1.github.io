@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>paddle2.2.0:policy gradient算法实现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">paddle2.2.0:policy gradient算法实现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p>        在前面的博客中，我们使用了DQN等算法训练了agent并得到了较高的分数。DQN中的神经网络是输出的动作Q值，然后通过哪个Q值更大，就采取相应的动作，可我们为什么不直接让神经网络输出动作(概率)，一步到位呢。而Policy Gradient就可以一步到位。</p> 
+<pre><code class="language-python">import paddle
+import paddle.nn as nn
+import paddle.nn.functional as F
+import parl
+import numpy as np
+import gym
+from parl.utils import logger
+from paddle.distribution import Categorical
+
+LEARNING_RATE = 1e-3
+
+class Model(parl.Model):
+    def __init__(self, obs_dim, act_dim):
+        super().__init__()
+        hid1_size = act_dim * 10
+        self.fc1 = nn.Linear(obs_dim, hid1_size)
+        self.fc2 = nn.Linear(hid1_size, act_dim)
+
+    def forward(self, obs):
+        out = F.tanh(self.fc1(obs))
+        out = F.softmax(self.fc2(out))
+        return out
+
+class PolicyGradient(parl.Algorithm):
+    def __init__(self, model, lr=None):
+        self.model = model
+        assert isinstance(lr, float)
+        self.optimizer = paddle.optimizer.Adam(learning_rate=lr, parameters=model.parameters())
+
+    def predict(self, obs):
+        return self.model(obs)
+
+    def learn(self, obs, act, reward):
+        # act_prob = self.model(obs)
+        # log_prob = F.cross_entropy(act_prob, act)
+        # loss = log_prob.mean()
+        # self.optimizer.clear_grad()
+        # loss.backward()
+        # self.optimizer.step()
+        prob = self.model(obs)
+        log_prob = Categorical(prob).log_prob(act)
+        loss = paddle.mean(-1 * log_prob * reward)
+
+        self.optimizer.clear_grad()
+        loss.backward()
+        self.optimizer.step()
+        return loss
+
+class Agent(parl.Agent):
+    def __init__(self, algorithm, obs_dim, act_dim):
+        super().__init__(algorithm)
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
+
+
+    def sample(self, obs):
+        obs = paddle.to_tensor(obs, dtype='float32')
+        act_prob = self.alg.predict(obs)
+        act_prob = np.squeeze(act_prob, axis=0)
+        
+        act = np.random.choice(range(self.act_dim), p=act_prob.numpy())
+        return act
+    
+    def predict(self, obs):
+        obs = paddle.to_tensor(obs, dtype='float32')
+        act_prob = self.alg.predict(obs)
+        act = np.argmax(act_prob)
+        return act
+
+    def learn(self, obs, act, reward):
+        act = np.expand_dims(act, axis=-1)
+        reward = np.expand_dims(reward, axis=-1)
+
+        obs = paddle.to_tensor(obs, dtype='float32')
+        act = paddle.to_tensor(act, dtype='int32')
+        reward = paddle.to_tensor(reward, dtype='float32')
+        loss = self.alg.learn(obs, act, reward)
+        return loss.numpy()[0]
+
+def run_episode(env, agent):
+    obs_list, action_list, reward_list = [], [], []
+    obs = env.reset()
+    while True:
+        obs_list.append(obs)
+        action = agent.sample(obs) # 采样动作
+        action_list.append(action)
+
+        obs, reward, done, info = env.step(action)
+        reward_list.append(reward)
+
+        if done:
+            break
+    return obs_list, action_list, reward_list
+
+
+# 评估 agent, 跑 5 个episode，总reward求平均
+def evaluate(env, agent, render=False):
+    eval_reward = []
+    for i in range(5):
+        obs = env.reset()
+        episode_reward = 0
+        while True:
+            action = agent.predict(obs) # 选取最优动作
+            obs, reward, isOver, _ = env.step(action)
+            episode_reward += reward
+            if render:
+                env.render()
+            if isOver:
+                break
+        eval_reward.append(episode_reward)
+    return np.mean(eval_reward)
+
+# 根据一个episode的每个step的reward列表，计算每一个Step的Gt
+def calc_reward_to_go(reward_list, gamma=1.0):
+    for i in range(len(reward_list) - 2, -1, -1):
+        # G_t = r_t + γ·r_t+1 + ... = r_t + γ·G_t+1
+        reward_list[i] += gamma * reward_list[i + 1]  # Gt
+    return np.array(reward_list)
+
+
+# 创建环境
+env = gym.make('CartPole-v0')
+obs_dim = env.observation_space.shape[0]
+act_dim = env.action_space.n
+logger.info('obs_dim {}, act_dim {}'.format(obs_dim, act_dim))
+
+# 根据parl框架构建agent
+model = Model(obs_dim, act_dim)
+alg = PolicyGradient(model, lr=LEARNING_RATE)
+agent = Agent(alg, obs_dim=obs_dim, act_dim=act_dim)
+
+# 加载模型
+# if os.path.exists('./model.ckpt'):
+#     agent.restore('./model.ckpt')
+#     run_episode(env, agent, train_or_test='test', render=True)
+#     exit()
+
+for i in range(1000):
+    obs_list, action_list, reward_list = run_episode(env, agent)
+    if i % 10 == 0:
+        logger.info("Episode {}, Reward Sum {}.".format(
+            i, sum(reward_list)))
+
+    batch_obs = np.array(obs_list)
+    batch_action = np.array(action_list)
+    batch_reward = calc_reward_to_go(reward_list)
+
+    agent.learn(batch_obs, batch_action, batch_reward)
+    if (i + 1) % 100 == 0:
+        total_reward = evaluate(env, agent, render=False) # render=True 查看渲染效果，需要在本地运行，AIStudio无法显示
+        logger.info('Test reward: {}'.format(total_reward))
+
+# 保存模型到文件 ./model.ckpt
+agent.save('./model.ckpt')</code></pre> 
+<p>输出：策略梯度算法收敛的特别快，训练了几十秒就基本收敛了，下面是agent的训练表现</p> 
+<p><img alt="" height="480" src="https://images2.imgbox.com/5f/23/OU6KOiPP_o.gif" width="640"></p> 
+<p></p> 
+<pre><code class="language-python">[12-02 10:05:40 MainThread @3974053785.py:128] obs_dim 4, act_dim 2
+[12-02 10:05:40 MainThread @machine_info.py:88] nvidia-smi -L found gpu count: 1
+[12-02 10:05:40 MainThread @3974053785.py:145] Episode 0, Reward Sum 34.0.
+[12-02 10:05:40 MainThread @3974053785.py:145] Episode 10, Reward Sum 12.0.
+[12-02 10:05:41 MainThread @3974053785.py:145] Episode 20, Reward Sum 11.0.
+[12-02 10:05:41 MainThread @3974053785.py:145] Episode 30, Reward Sum 18.0.
+[12-02 10:05:41 MainThread @3974053785.py:145] Episode 40, Reward Sum 20.0.
+[12-02 10:05:41 MainThread @3974053785.py:145] Episode 50, Reward Sum 31.0.
+[12-02 10:05:41 MainThread @3974053785.py:145] Episode 60, Reward Sum 40.0.
+[12-02 10:05:41 MainThread @3974053785.py:145] Episode 70, Reward Sum 16.0.
+[12-02 10:05:42 MainThread @3974053785.py:145] Episode 80, Reward Sum 16.0.
+[12-02 10:05:42 MainThread @3974053785.py:145] Episode 90, Reward Sum 22.0.
+[12-02 10:05:42 MainThread @3974053785.py:154] Test reward: 45.2
+[12-02 10:05:42 MainThread @3974053785.py:145] Episode 100, Reward Sum 13.0.
+[12-02 10:05:42 MainThread @3974053785.py:145] Episode 110, Reward Sum 14.0.
+[12-02 10:05:43 MainThread @3974053785.py:145] Episode 120, Reward Sum 68.0.
+[12-02 10:05:43 MainThread @3974053785.py:145] Episode 130, Reward Sum 28.0.
+[12-02 10:05:43 MainThread @3974053785.py:145] Episode 140, Reward Sum 25.0.
+[12-02 10:05:43 MainThread @3974053785.py:145] Episode 150, Reward Sum 55.0.
+[12-02 10:05:44 MainThread @3974053785.py:145] Episode 160, Reward Sum 87.0.
+[12-02 10:05:44 MainThread @3974053785.py:145] Episode 170, Reward Sum 35.0.
+[12-02 10:05:44 MainThread @3974053785.py:145] Episode 180, Reward Sum 59.0.
+[12-02 10:05:44 MainThread @3974053785.py:145] Episode 190, Reward Sum 40.0.
+[12-02 10:05:45 MainThread @3974053785.py:154] Test reward: 81.0
+[12-02 10:05:45 MainThread @3974053785.py:145] Episode 200, Reward Sum 63.0.
+[12-02 10:05:45 MainThread @3974053785.py:145] Episode 210, Reward Sum 22.0.
+[12-02 10:05:45 MainThread @3974053785.py:145] Episode 220, Reward Sum 86.0.
+[12-02 10:05:46 MainThread @3974053785.py:145] Episode 230, Reward Sum 65.0.
+[12-02 10:05:46 MainThread @3974053785.py:145] Episode 240, Reward Sum 24.0.
+[12-02 10:05:46 MainThread @3974053785.py:145] Episode 250, Reward Sum 26.0.
+[12-02 10:05:46 MainThread @3974053785.py:145] Episode 260, Reward Sum 34.0.
+[12-02 10:05:47 MainThread @3974053785.py:145] Episode 270, Reward Sum 70.0.
+[12-02 10:05:47 MainThread @3974053785.py:145] Episode 280, Reward Sum 37.0.
+[12-02 10:05:47 MainThread @3974053785.py:145] Episode 290, Reward Sum 43.0.
+[12-02 10:05:48 MainThread @3974053785.py:154] Test reward: 98.0
+[12-02 10:05:48 MainThread @3974053785.py:145] Episode 300, Reward Sum 33.0.
+[12-02 10:05:48 MainThread @3974053785.py:145] Episode 310, Reward Sum 49.0.
+[12-02 10:05:49 MainThread @3974053785.py:145] Episode 320, Reward Sum 66.0.
+[12-02 10:05:49 MainThread @3974053785.py:145] Episode 330, Reward Sum 54.0.
+[12-02 10:05:49 MainThread @3974053785.py:145] Episode 340, Reward Sum 98.0.
+[12-02 10:05:50 MainThread @3974053785.py:145] Episode 350, Reward Sum 81.0.
+[12-02 10:05:50 MainThread @3974053785.py:145] Episode 360, Reward Sum 78.0.
+[12-02 10:05:50 MainThread @3974053785.py:145] Episode 370, Reward Sum 112.0.
+[12-02 10:05:51 MainThread @3974053785.py:145] Episode 380, Reward Sum 40.0.
+[12-02 10:05:51 MainThread @3974053785.py:145] Episode 390, Reward Sum 37.0.
+[12-02 10:05:52 MainThread @3974053785.py:154] Test reward: 104.4
+[12-02 10:05:52 MainThread @3974053785.py:145] Episode 400, Reward Sum 74.0.
+[12-02 10:05:52 MainThread @3974053785.py:145] Episode 410, Reward Sum 44.0.
+[12-02 10:05:52 MainThread @3974053785.py:145] Episode 420, Reward Sum 39.0.
+[12-02 10:05:53 MainThread @3974053785.py:145] Episode 430, Reward Sum 104.0.
+[12-02 10:05:53 MainThread @3974053785.py:145] Episode 440, Reward Sum 22.0.
+[12-02 10:05:54 MainThread @3974053785.py:145] Episode 450, Reward Sum 92.0.
+[12-02 10:05:54 MainThread @3974053785.py:145] Episode 460, Reward Sum 16.0.
+[12-02 10:05:54 MainThread @3974053785.py:145] Episode 470, Reward Sum 16.0.
+[12-02 10:05:55 MainThread @3974053785.py:145] Episode 480, Reward Sum 117.0.
+[12-02 10:05:55 MainThread @3974053785.py:145] Episode 490, Reward Sum 72.0.
+[12-02 10:05:56 MainThread @3974053785.py:154] Test reward: 198.8
+[12-02 10:05:56 MainThread @3974053785.py:145] Episode 500, Reward Sum 20.0.
+[12-02 10:05:57 MainThread @3974053785.py:145] Episode 510, Reward Sum 62.0.
+[12-02 10:05:57 MainThread @3974053785.py:145] Episode 520, Reward Sum 17.0.
+[12-02 10:05:58 MainThread @3974053785.py:145] Episode 530, Reward Sum 56.0.
+[12-02 10:05:59 MainThread @3974053785.py:145] Episode 540, Reward Sum 101.0.
+[12-02 10:05:59 MainThread @3974053785.py:145] Episode 550, Reward Sum 178.0.
+[12-02 10:06:00 MainThread @3974053785.py:145] Episode 560, Reward Sum 57.0.
+[12-02 10:06:01 MainThread @3974053785.py:145] Episode 570, Reward Sum 158.0.
+[12-02 10:06:01 MainThread @3974053785.py:145] Episode 580, Reward Sum 72.0.
+[12-02 10:06:02 MainThread @3974053785.py:145] Episode 590, Reward Sum 161.0.
+[12-02 10:06:03 MainThread @3974053785.py:154] Test reward: 182.2
+[12-02 10:06:03 MainThread @3974053785.py:145] Episode 600, Reward Sum 113.0.
+[12-02 10:06:04 MainThread @3974053785.py:145] Episode 610, Reward Sum 112.0.
+[12-02 10:06:04 MainThread @3974053785.py:145] Episode 620, Reward Sum 61.0.
+[12-02 10:06:05 MainThread @3974053785.py:145] Episode 630, Reward Sum 143.0.
+[12-02 10:06:06 MainThread @3974053785.py:145] Episode 640, Reward Sum 156.0.
+[12-02 10:06:07 MainThread @3974053785.py:145] Episode 650, Reward Sum 150.0.
+[12-02 10:06:08 MainThread @3974053785.py:145] Episode 660, Reward Sum 167.0.
+[12-02 10:06:09 MainThread @3974053785.py:145] Episode 670, Reward Sum 200.0.
+[12-02 10:06:10 MainThread @3974053785.py:145] Episode 680, Reward Sum 200.0.
+[12-02 10:06:10 MainThread @3974053785.py:145] Episode 690, Reward Sum 164.0.
+[12-02 10:06:12 MainThread @3974053785.py:154] Test reward: 199.8
+[12-02 10:06:12 MainThread @3974053785.py:145] Episode 700, Reward Sum 126.0.
+[12-02 10:06:13 MainThread @3974053785.py:145] Episode 710, Reward Sum 164.0.
+[12-02 10:06:13 MainThread @3974053785.py:145] Episode 720, Reward Sum 200.0.
+[12-02 10:06:14 MainThread @3974053785.py:145] Episode 730, Reward Sum 92.0.
+[12-02 10:06:15 MainThread @3974053785.py:145] Episode 740, Reward Sum 200.0.
+[12-02 10:06:16 MainThread @3974053785.py:145] Episode 750, Reward Sum 197.0.
+[12-02 10:06:17 MainThread @3974053785.py:145] Episode 760, Reward Sum 200.0.
+[12-02 10:06:18 MainThread @3974053785.py:145] Episode 770, Reward Sum 178.0.
+[12-02 10:06:19 MainThread @3974053785.py:145] Episode 780, Reward Sum 200.0.
+[12-02 10:06:20 MainThread @3974053785.py:145] Episode 790, Reward Sum 200.0.
+[12-02 10:06:21 MainThread @3974053785.py:154] Test reward: 200.0
+[12-02 10:06:21 MainThread @3974053785.py:145] Episode 800, Reward Sum 144.0.
+[12-02 10:06:22 MainThread @3974053785.py:145] Episode 810, Reward Sum 195.0.
+[12-02 10:06:24 MainThread @3974053785.py:145] Episode 820, Reward Sum 174.0.
+[12-02 10:06:25 MainThread @3974053785.py:145] Episode 830, Reward Sum 167.0.
+[12-02 10:06:26 MainThread @3974053785.py:145] Episode 840, Reward Sum 125.0.
+[12-02 10:06:27 MainThread @3974053785.py:145] Episode 850, Reward Sum 62.0.
+[12-02 10:06:27 MainThread @3974053785.py:145] Episode 860, Reward Sum 200.0.
+[12-02 10:06:29 MainThread @3974053785.py:145] Episode 870, Reward Sum 137.0.
+[12-02 10:06:30 MainThread @3974053785.py:145] Episode 880, Reward Sum 200.0.
+[12-02 10:06:31 MainThread @3974053785.py:145] Episode 890, Reward Sum 30.0.
+[12-02 10:06:32 MainThread @3974053785.py:154] Test reward: 200.0
+[12-02 10:06:32 MainThread @3974053785.py:145] Episode 900, Reward Sum 161.0.
+[12-02 10:06:33 MainThread @3974053785.py:145] Episode 910, Reward Sum 200.0.
+[12-02 10:06:34 MainThread @3974053785.py:145] Episode 920, Reward Sum 194.0.
+[12-02 10:06:36 MainThread @3974053785.py:145] Episode 930, Reward Sum 200.0.
+[12-02 10:06:37 MainThread @3974053785.py:145] Episode 940, Reward Sum 200.0.
+[12-02 10:06:38 MainThread @3974053785.py:145] Episode 950, Reward Sum 200.0.
+[12-02 10:06:39 MainThread @3974053785.py:145] Episode 960, Reward Sum 200.0.
+[12-02 10:06:40 MainThread @3974053785.py:145] Episode 970, Reward Sum 200.0.
+[12-02 10:06:41 MainThread @3974053785.py:145] Episode 980, Reward Sum 200.0.
+[12-02 10:06:42 MainThread @3974053785.py:145] Episode 990, Reward Sum 193.0.
+[12-02 10:06:44 MainThread @3974053785.py:154] Test reward: 200.0</code></pre> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

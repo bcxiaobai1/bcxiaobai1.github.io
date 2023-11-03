@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Redis（十） 布隆过滤器 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis（十） 布隆过滤器</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h3>
+<a id="_0"></a>速记</h3> 
+<p>为什么使用布隆过滤器？<br> 1.为了省内存，提高速率<br> 2.因为1所以布隆过滤器不需要百分百正确<br> 3.说存在不一定存在，说不存在一定不存在<br> 4.在解决缓存穿透的问题时，拦截了大部分的请求，只有小部分携带了大量信息的恶意请求访问到了数据库<br> 5.不准确的原因是可能会和别的key发生冲突，所以位数组越大精确度越高，但是占用内存越多。所以在设置布隆过滤器的时候，这个容错率是多少是百分之一还是百分之十，是否牺牲内存来提高容错率这个我们要权衡一下。<br> 6.专门用来解决缓存穿透的问题</p> 
+<h1>
+<a id="_Bloom_Filter_11"></a>一. Bloom Filter</h1> 
+<h2>
+<a id="11__12"></a>1.1 布隆过滤器介绍</h2> 
+<p>Bloom Filter 专门用来解决我们上面所说的去重问题的，使用 Bloom Filter 不会像使用缓存那么浪费空间。当然，他也存在一个小小问题，就是不太精确。即<code>说存在不一定存在，说不存在一定不存在</code><br> Bloom Filter 相当于是一个不太精确的 set 集合，我们可以利用它里边的 contains 方法去判断某一个对象是否存在，但是需要注意，这个判断不是特别精确。一般来说，通过 contains 判断某个值不存在，那就一定不存在，但是判断某个值存在的话，则他可能不存在。</p> 
+<h2>
+<a id="12_17"></a>1.2例子</h2> 
+<h3>
+<a id="1_19"></a>实际案例1</h3> 
+<p>以今日头条为例，假设我们将用户的浏览记录用 B 表示，A 表示用户没有浏览的新闻，现在要给用户推送消息，先去 B 里边判断这条消息是否已经推送过，如果判断结果说没推送过（B 里边没有这条记录），那就一定没有推送过。如果判断结果说有推送过（B 里边也有可能没有这条消息），这个时候该条消息就不会推送给用户，导致用户错过该条消息，当然这是概率极低的。</p> 
+<h3>
+<a id="_23"></a>实际案例二</h3> 
+<p>前面所说的新闻推送过滤算是一个应用场景。</p> 
+<p>解决 Redis 穿透或者又叫缓存击穿问题。</p> 
+<p>假设我有 1亿 条用户数据，现在查询用户要去数据库中查，效率低而且数据库压力大，所以我们会把请求首先在 Redis 中处理（活跃用户存在 Redis 中），Redis 中没有的用户，再去数据库中查询。</p> 
+<p>现在可能会存在一种恶意请求，这个请求携带上了很多不存在的用户，这个时候 Redis 无法拦截下来请求，所以请求会直接跑到数据库里去。这个时候，这些恶意请求会击穿我们的缓存，甚至数据库，进而引起“雪崩效应”。</p> 
+<p>为了解决这个问题，我们就可以使用布隆过滤器。将 1亿条用户数据存在 Redis 中不现实，但是可以存在布隆过滤器中，请求来了，首先去判断数据是否存在，如果存在，再去数据库中查询，否则就不去数据库中查询。</p> 
+<h2>
+<a id="13__35"></a>1.3 布隆过滤器原理</h2> 
+<p>每一个布隆过滤器，在 Redis 中都对应了一个<strong>大型的位数组</strong>叫做<code>位数组</code>以及几个不同的 hash 函数。</p> 
+<p>所谓的 add 操作是这样的：</p> 
+<p>首先根据几个不同的 hash 函数给元素进行 hash 运算一个整数索引值，拿到这个索引值之后，对位数组的长度进行取模运算，得到一个位置，每一个 hash 函数都会得到一个位置，将位数组中对应的位置设置位 1 ，这样就完成了添加操作。</p> 
+<blockquote> 
+ <p>比如说你想存一个值<code>javaboy</code><br> 这里的位数组用三个hash给javaboy求一个hash出来，分别是5,6,8然后用5,6,8分别和数组的长度取模，结果还是5,6,8<br> 相同，itboyhub 取模结果是0,5,6<br> <img src="https://images2.imgbox.com/05/26/3VXxn2zr_o.png" alt="在这里插入图片描述"><br> 当判断元素是否存在时，依然先对元素进行 hash 运算，将运算的结果和位数组取模，然后去对应的位置查看是否有相应的数据，如果有，表示元素可能存在（因为这个有数据的地方也可能是其他元素存进来的），如果没有表示元素一定不存在。</p> 
+</blockquote> 
+<p>Bloom Filter 中，误判的概率和位数组的大小有很大关系，<code>位数组越大，误判概率越小，当然占用的存储空间越大</code>；<code>位数组越小，误判概率越大，当然占用的存储空间就小</code>。</p> 
+<p><code>实际应用中自己去设置这个概率，布隆过滤器会自动的分配数组的大小</code></p> 
+<h2>
+<a id="14__55"></a>1.4 布隆过滤器的安装</h2> 
+<p>布隆过滤器是GitHub上的开源项目</p> 
+<blockquote> 
+ <p><code>github.com/RedisBloom/RedisBloom/releases</code>我们先访问这个地址去找到适合自己版本的布隆过滤器</p> 
+</blockquote> 
+<p>这里黄黄下载一个2.2.18的稳定版本，你要下载什么版本要对照着你Redis的版本哦<br> <img src="https://images2.imgbox.com/f6/ab/Bvm7jI1R_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/89/95/M6ikktvv_o.png" alt="在这里插入图片描述"></p> 
+<p>然后去把你的redis集群全部关掉<br> <img src="https://images2.imgbox.com/6f/2f/OZoGbEEQ_o.png" alt="在这里插入图片描述"></p> 
+<p>进入你的redis的目录下去下载布隆过滤器</p> 
+<blockquote> 
+ <p><code>wget https://github.com/RedisBloom/RedisBloom/archive/refs/tags/v2.2.18.tar.gz</code><br> <img src="https://images2.imgbox.com/91/37/zrKPLbmV_o.png" alt="在这里插入图片描述"></p> 
+</blockquote> 
+<p>(如果下载不下来的兄弟，用刚才的github的路径下载安装包到windows，再丢到linux里面去解压吧，再用tar -zxvf 文件包名 去解压)</p> 
+<p>然后进入布隆过滤器的包中：<br> 因为我们之前装过了gcc，所以这里只要执行make指令就行，没有装gcc的兄弟翻一下以前的博客装一下gcc<br> <img src="https://images2.imgbox.com/8d/d1/4uDfG2iD_o.png" alt="在这里插入图片描述"></p> 
+<p>安装完成之后发现比安装之前多了一个redisbloom.so文件<br> <img src="https://images2.imgbox.com/ed/3f/6PwgIEYd_o.png" alt="在这里插入图片描述"></p> 
+<p>记住到RedisBloom包之中的路径：<br> 黄黄这里是：<code>/usr/local/redis-6.2.6/RedisBloom-2.2.18</code><br> <img src="https://images2.imgbox.com/51/12/OUoCsYbx_o.png" alt="在这里插入图片描述"></p> 
+<p>退回到redis包中<br> <img src="https://images2.imgbox.com/eb/68/OBrymbd1_o.png" alt="在这里插入图片描述"></p> 
+<p>进入redis.conf配置类，启动布隆过滤器的开机自动启动<br> <img src="https://images2.imgbox.com/1f/e0/4p7LkA14_o.png" alt="在这里插入图片描述"></p> 
+<p><code>/moules</code> 搜索到外部modules模块：如下<br> <img src="https://images2.imgbox.com/4d/93/YbxDEvbx_o.png" alt="在这里插入图片描述"><br> 添加:<code>/usr/local/redis/RedisBloom</code>是我们上面保存的地址加上/redisbloom.so即我们找到的这个布隆过滤器里的配置文件，记得加上loadmoule前缀，即<br> <code>loadmodule /usr/local/redis/RedisBloom/redisbloom.so </code><br> <img src="https://images2.imgbox.com/c7/6c/CpzdZnWJ_o.png" alt="在这里插入图片描述"></p> 
+<p>，启动我们的redis就行了，因为配置了布隆过滤器，所有开启redis布隆就应该生效了，当然没生效肯定是配置的什么地方出现了问题，那么就要我们自己去排错了。<br> <img src="https://images2.imgbox.com/13/70/xhwqFEP9_o.png" alt="在这里插入图片描述"></p> 
+<p>判断布隆过滤器是否启动</p> 
+<p>再进入命令行就可以去使用命令了<br> 主要是两类命令，添加和判断是否存在。</p> 
+<ul>
+<li>
+<code>bf.addbf.madd</code> 添加和批量添加</li>
+<li>
+<code>bf.existsbf.mexists</code> 判断是否存在和批量判断</li>
+</ul> 
+<h2>
+<a id="15__120"></a>1.5 布隆过滤器的基本用法-小例子</h2> 
+<p>添加依赖</p> 
+<pre><code class="prism language-java"><span class="token generics"><span class="token punctuation">&lt;</span>dependency<span class="token punctuation">&gt;</span></span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>groupId<span class="token punctuation">&gt;</span></span>redis<span class="token punctuation">.</span>clients<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>artifactId<span class="token punctuation">&gt;</span></span>jedis<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>version<span class="token punctuation">&gt;</span></span><span class="token number">3.7</span><span class="token number">.0</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+        <span class="token generics"><span class="token punctuation">&lt;</span>dependency<span class="token punctuation">&gt;</span></span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>groupId<span class="token punctuation">&gt;</span></span>com<span class="token punctuation">.</span>redislabs<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>artifactId<span class="token punctuation">&gt;</span></span>jrebloom<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>version<span class="token punctuation">&gt;</span></span><span class="token number">1.2</span><span class="token number">.0</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+        <span class="token generics"><span class="token punctuation">&lt;</span>dependency<span class="token punctuation">&gt;</span></span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>groupId<span class="token punctuation">&gt;</span></span>org<span class="token punctuation">.</span>redisson<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>artifactId<span class="token punctuation">&gt;</span></span>redisson<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>version<span class="token punctuation">&gt;</span></span><span class="token number">3.17</span><span class="token number">.5</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+        <span class="token generics"><span class="token punctuation">&lt;</span>dependency<span class="token punctuation">&gt;</span></span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>groupId<span class="token punctuation">&gt;</span></span>io<span class="token punctuation">.</span>lettuce<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>artifactId<span class="token punctuation">&gt;</span></span>lettuce<span class="token operator">-</span>core<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+            <span class="token generics"><span class="token punctuation">&lt;</span>version<span class="token punctuation">&gt;</span></span><span class="token number">6.2</span><span class="token number">.0</span><span class="token punctuation">.</span>RELEASE<span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">BloomFilterDemo</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//通用的连接池对象，这里主要是设置最大连接数、最小空闲数等参数</span>
+        <span class="token class-name">GenericObjectPoolConfig</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Jedis</span><span class="token punctuation">&gt;</span></span> poolConfig <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">GenericObjectPoolConfig</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//最大连接数</span>
+        poolConfig<span class="token punctuation">.</span><span class="token function">setMaxTotal</span><span class="token punctuation">(</span><span class="token number">100</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//最小空闲数</span>
+        poolConfig<span class="token punctuation">.</span><span class="token function">setMinIdle</span><span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//连接最大空闲数</span>
+        poolConfig<span class="token punctuation">.</span><span class="token function">setMaxIdle</span><span class="token punctuation">(</span><span class="token number">20</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">JedisPool</span> jedisPool <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">JedisPool</span><span class="token punctuation">(</span>poolConfig<span class="token punctuation">,</span> <span class="token string">"1.12.235.192"</span><span class="token punctuation">,</span> <span class="token number">6379</span><span class="token punctuation">,</span><span class="token keyword">null</span><span class="token punctuation">,</span><span class="token string">"123"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">Client</span> client <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Client</span><span class="token punctuation">(</span>jedisPool<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">100</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            client<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token string">"myfilter"</span><span class="token punctuation">,</span> <span class="token string">"zhangsan:"</span> <span class="token operator">+</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"client.exists("myfilter", "zhangsan:99") = "</span> <span class="token operator">+</span> client<span class="token punctuation">.</span><span class="token function">exists</span><span class="token punctuation">(</span><span class="token string">"myfilter"</span><span class="token punctuation">,</span> <span class="token string">"zhangsan:99"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"client.exists("myfilter","zhangsan:99999999") = "</span> <span class="token operator">+</span> client<span class="token punctuation">.</span><span class="token function">exists</span><span class="token punctuation">(</span><span class="token string">"myfilter"</span><span class="token punctuation">,</span> <span class="token string">"zhangsan:99999999"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="151___167"></a>1.5.1 调节布隆的过滤错误率</h3> 
+<p>默认情况下，我们使用的布隆过滤器它的错误率是 0.01 ，默认的元素大小是 100。但是这两个参数也是可以配置的。</p> 
+<p>我们可以调用 bf.reserve 方法进行配置。</p> 
+<blockquote> 
+ <p>BF.RESERVE k1 0.0001 1000000<br> 第一个参数是 key，第二个参数是错误率，错误率越低（意味着位数组越长），占用的空间越大，第三个参数预计存储的数量，当实际数量超出预计数量时，错误率会上升。</p> 
+</blockquote> 
+<h2>
+<a id="16_173"></a>1.6布隆的典型场景</h2> 
+<p>前面所说的新闻推送过滤算是一个应用场景。</p> 
+<p>解决 Redis 穿透或者又叫缓存击穿问题。</p> 
+<p>假设我有 1亿 条用户数据，现在查询用户要去数据库中查，效率低而且数据库压力大，所以我们会把请求首先在 Redis 中处理（活跃用户存在 Redis 中），Redis 中没有的用户，再去数据库中查询。</p> 
+<p>现在可能会存在一种恶意请求，这个请求携带上了很多不存在的用户，这个时候 Redis 无法拦截下来请求，所以请求会直接跑到数据库里去。这个时候，这些恶意请求会击穿我们的缓存，甚至数据库，进而引起“雪崩效应”。</p> 
+<p>为了解决这个问题，我们就可以使用布隆过滤器。将 1亿条用户数据存在 Redis 中不现实，但是可以存在布隆过滤器中，请求来了，首先去判断数据是否存在，如果存在，再去数据库中查询，否则就不去数据库中查询</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

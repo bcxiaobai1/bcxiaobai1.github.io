@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【Mysql】MVCC版本机制的多并发 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Mysql】MVCC版本机制的多并发</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <blockquote> 
+ <p><strong>?个人主页：平凡的小苏</strong><br> <strong>?学习格言：命运给你一个低的起点，是想看你精彩的翻盘，而不是让你自甘堕落，脚下的路虽然难走，但我还能走，比起向阳而生，我更想尝试逆风翻盘</strong>。<br> ?<strong>Mysql专栏</strong>：<a href="http://t.csdn.cn/n5GgD"><strong>Mysql内功修炼基地</strong></a><br> <strong>&gt; 家人们更新不易，你们的?点赞?和⭐关注⭐真的对我真重要，各位路 过的友友麻烦多多点赞关注。 欢迎你们的私信提问，感谢你们的转发！ 关注我，关注我，关注我，你们将会看到更多的优质内容！！</strong></p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/11/d3/MMyCkpT7_o.jpg" alt="在这里插入图片描述"></p> 
+<h1>
+<a id="_7"></a>一、三种数据库并发的场景</h1> 
+<p><code>读-读</code> ：不存在任何问题，也不需要并发控制</p> 
+<p><code>读-写</code> ：有线程安全问题，可能会造成事务隔离性问题，可能遇到脏读，幻读，不可重复读</p> 
+<p><code>写-写</code> ：有线程安全问题，可能会存在更新丢失问题，比如第一类更新丢失，第二类更新丢失(<strong>后面补充)</strong></p> 
+<h1>
+<a id="_15"></a>二、读写并发</h1> 
+<p>多版本并发控制（ MVCC ）是一种用来解决 读-写冲突 的无锁并发控制为事务分配单向增长的事务ID，为每个修改保存一个版本，版本与事务ID关联，读操作只读该事务开始前的数据库的快照。 所以 MVCC 可以为数据库解决以下问题：</p> 
+<ul>
+<li> <p>在并发读写数据库时，可以做到在读操作时不用阻塞写操作，写操作也不用阻塞读操作，提高了数据库并发读写的性能</p> </li>
+<li> <p>同时还可以解决脏读，幻读，不可重复读等事务隔离问题，但不能解决更新丢失问题</p> </li>
+</ul> 
+<h2>
+<a id="21_23"></a>2.1、三个前置知识</h2> 
+<ul>
+<li> <p>每个事务都有自己的事务id，可以根据事务id的大小，来决定事务到来的先后顺序</p> </li>
+<li> <p>mysqld可能会面临处理多个事务的情况，事务也有自己的生命周期，mysqld要对多个事务进行管理，先描述，在组织。事务在我看来，mysqld中一定是对应的一个或者一套结构体对象，事务也有自己的结构体</p> </li>
+</ul> 
+<h3>
+<a id="3_29"></a><strong>3个记录隐藏列字段</strong>
+</h3> 
+<ul>
+<li> <p>DB_TRX_ID ：6 byte，最近修改( 修改/插入 )事务ID，记录创建这条记录/最后一次修改该记录的事务ID</p> </li>
+<li> <p>DB_ROLL_PTR : 7 byte，回滚指针，指向这条记录的上一个版本（简单理解成，指向历史版本就行，这些数据一般在 undo log 中）</p> </li>
+<li> <p>DB_ROW_ID : 6 byte，隐含的自增ID（隐藏主键），如果数据表没有主键， InnoDB 会自动以DB_ROW_ID 产生一个聚簇索引</p> </li>
+</ul> 
+<p><strong>补充</strong>：实际还有一个删除flag隐藏字段, 既记录被更新或删除并不代表真的删除，而是删除flag变了</p> 
+<p>例如插入第一条数据的表结构</p> 
+<table>
+<thead><tr>
+<th>name</th>
+<th>age</th>
+<th>DB_TRX_ID</th>
+<th>DB_ROLL_PTR</th>
+<th>DB_ROW_ID</th>
+</tr></thead>
+<tbody><tr>
+<td>张三</td>
+<td>20</td>
+<td>null</td>
+<td>null</td>
+<td>1</td>
+</tr></tbody>
+</table> 
+<blockquote> 
+ <p>我们目前并不知道创建该记录的事务ID，隐式主键，我们就默认设置成null，1。第一条记录也没有其他版本，我们设置回滚指针为null。</p> 
+</blockquote> 
+<h3>
+<a id="undo_47"></a>undo日志</h3> 
+<p>我们这里理解undo log，简单理解成，就是 MySQL 中的一段内存缓冲区，用来保存日志数据的就行。</p> 
+<h3>
+<a id="MVCC_51"></a>模拟MVCC</h3> 
+<p>现在有一个事务10，对student表中记录进行修改(update)：将name(张三)改成name(李四)。</p> 
+<blockquote> 
+ <ul>
+<li> <p>事务10,因为要修改，所以要先给该记录加行锁。</p> </li>
+<li> <p>修改前，现将改行记录拷贝到undo log中，所以，undo log中就有了一行副本数据。(原理就是写时拷贝)</p> </li>
+<li> <p>所以现在 MySQL 中有两行同样的记录。现在修改原始记录中的name，改成 ‘李四’。并且修改原始记录的隐藏字段 DB_TRX_ID 为当前 事务10 的ID, 我们默认从 10 开始，之后递增。而原始记录的回滚指针 DB_ROLL_PTR 列，里面写入undo log中副本数据的地址，从而指向副本记录，既表示我的上一个版本就是它。</p> </li>
+<li> <p>事务10提交，释放锁。</p> </li>
+</ul> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/da/8d/kJdVkEVu_o.png" alt="在这里插入图片描述"></p> 
+<p>备注：此时，最新的记录是’李四‘那条记录。</p> 
+<p>现在又有一个事务11，对student表中记录进行修改(update)：将age(20)改成age(50)。</p> 
+<blockquote> 
+ <ul>
+<li> <p>事务11,因为也要修改，所以要先给该记录加行锁。（该记录是那条？）</p> </li>
+<li> <p>修改前，现将改行记录拷贝到undo log中，所以，undo log中就又有了一行副本数据。此时，新的 副本，我们采用头插方式，插入undo log。</p> </li>
+<li> <p>现在修改原始记录中的age，改成 50。并且修改原始记录的隐藏字段 DB_TRX_ID 为当前 事务11 的ID。而原始记录的回滚指针 DB_ROLL_PTR 列，里面写入undo log中副本数据的地址，从而指向副本记录，既表示我的上一个版本就是它。</p> </li>
+<li> <p>事务11提交，释放锁。</p> </li>
+</ul> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/8c/07/SeWmvZ4V_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>这样，我们就有了一个基于链表记录的历史版本链。<strong>所谓的回滚，无非就是用历史数据，覆盖当前数据</strong>。</p> 
+ <p>上面的一个一个版本，我们可以称之为<strong>一个一个的快照。</strong></p> 
+</blockquote> 
+<h3>
+<a id="delete_83"></a>delete场景</h3> 
+<blockquote> 
+ <p>如果是<code>delete</code>呢？一样的，别忘了，删数据不是清空，而是设置flag为删除即可。也可以形成版本。</p> 
+</blockquote> 
+<h3>
+<a id="insert_87"></a>insert场景</h3> 
+<blockquote> 
+ <p>因为<code>insert</code>是插入，也就是之前没有数据，那么<code>insert</code>也就没有历史版本。但是一般为了回滚操作，insert的数据也是要被放入undo log中，</p> 
+ <p>如果当前事务commit了，那么这个undolog 的历史insert记录就可以被清空了。</p> 
+</blockquote> 
+<h3>
+<a id="select_93"></a>select场景</h3> 
+<p>select读取，是读取最新的版本呢？还是读取历史版本？</p> 
+<blockquote> 
+ <p><code>当前读</code>：读取最新的记录，就是当前读。增删改，都叫做当前读，select也有可能当前读，比如：selectlock in share mode(共享锁), select for update<br> <code>快照读</code>：读取历史版本(一般而言)，就叫做快照读。</p> 
+ <p>我们可以看到，在多个事务同时删改查的时候，都是当前读，是要加锁的。那同时有select过来，如果也要读取最新版(当前读)，那么也就需要加锁，这就是<strong>串行化</strong>。</p> 
+ <p>但如果是快照读，读取历史版本的话，是不受加锁限制的。也就是可以并行执行！换言之，提高了效率，即MVCC的意义所在。</p> 
+</blockquote> 
+<p><strong>结论</strong>:select是当前读还是快照读，是由隔离级别决定的。</p> 
+<p>那么，如何保证，不同的事务，看到不同的内容呢？也就是如何如何实现隔离级别？</p> 
+<h3>
+<a id="MVCCRead_View_108"></a>MVCC机制Read View</h3> 
+<ul>
+<li> <p>Read View就是事务进行 快照读 操作的时候生产的 读视图 (Read View)，在该事务执行的快照读的那一刻，会生成数据库系统当前的一个快照，记录并维护系统当前活跃事务的ID(当每个事务开启时，都会被分配一个ID, 这个ID是递增的，所以最新的事务，ID值越大)</p> </li>
+<li> <p>Read View 在MySQL 源码中,就是一个类，本质是用来进行可见性判断的。 <strong>即当我们某个事务执行快照读的时候，对该记录创建一个 Read View 读视图</strong>，把它比作条件,用来判断当前事务能够看到哪个版本的数据，既可能是当前最新的数据，也有可能是该行记录的 undo log 里面的某个版本的数据。</p> </li>
+</ul> 
+<p><strong>下面是 ReadView 结构</strong></p> 
+<pre><code class="prism language-sql">class ReadView {
+<span class="token comment">// 省略...</span>
+private:
+<span class="token comment">/** 高水位，大于等于这个ID的事务均不可见*/</span>
+trx_id_t m_low_limit_id
+<span class="token comment">/** 低水位：小于这个ID的事务均可见 */</span>
+trx_id_t m_up_limit_id<span class="token punctuation">;</span>
+<span class="token comment">/** 创建该 Read View 的事务ID*/</span>
+trx_id_t m_creator_trx_id<span class="token punctuation">;</span>
+<span class="token comment">/** 创建视图时的活跃事务id列表*/</span>
+ids_t m_ids<span class="token punctuation">;</span>
+<span class="token comment">/** 配合purge，标识该视图不需要小于m_low_limit_no的UNDO LOG，
+* 如果其他视图也不需要，则可以删除小于m_low_limit_no的UNDO LOG*/</span>
+trx_id_t m_low_limit_no<span class="token punctuation">;</span>
+<span class="token comment">/** 标记视图是否被关闭*/</span>
+<span class="token keyword">bool</span> m_closed<span class="token punctuation">;</span>
+<span class="token comment">// 省略...</span>
+}<span class="token punctuation">;</span>
+
+m_ids<span class="token punctuation">;</span> <span class="token comment">//一张列表，用来维护Read View生成时刻，系统正活跃的事务ID</span>
+up_limit_id<span class="token punctuation">;</span> <span class="token comment">//记录m_ids列表中事务ID最小的ID(没有写错)</span>
+low_limit_id<span class="token punctuation">;</span> <span class="token comment">//ReadView生成时刻系统尚未分配的下一个事务ID，也就是目前已出现过的事务ID的</span>
+<span class="token comment">//最大值+1(也没有写错)</span>
+creator_trx_id <span class="token comment">//创建该ReadView的事务ID</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/37/45/PBz7DKZm_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p><strong>注意</strong>：read view是事务可见性的一个类，不是事务创建出来，就会有read view，而是当这个事务（已经存在），首次进行快照读的时候，mysql 形成read view！</p> 
+</blockquote> 
+<h3>
+<a id="Read_View_147"></a>Read View实验</h3> 
+<p>假设当前有条记录：</p> 
+<table>
+<thead><tr>
+<th>name</th>
+<th>age</th>
+<th>DB_TRX_ID</th>
+<th>DB_ROW_ID</th>
+<th>DB_ROLL_PTR</th>
+</tr></thead>
+<tbody><tr>
+<td>王五</td>
+<td>23</td>
+<td>null</td>
+<td>1</td>
+<td>null</td>
+</tr></tbody>
+</table> 
+<p>事务操作：<br> <img src="https://images2.imgbox.com/3d/27/ijYKFKF3_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li> <p>事务4：修改name(王五) 变成name(李六)</p> </li>
+<li> <p>当 事务2 对某行数据执行了 快照读 ，数据库为该行数据生成一个 Read View 读视图</p> </li>
+</ul> 
+<pre><code class="prism language-c++">//事务2的 Read View
+m_ids; // 1,3
+up_limit_id; // 1
+low_limit_id; // 4 + 1 = 5，原因：ReadView生成时刻，系统尚未分配的下一个事务ID
+creator_trx_id // 2 快照读id
+</code></pre> 
+<ul>
+<li> <p>只有事务4修改过该行记录，并在事务2执行快照读前，就提交了事务</p> </li>
+<li> <p>我们的事务2在快照读该行记录的时候，就会拿该行记录的 DB_TRX_ID 去跟up_limit_id,low_limit_id和活跃事务ID列表(trx_list) 进行比较，判断当前事务2能看到该记录的版本。</p> </li>
+</ul> 
+<pre><code class="prism language-c++">//事务2的 Read View
+m_ids; // 1,3
+up_limit_id; // 1
+low_limit_id; // 4 + 1 = 5，原因：ReadView生成时刻，系统尚未分配的下一个事务ID
+creator_trx_id // 2
+//事务4提交的记录对应的事务ID
+DB_TRX_ID=4
+//比较步骤
+DB_TRX_ID（4）&lt; up_limit_id（1） ? 不小于，下一步
+DB_TRX_ID（4）&gt;= low_limit_id(5) ? 不大于，下一步
+m_ids.contains(DB_TRX_ID) ? 不包含，说明，事务4不在当前的活跃事务中。
+</code></pre> 
+<blockquote> 
+ <p><strong>结论</strong>:</p> 
+ <p>故，事务4的更改，应该看到。所以事务2能读到的最新数据记录是事务4所提交的版本，而事务4提交的版本也是全局角度上最新的版本</p> 
+</blockquote> 
+<h3>
+<a id="RRRC_193"></a>RR与RC的本质区别</h3> 
+<ul>
+<li> <p>正是Read View生成时机的不同，从而造成RC,RR级别下快照读的结果的不同</p> </li>
+<li> <p>在RR级别下的某个事务的对某条记录的第一次快照读会创建一个快照及Read View,</p> <p>将当前系统活跃的其他事务记录起来</p> </li>
+<li> <p>此后在调用快照读的时候，还是使用的是同一个Read View，所以<strong>只要当前事务在其他事务提交更</strong></p> <p><strong>新之前使用过快照读</strong>，那么之后的快照读使用的都是<strong>同一个Read View</strong>，所以对<strong>之后的修改不可见</strong>；</p> </li>
+<li> <p>即RR级别下，快照读生成Read View时，Read View会记录此时所有其他活动事务的快照，这些事务的修改对于当前事务都是不可见的。而早于Read View创建的事务所做的修改均是可见</p> </li>
+<li> <p>而在RC级别下的，事务中，每次快照读都会<strong>新生成一个快照和Read View</strong>, 这就是我们在RC级别下 的事务中可以看到别的事务提交的更新的原因</p> </li>
+<li> <p>总之在RC隔离级别下，是每个快照读都会生成并获取最新的Read View；而在RR隔离级别下，则是</p> <p>同一个事务中的第一个快照读才会创建Read View, 之后的快照读获取的都是同一个Read View。正是RC每次快照读，都会形成Read View，所以，RC才会有不可重复读问题。</p> </li>
+</ul> 
+<p><strong>测试：当前读和快照读在RR级别下的区别</strong></p> 
+<pre><code class="prism language-mysql">-- 设置RR模式下测试
+mysql&gt; set global transaction isolation level REPEATABLE READ;
+Query OK, 0 rows affected (0.00 sec)
+-- 重启终端
+mysql&gt; select @@tx_isolation;
++-----------------+
+| @@tx_isolation |
++-----------------+
+| REPEATABLE-READ |
++-----------------+
+1 row in set, 1 warning (0.00 sec)
+-- 依旧用之前的表
+create table if not exists account(
+id int primary key,
+name varchar(50) not null default '',
+blance decimal(10,2) not null default 0.0
+)ENGINE=InnoDB DEFAULT CHARSET=UTF8;
+-- 插入一条记录，用来测试
+mysql&gt; insert into user (id, age, name) values (1, 15,'黄蓉');
+Query OK, 1 row affected (0.00 sec)
+</code></pre> 
+<p><strong>用例一</strong><br> <img src="https://images2.imgbox.com/73/79/covyWDMZ_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>用例二</strong><br> <img src="https://images2.imgbox.com/02/53/W1WgOXLe_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li> <p>用例1与用例2：唯一区别仅仅是 表1 的事务B在事务A修改age前 快照读 过一次age数据</p> </li>
+<li> <p>而 表2 的事务B在事务A修改age前没有进行过快照读。</p> </li>
+</ul> 
+<blockquote> 
+ <p><strong>结论</strong>：</p> 
+ <ul>
+<li> <p>事务中快照读的结果是非常依赖该事务首次出现快照读的地方，</p> <p>即某个事务中首次出现快照读，决定该事务后续快照读结果的能力</p> </li>
+<li> <p>delete同样如此</p> </li>
+</ul> 
+</blockquote>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

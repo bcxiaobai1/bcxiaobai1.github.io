@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Spring Security 6 配置方法，废弃 WebSecurityConfigurerAdapter - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Spring Security 6 配置方法，废弃 WebSecurityConfigurerAdapter</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h1>一、背景</h1> 
+<p> </p> 
+<p></p> 
+<p>最近阿里云的项目迁回本地运行，数据库从阿里云的RDS（即Mysql5.6）换成了本地8.0，Redis也从古董级别的2.x换成了现在6，忍不住，手痒，把jdk升级到了17，用zgc垃圾回收器，源代码重新编译重新发布，结果碰到了古董的SpringBoot不支持jdk17，所以有了这篇日志。记录一下SpringBoot2+SpringSecurity+JWT升级成SpringBoot3+SpringSecurity+JWT，就像文章标题所说的，SpringSecurity已经废弃了继承WebSecurityConfigurerAdapter的配置方式，那就的从头来咯。</p> 
+<p>在Spring Security 5.7.0-M2中，Spring就废弃了WebSecurityConfigurerAdapter，因为Spring官方鼓励用户转向基于组件的安全配置。本文整理了一下新的配置方法。 </p> 
+<p>在下面的例子中，我们使用Spring Security lambda DSL和HttpSecurity#authorizeHttpRequests方法来定义我们的授权规则，从而遵循最佳实践。</p> 
+<h1>二、配置成功后根据配置的情况整理的类图</h1> 
+<p>​​​​​​​<img alt="" height="1200" src="https://images2.imgbox.com/f3/f7/pRZce4UR_o.png" width="1200"></p> 
+<p> </p> 
+<h1>三、配置详情</h1> 
+<h2>3.1. 启用WebSecurity配置 </h2> 
+<pre><code class="language-java">@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+}</code></pre> 
+<p> 以下的配置在SecurityConfig内完成。</p> 
+<h3>3.1.1. 注册SecurityFilterChain Bean，并完成HttpSecurity配置</h3> 
+<p>在HttpSecurity中注意使用了lambda写法，使用这种写法之后，每个设置都直接返回HttpSecurity对象，避免了多余的and()操作符。每一步具体的含义，请参考代码上的注释。</p> 
+<pre><code class="language-java">    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+                // 禁用basic明文验证
+                .httpBasic().disable()
+                // 前后端分离架构不需要csrf保护
+                .csrf().disable()
+                // 禁用默认登录页
+                .formLogin().disable()
+                // 禁用默认登出页
+                .logout().disable()
+                // 设置异常的EntryPoint，如果不设置，默认使用Http403ForbiddenEntryPoint
+                .exceptionHandling(exceptions -&gt; exceptions.authenticationEntryPoint(invalidAuthenticationEntryPoint))
+                // 前后端分离是无状态的，不需要session了，直接禁用。
+                .sessionManagement(session -&gt; session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .authorizeHttpRequests(authorizeHttpRequests -&gt; authorizeHttpRequests
+                        // 允许所有OPTIONS请求
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        // 允许直接访问授权登录接口
+                        .requestMatchers(HttpMethod.POST, "/web/authenticate").permitAll()
+                        // 允许 SpringMVC 的默认错误地址匿名访问
+                        .requestMatchers("/error").permitAll()
+                        // 其他所有接口必须有Authority信息，Authority在登录成功后的UserDetailsImpl对象中默认设置“ROLE_USER”
+                        //.requestMatchers("/**").hasAnyAuthority("ROLE_USER")
+                        // 允许任意请求被已登录用户访问，不检查Authority
+                        .anyRequest().authenticated())
+                .authenticationProvider(authenticationProvider())
+                // 加我们自定义的过滤器，替代UsernamePasswordAuthenticationFilter
+                .addFilterBefore(authenticationJwtTokenFilter(), UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }</code></pre> 
+<h3>3.1.2. 注册自定义用户登录信息查询Bean</h3> 
+<pre><code class="language-java">    @Autowired
+    private UserDetailsService userDetailsService;
+
+    @Bean
+    public UserDetailsService userDetailsService() {
+        // 调用 JwtUserDetailService实例执行实际校验
+        return username -&gt; userDetailsService.loadUserByUsername(username);
+    }</code></pre> 
+<p> 这里关联到一个自定义的子类UserDetailsService，代码逻辑如下，注意需要根据实际情况改造数据库查询逻辑：</p> 
+<pre><code class="language-java">@Component
+public class SecurityUserDetailsService implements UserDetailsService {
+
+    @Autowired
+    private SqlSession sqlSession;
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        try {
+            // 查询数据库用户表，获得用户信息
+            sqlSession.xxx
+            // 使用获得的信息创建SecurityUserDetails
+            SecurityUserDetails user = new SecurityUserDetails(username, 
+                    password,
+                    // 以及其他org.springframework.security.core.userdetails.UserDetails接口要求的信息
+                    );
+
+            logger.info("用户信息：{}", user);
+            return user;
+        } catch (Exception e) {
+            String msg = "Username: " + username + " not found";
+            logger.error(msg, e);
+            throw new UsernameNotFoundException(msg);
+        }
+    }
+}</code></pre> 
+<h3>3.1.3. 注册密码加密Bean</h3> 
+<pre><code class="language-java">    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }</code></pre> 
+<h3>3.1.4. 注册用户授权检查执行Bean </h3> 
+<p>这里设定使用DaoAuthenticationProvider执行具体的校验检查，并且将自定义的用户登录查询服务Bean，和密码生成器都注入到该对象中</p> 
+<pre><code class="language-java">    /**
+     * 调用loadUserByUsername获得UserDetail信息，在AbstractUserDetailsAuthenticationProvider里执行用户状态检查
+     *
+     * @return
+     */
+    @Bean
+    public AuthenticationProvider authenticationProvider() {
+        DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
+        // DaoAuthenticationProvider 从自定义的 userDetailsService.loadUserByUsername 方法获取UserDetails
+        authProvider.setUserDetailsService(userDetailsService());
+        // 设置密码编辑器
+        authProvider.setPasswordEncoder(passwordEncoder());
+        return authProvider;
+    }</code></pre> 
+<h3>3.1.5. 注册授权检查管理Bean </h3> 
+<pre><code class="language-java">    /**
+     * 登录时需要调用AuthenticationManager.authenticate执行一次校验
+     *
+     * @param config
+     * @return
+     * @throws Exception
+     */
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }</code></pre> 
+<h3>3.1.6. 注册每次请求的jwt检查拦截器</h3> 
+<p>在拦截器中检查jwt是否能够通过签名验证，是否还在有效期内。如果通过验证，使用jwt中的信息生成一个不含密码信息的SecurityUserDetails对象，并设置到SecurityContext中，确保后续的过滤器检查能够知晓本次请求是被授权过的。具体代码逻辑看3.2. jwt请求过滤器。</p> 
+<pre><code class="language-java">    @Bean
+    public JwtTokenOncePerRequestFilter authenticationJwtTokenFilter() {
+        return new JwtTokenOncePerRequestFilter();
+    }</code></pre> 
+<h3>3.1.7.  SecurityConfig 对象完整内容</h3> 
+<pre><code class="language-java">@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Autowired
+    private UserDetailsService userDetailsService;
+
+    @Autowired
+    private InvalidAuthenticationEntryPoint invalidAuthenticationEntryPoint;
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public JwtTokenOncePerRequestFilter authenticationJwtTokenFilter() {
+        return new JwtTokenOncePerRequestFilter();
+    }
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+                // 禁用basic明文验证
+                .httpBasic().disable()
+                // 前后端分离架构不需要csrf保护
+                .csrf().disable()
+                // 禁用默认登录页
+                .formLogin().disable()
+                // 禁用默认登出页
+                .logout().disable()
+                // 设置异常的EntryPoint，如果不设置，默认使用Http403ForbiddenEntryPoint
+                .exceptionHandling(exceptions -&gt; exceptions.authenticationEntryPoint(invalidAuthenticationEntryPoint))
+                // 前后端分离是无状态的，不需要session了，直接禁用。
+                .sessionManagement(session -&gt; session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .authorizeHttpRequests(authorizeHttpRequests -&gt; authorizeHttpRequests
+                        // 允许所有OPTIONS请求
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                        // 允许直接访问授权登录接口
+                        .requestMatchers(HttpMethod.POST, "/web/authenticate").permitAll()
+                        // 允许 SpringMVC 的默认错误地址匿名访问
+                        .requestMatchers("/error").permitAll()
+                        // 其他所有接口必须有Authority信息，Authority在登录成功后的UserDetailsImpl对象中默认设置“ROLE_USER”
+                        //.requestMatchers("/**").hasAnyAuthority("ROLE_USER")
+                        // 允许任意请求被已登录用户访问，不检查Authority
+                        .anyRequest().authenticated())
+                .authenticationProvider(authenticationProvider())
+                // 加我们自定义的过滤器，替代UsernamePasswordAuthenticationFilter
+                .addFilterBefore(authenticationJwtTokenFilter(), UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public UserDetailsService userDetailsService() {
+        // 调用 JwtUserDetailService实例执行实际校验
+        return username -&gt; userDetailsService.loadUserByUsername(username);
+    }
+
+    /**
+     * 调用loadUserByUsername获得UserDetail信息，在AbstractUserDetailsAuthenticationProvider里执行用户状态检查
+     *
+     * @return
+     */
+    @Bean
+    public AuthenticationProvider authenticationProvider() {
+        DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
+        // DaoAuthenticationProvider 从自定义的 userDetailsService.loadUserByUsername 方法获取UserDetails
+        authProvider.setUserDetailsService(userDetailsService());
+        // 设置密码编辑器
+        authProvider.setPasswordEncoder(passwordEncoder());
+        return authProvider;
+    }
+
+    /**
+     * 登录时需要调用AuthenticationManager.authenticate执行一次校验
+     *
+     * @param config
+     * @return
+     * @throws Exception
+     */
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+}</code></pre> 
+<h2>3.2. JWT请求过滤检查</h2> 
+<pre><code class="language-java">/**
+ * 每次请求的 Security 过滤类。执行jwt有效性检查，如果失败，不会设置 SecurityContextHolder 信息，会进入 AuthenticationEntryPoint
+ */
+public class JwtTokenOncePerRequestFilter extends OncePerRequestFilter {
+
+    @Autowired
+    private JwtTokenProvider jwtTokenProvider;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws ServletException, IOException {
+        try {
+            String token = jwtTokenProvider.resolveToken(request);
+            if (token != null &amp;&amp; jwtTokenProvider.validateToken(token)) {
+                Authentication auth = jwtTokenProvider.getAuthentication(token);
+                
+                if (auth != null) {
+                    SecurityContextHolder.getContext().setAuthentication(auth);
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Cannot set user authentication!", e);
+        }
+
+        filterChain.doFilter(request, response);
+    }
+
+}</code></pre> 
+<h2>3.3. 登录校验</h2> 
+<p> 考虑到jwt签名验签的可靠性，以及jwt的有效载荷并未被加密，所以jwt中放置了UserDetails接口除密码字段外其他所有字段以及项目所需的业务字段。两个目的，1. 浏览器端可以解码jwt的有效载荷部分的内容用于业务处理，由于不涉及到敏感信息，不担心泄密；2.服务端可以通过jwt的信息重新生成UserDetails对象，并设置到SecurityContext中，用于请求拦截的授权校验。</p> 
+<p>代码如下：</p> 
+<pre><code class="language-java">@RestController
+@RequestMapping("/web")
+public class AuthController {
+
+    @PostMapping(value="/authenticate")
+    public ResponseEntity&lt;?&gt; authenticate(@RequestBody Map&lt;String, String&gt; param) {
+        logger.debug("登录请求参数：{}", param);
+
+        try {
+            String username = param.get("username");
+            String password = param.get("password");
+            String reqType = param.get("type");
+
+            // 传递用户密码给到SpringSecurity执行校验，如果校验失败，会进入BadCredentialsException
+            Authentication authentication = authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(username, password));
+            // 验证通过，设置授权信息至SecurityContextHolder
+            SecurityContextHolder.getContext().setAuthentication(authentication);
+
+            // 如果验证通过了，从返回的authentication里获得完整的UserDetails信息
+            SecurityUserDetails userDetails = (SecurityUserDetails) authentication.getPrincipal();
+
+            // 将用户的ID、名称等信息保存在jwt的token中
+            String token = jwtTokenProvider.createToken(userDetails.getUsername(), userDetails.getCustname(), new ArrayList&lt;&gt;());
+
+            // 设置cookie，本项目中非必需，因以要求必须传head的Authorization: Bearer 参数
+            ResponseCookie jwtCookie = jwtTokenProvider.generateJwtCookie(token);
+            Map&lt;String, Object&gt; model = new HashMap&lt;&gt;();
+            model.put("username", username);
+            model.put("token", token);
+            return ok().body(RespBody.build().ok("登录成功", model));
+        } catch (BadCredentialsException e) {
+            return ok(RespBody.build().fail("账号或密码错误！"));
+        }
+    }
+}</code></pre> 
+<h1>4. 总结 </h1> 
+<p>经过以上步骤，对SpringSecurity6结合jwt机制进行校验的过程就全部完成了，jwt的工具类可以按照项目自己的情况进行编码。近期会修改我位于github的示例工程，提供完整的SpringBoot3+SpringSecurity6+jwt的示例工程。目前有一个SpringBoot2的<a class="link-info" href="https://github.com/markvivv/springboot-security-jwt-example/tree/springboot2-security-jwt" title="老版本">老版本</a>在这里。jwt的工具类也可以参考<a class="link-info" href="https://github.com/markvivv/springboot-security-jwt-example/blob/springboot2-security-jwt/src/main/java/examples/spring/project/security/jwt/JwtTokenProvider.java" title="老版本">老版本</a>的这个。</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

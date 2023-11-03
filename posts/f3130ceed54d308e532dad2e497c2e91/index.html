@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Flask&#43;Celery&#43;Redis实现队列化异步任务 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Flask&#43;Celery&#43;Redis实现队列化异步任务</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h2>概述：</h2> 
+<p>        我们考虑一个场景，公司有一个需求，现在需要做一套web系统，而这套系统某些功能需要使用一些开源工具的sdk和api，或是<span style="color:#4da8ee">运行一些耗时比较大</span>的任务（单个大任务下可能有多个小任务），需要<span style="color:#4da8ee">一段时间才能提供执行结果</span>，而前端同事<span style="color:#4da8ee">要求不能让用户在页面等待</span>，需要<span style="color:#4da8ee">马上提供一个返回结果</span>给他，任务执行完后可以拿到最终结果，并且用户退出web界面或浏览器异常关闭之后，再次返回界面，执行的<span style="color:#4da8ee">过程不会中断</span>，并且支持<span style="color:#4da8ee">多用户同时执行不同操作</span><span style="color:#0d0016">的需要</span>。</p> 
+<p>        很明显，这是一个-<span style="color:#a2e043"><strong>异步多线程-</strong></span>的场景，在Python中可以想到的有：</p> 
+<p>        1.引入<strong>Asyncio</strong>模块，利用多协程实现。</p> 
+<p>        2.使用<strong>Threading</strong>模块，自己编写线程任务，线程等待，睡眠，释放线程的过程。</p> 
+<p>        3.使用异步框架，例如<strong>Cerely、Tornado、Twisted</strong>等等，装饰异步任务。</p> 
+<p>        这里边最便捷且开发效率最高的应该是使用异步框架，咱们选择使用<strong>Celery</strong>来实现这个需求。</p> 
+<h2>Celery介绍：</h2> 
+<p>        截图与描述来自celery官网：<a href="https://docs.celeryproject.org/en/stable/index.html" title="Celery - Distributed Task Queue — Celery 5.2.0 documentation">Celery - Distributed Task Queue — Celery 5.2.0 documentation</a></p> 
+<p><span style="color:#3e4349"><span style="background-color:#ffffff">        Celery 是一个简单、灵活且可靠的分布式系统，用于处理大量消息，同时为操作提供维护此类系统所需的工具。</span></span></p> 
+<p><span style="color:#3e4349"><span style="background-color:#ffffff">        它是一个专注于实时处理的任务队列，同时也支持任务调度。</span></span></p> 
+<p><span style="color:#3e4349"><span style="background-color:#ffffff">        Celery 拥有庞大而多样化的用户和贡献者社区，您应该加入我们<a class="reference internal" href="https://docs.celeryproject.org/en/stable/getting-started/resources.html#irc-channel" title="的 IRC">的 IRC</a> 或<a class="reference internal" href="https://docs.celeryproject.org/en/stable/getting-started/resources.html#mailing-list" title="我们的邮件列表">我们的邮件列表</a>。</span></span></p> 
+<p><span style="color:#3e4349"><span style="background-color:#ffffff">        Celery 是开源的，并在<a class="reference external" href="http://www.opensource.org/licenses/BSD-3-Clause" title="BSD 许可">BSD 许可</a>下获得<a class="reference external" href="http://www.opensource.org/licenses/BSD-3-Clause" title="许可">许可</a>。</span></span></p> 
+<p><img alt="" height="464" src="https://images2.imgbox.com/a3/74/uU0Fg55G_o.png" width="1200"></p> 
+<h2>消费者与消费结果：</h2> 
+<p>        我们除了需要Celery做异步任务的处理，还需要一个中间件来充当消费者，并保存最终的任务处理结果（消费结果），这里有很多中间件可以选，例如常用的消息中间件，rabbitmq，kafka等，还可以使用mysql，redis等作为消费者并保存消费结果（因为最终的处理结果要返回给前端同事），楼主最终选择了redis。</p> 
+<h2>Redis安装与配置：</h2> 
+<p>        这里不再赘述windows下安装redis步骤，只介绍linux下安装redis与配置，我的机器是centos7.6：</p> 
+<p>        yum方式安装（注意：这样安装的redis不是最新版本的，如有对版本要求比较高的，建议去官网下载源码包去手动安装，官网地址：<a href="http://www.redis.io/" title="Redis">Redis</a>，最新版本：6.2.6）</p> 
+<pre><code>yum -y install redis</code></pre> 
+<p>        安装完成之后配置redis.conf文件：</p> 
+<pre><code>vi /etc/redis.conf</code></pre> 
+<p>        修改这一行，改成 0.0.0.0，这样别的应用和组件才可以访问到redis的服务与端口:</p> 
+<p><img alt="" height="573" src="https://images2.imgbox.com/4d/c8/18dfkfXE_o.png" width="909"></p> 
+<p>        同理，redis的默认端口也可以在此配置里修改：</p> 
+<p><img alt="" height="578" src="https://images2.imgbox.com/f6/a4/TjQAvmJs_o.png" width="909"></p> 
+<p>        还有一些关闭匿名访问，设置密码等配置的修改，项目若要上到公网环境下，建议配置。</p> 
+<p></p> 
+<p>        启动并测试redis服务功能是否正常：</p> 
+<p>        启动redis:        </p> 
+<pre><code>redis-cli -h 0.0.0.0</code></pre> 
+<p>        测试redis:</p> 
+<pre><code>1 redis&gt; set name "zzz"
+2 
+3 OK
+4 
+5 redis&gt; get name
+6 
+7 "zzz"</code></pre> 
+<p><span style="color:#fe2c24">        记住，代码并没有实际引用redis，但也需要安装redis模块，否则会报错。（redis模块版本不要太高，高了也会报错，这些坑都是楼主亲自趟过的，我这里使用2.10.6）</span></p> 
+<pre><code>pip install redis==2.10.6</code></pre> 
+<h2> Celery的安装和配置：</h2> 
+<p>        windos和linux下都可以使用pip安装：</p> 
+<pre><code class="language-bash"> pip install celery==3.1.25</code></pre> 
+<p>        我的项目目录：（celeryconfig.py与__init__.py文件为celery与redis配置文件）：</p> 
+<p>          <img alt="" height="495" src="https://images2.imgbox.com/e8/01/gVxwIIM8_o.png" width="223"></p> 
+<p>        在项目中先创建一个名为config的python目录，并在__init__.py中导入celery模块并配置：</p> 
+<p><strong>__init__.py:</strong></p> 
+<pre><code class="language-python">from celery import Celery,platforms
+platforms.C_FORCE_ROOT = True
+
+app = Celery('prod')  # 创建 Celery 实例
+app.config_from_object('kernel.config.celeryconfig')  # 通过 Celery 实例加载配置模块</code></pre> 
+<p><span style="color:#fe2c24">        platforms.C_FORCE_ROOT = True</span> <span style="color:#fe2c24">这个配置一定要有，否则会报权限问题</span>。</p> 
+<p>        在config目录下的celeryconfig.py中配置任务队列消费者与消费结果保存在redis的地址：</p> 
+<p><strong>celeryconfig.py:</strong></p> 
+<pre><code class="language-python">## celery配置
+
+BROKER_URL = 'redis://redis-host:6379/1'  # 指定 Broker消费者，我们使用redis 1号数据库
+CELERY_RESULT_BACKEND = 'redis://redis-host:6379/2'  # 指定 Backend，最终消费结果，我们使用redis 2号数据库
+
+
+
+CELERY_TIMEZONE = 'Asia/Shanghai'  # 指定时区，默认是 UTC
+
+CELERY_IMPORTS = (  # 指定导入的任务模块
+    'kernel.views.api'   ## 异步任务代码文件路径即可
+)</code></pre> 
+<p>        至此，前期需要的工具准备工作全部完毕，我们开始我们的开发任务。</p> 
+<h2>异步任务开发：</h2> 
+<p>        楼主因为主要负责后端这块，这里选择使用flask来写，整体的项目模块与版本，大概罗列下：</p> 
+<p>                        Python 3.5.4<br>                         Mysql  5.5.64        <br>                         Celery==3.1.25<br>                         Flask==1.1.4<br>                         Redis==2.10.6</p> 
+<p>       <strong> 这时我们与前端同事再次详细沟通了下，初步约定如下：</strong></p> 
+<p>        1.前端通过form表单传数据给后端，格式为json，<span style="color:#fe2c24">分析：需要解析json数据。</span></p> 
+<p>        2.因为存在长耗时的任务，要求一旦前端请求过来，后端要马上返回一个中间结果给前端（这样解决了前端页面等待的问题），<span style="color:#fe2c24">分析：需要马上提供一个返回结果。</span></p> 
+<p>        3.前端最终要拿到任务的最终执行结果，<span style="color:#fe2c24">分析：我们需要把长耗时异步任务的最终结果推送给前端，需要任务代码最后推送执行结果。（自己先定义回调接口去测试）</span></p> 
+<p></p> 
+<h3>1.后端Flask接口代码：</h3> 
+<h3><strong>文件名称与路径：</strong></h3> 
+<p><span style="color:#fe2c24">        项目名称-kernel-view-api.py，与celery配置下的任务模块对应。</span></p> 
+<p><img alt="" height="694" src="https://images2.imgbox.com/3f/56/xdWENjwI_o.png" width="269"></p> 
+<p><strong> api.py:</strong></p> 
+<pre><code class="language-python"># -*- coding: utf-8 -*-
+import json, sys
+import logging
+import requests
+import datetime,pymysql
+import os,subprocess
+from flask import render_template, Blueprint, request, g, abort, url_for, jsonify, session, redirect,Response
+from kernel.models.playbook import PlayBook_file
+from kernel.utils import render_response, Retval
+from kernel.models import db
+from sqlalchemy import or_,text
+import gitlab  ## 导入gitlab模块
+from kernel.config import app, cmdb_config,hcacp_config
+import pymysql,uuid,hashlib,time
+from datetime import timezone
+
+
+
+bp = Blueprint('test', __name__)  ## 蓝图自己定义，这里只是实例化
+log = logging.getLogger(__name__)    ## 日志自己定义，这里只是实例化
+
+class status:  ## 定义一些状态码
+    success = 0
+    warning = 1
+    pending = 2
+    faild = -1
+
+
+## 回调接口
+@bp.route('/test/callback/', methods=['GET', 'POST'])
+def ansible_aaa():
+    data1 = request.get_data(as_text=True)
+    # data2 = json.loads(data1)
+    log.info(data1)
+    return data1
+
+@bp.route('/test/add/', methods=['POST', 'GET'])
+def devops_add():
+    '''
+        获取form表单json数据
+    '''
+    # return True
+    try:
+        data = request.get_data()
+        _data = json.loads((str(data, 'utf-8')))
+        print(_data)
+    except Exception as requestdata_except:
+        log.error('获取表单数据异常，异常原因：%s' % requestdata_except)
+        return render_response(status.faild, u"获取表单数据异常，异常原因：%s" % requestdata_except, {})
+        ## 获取标识tag的结果
+    try:
+        '''
+        工单json数据要带工单标识符select_tag:
+        create_project:新建项目申请工单
+        '''
+        select_tag = _data.get('select_tag')
+    except Exception as request_select_tag_except:
+        log.error('获取表单需求标识select_tag异常，异常原因：%s' % request_select_tag_except)
+        return render_response(status.faild, u"获取表单需求标识select_tag异常，异常原因：%s" % request_select_tag_except, {})
+    try:
+        """ 
+            !--当参数select_tag == create_project 时,建立项目--! 
+
+        """
+        if select_tag == 'create_project':
+            projname = _data.get('projname')
+            add_project_result = add_project.delay(cmdb_config, _data)
+            return render_response(status.pending, u"devops系统添加项目工单任务执行中--pending--", {'项目中文名称': projname})
+    except Exception as do_celery_job_except:
+        log.error('执行异步celery任务异常，异常原因：%s' % do_celery_job_except)
+        return render_response(status.faild, u"执行异步celery任务异常，异常原因：%s" % do_celery_job_except, {})
+
+</code></pre> 
+<p><strong>这里代表前端请求过来之后，马上返回一个执行结果，满足需求2：</strong></p> 
+<p><img alt="" height="179" src="https://images2.imgbox.com/6a/d0/Y9BwwXLB_o.png" width="1064"></p> 
+<p><strong>在devops_add接口里执行异步任务</strong>：        </p> 
+<p>        <span style="background-color:#38d8f0">add_project_result = add_project.delay(cmdb_config, _data)</span></p> 
+<p><strong><span style="color:#ffd900">官网的示例：</span></strong></p> 
+<p><strong><img alt="" height="238" src="https://images2.imgbox.com/e9/08/rmrZUr1k_o.png" width="695"></strong></p> 
+<p>        ## 1.扩号里为异步任务所需的参数</p> 
+<p>        ## 2.add_project_result 是异步任务执行的对象，包含很多属性方法，下边介绍一些常用的：</p> 
+<p><strong>        获取任务结果和状态:</strong><br>         add_project_result = task.apply_async()<br>         add_project_result.ready()     # 查看任务状态，返回布尔值,  任务执行完成, 返回 True, 否则返回 False.<br>         add_project_result.wait()      # 会阻塞等待任务完成, 返回任务执行结果，很少使用；<br>         add_project_result.get(timeout=1)       # 获取任务执行结果，可以设置等待时间，如果超时但任务未完成返回None；<br>         add_project_result.result      # 任务执行结果，未完成返回None；<br>         add_project_result.state       # PENDING, START, SUCCESS，任务当前的状态<br>         add_project_result.status      # PENDING, START, SUCCESS，任务当前的状态<br>         add_project_result.successful  # 任务成功返回true<br>         add_project_result.traceback  # 如果任务抛出了一个异常，可以获取原始的回溯信息</p> 
+<p>     </p> 
+<h3>2.异步任务代码：</h3> 
+<h3><strong>文件名称与路径：</strong></h3> 
+<p><span style="color:#fe2c24">        项目名称-kernel-view-api.py</span></p> 
+<p><strong><span style="color:#0d0016">api.py</span></strong></p> 
+<p><strong><span style="color:#0d0016">解释：</span></strong></p> 
+<p><span style="color:#fe2c24">        因为要满足需求3，把最终异步耗时任务的真正结果给到前端，所以我们需要在异步任务里写一个回调的操作。</span></p> 
+<p>         header = {'Content-Type': 'application/json'}  ## 构造请求头和数据类型<br>         _json = {"status": sttaus.faild, "msg": u"失败", "data": {}}  ## <span style="color:#4da8ee">失败就返回给前端json类型失败</span></p> 
+<p>        _json = {"status": sttaus.success, "msg": u"成功", "data": {}}  ## <span style="color:#4da8ee">成功就返回给前端json类型成功</span></p> 
+<p>        requests.post(callback_url, headers=header, data=json.dumps(_json)) ## <span style="color:#4da8ee">带参回调请求</span></p> 
+<pre><code class="language-python"># -*- coding: utf-8 -*-
+import json, sys
+import logging
+import requests
+import datetime,pymysql
+import os,subprocess
+from flask import render_template, Blueprint, request, g, abort, url_for, jsonify, session, redirect,Response
+from kernel.utils import render_response, Retval
+from datetime import timezone
+from kernel.config import *  ## 导入config目录下的celery配置
+
+
+bp = Blueprint('test', __name__)  ## 蓝图自己定义，这里只是实例化
+log = logging.getLogger(__name__)    ## 日志自己定义，这里只是实例化
+
+class status:  ## 定义一些状态码
+    success = 0
+    warning = 1
+    pending = 2
+    faild = -1
+
+
+
+## 示例函数：一个添加信息函数，前端给我们json数据，后端接受之后去插入数据库，完成操作并告诉前端
+@app.task  ## celery添加项目任务
+def add_project(mysql_config, _data):
+    try:
+        ## 系统添加项目信息工单
+        projname = _data.get('projname')  ## 项目名称，必填
+        prodesc= _data.get('prodesc')  ## 项目描述，必填
+        projctime = datetime.datetime.now()  ## 项目发布时间
+        callback_url = _data.get('callback_url')  ## 回调接口地址
+    except Exception as describe_form_except:
+        log.error('解析表单数据出现异常，异常原因：%s' % describe_form_except)
+        header = {'Content-Type': 'application/json'}  ## 回调接口请求头
+        _json = {"status": status.faild, "msg": u"失败", "data": {}}
+        requests.post(callback_url, headers=header, data=json.dumps(_json))
+    try:
+        # 获取数据库连接
+        conn = pymysql.connect(cmdb_config.server, cmdb_config.user, cmdb_config.password, database=cmdb_config.db)
+        # 返回连接
+        cursor = conn.cursor()
+    except Exception as connect_except:
+        log.error('系统数据库连接出现异常，异常原因：%s' % connect_except)
+        _json = {"status": status.faild, "msg": u"失败", "data": {}}
+        requests.post(callback_url, headers=header, data=json.dumps(_json))
+    try:
+        proj_sql = "insert into project_tb_project (projname,prodesc,projctime) VALUES ('{}','{}','{}');".format(projname, prodesc, projctime)
+        cursor.execute(proj_sql)
+        conn.commit()
+        _json = {"status": status.success, "msg": u"成功", "data": {}}
+        requests.post(callback_url, headers=header, data=json.dumps(_json))
+        ## 任务执行完成之后调用回调接口，返回任务执行成功结果
+        log.info('系统建项目工单执行成功,%s' % proj_sql)
+    except Exception as do_add_project_except:
+        _json = {"status": status.faild, "msg": u"失败", "data": {}}
+        requests.post(callback_url, headers=header, data=json.dumps(_json))
+        log.error('执行添加项目工单异常，异常原因：%s' % do_add_project_except)
+        ## 任务执行完成之后调用回调接口，返回任务执行失败结果</code></pre> 
+<p>        楼主用的最简单，没有在task里写一些属性，类似下边的这种方式还可以给task添加一些属性：</p> 
+<pre>        @app.task(name='test',bind=True,base=BaseTask)</pre> 
+<p><strong>       补充介绍下异步task有的一些属性：</strong></p> 
+<p><strong>        TASK的一般属性:</strong><br>         Task.name:任务名称；<br>         Task.request：当前任务的信息；<br>         Task.max_retries：设置重试的最大次数<br>         Task.throws：预期错误类的可选元组，不应被视为实际错误，而是结果失败；<br>         Task.rate_limit：设置此任务类型的速率限制<br>         Task.time_limit：此任务的硬限时（以秒为单位）。<br>         Task.ignore_result：不存储任务状态。默认False；<br>         Task.store_errors_even_if_ignored：如果True，即使任务配置为忽略结果，也会存储错误。<br>         Task.serializer：标识要使用的默认序列化方法的字符串。<br>         Task.compression：标识要使用的默认压缩方案的字符串。默认为task_compression设置。<br>         Task.backend：指定该任务的结果存储后端用于此任务。<br>         Task.acks_late：如果设置True为此任务的消息将在任务执行后确认 ，而不是在执行任务之前（默认行为），即默认任务执行之前就会发送确认；<br>         Task.track_started：如果True任务在工作人员执行任务时将其状态报告为“已启动”。默认是False；</p> 
+<p></p> 
+<p></p> 
+<p><strong><span style="color:#0d0016"><span style="background-color:#4da8ee">我们启动celery来看下celery里在执行任务的过程中有什么变化</span></span><span style="color:#fe2c24"><span style="background-color:#4da8ee">：</span></span></strong></p> 
+<p><strong>（1）启动项目：</strong></p> 
+<p><strong>楼主用的是gunicorn工具启动，配置多线程：</strong></p> 
+<p><strong>gunicorn.conf</strong></p> 
+<p>        workers = 16   ## 多线程配置</p> 
+<p>        bind = '0.0.0.0:7777'</p> 
+<p>        proc_name = 'websocket（项目名称）'</p> 
+<p>        limit_request_field_size = 0</p> 
+<p>        limit_request_line = 0</p> 
+<p>        log_level = 'error'</p> 
+<p>        debug = True</p> 
+<p>        chdir = '/data/websocket' ## 项目目录</p> 
+<p>        启动命令：gunicorn -c  /项目目录/gunicorn.conf kernel:app</p> 
+<p><strong>（2）启动celery：</strong></p> 
+<p>        cd 到项目目录下，执行 celery -A kernel.views.api worker -l info  </p> 
+<p><strong>（3）使用postman调用接口：</strong></p> 
+<p>        可以看到直接先返回我们状态码2-等待状态：</p> 
+<p><img alt="" height="930" src="https://images2.imgbox.com/df/f9/cS45ST0p_o.png" width="1200"></p> 
+<p><strong>（4）从日志看异步任务执行过程：</strong></p> 
+<p>        1.会先在celery里出现一个异步任务，并生成一个异步任务的task-id号：</p> 
+<p><img alt="" height="74" src="https://images2.imgbox.com/a7/14/ZunWvbK7_o.png" width="1200"></p> 
+<p>        2.redis去查看是否已有task任务，task-id号是一致的：</p> 
+<p>        用add_project_result保存异步任务执行结果的对象，最终的结果是在redis中，我们也可以去redis里去拿，redis保存的结果。</p> 
+<p>        我们用的redis 2号数据库，select 2 号数据库，keys * 查看redis是否已有任务</p> 
+<p><img alt="" height="125" src="https://images2.imgbox.com/e4/37/kbtSKHOX_o.png" width="650"></p> 
+<p>        任务最终的执行结果（<span style="color:#fe2c24">celery日志里也可以看到，在redis里也可以看到，celery日志看的更直观，succeded代表异步任务执行成功</span>）：</p> 
+<p><img alt="" height="74" src="https://images2.imgbox.com/a7/14/ZunWvbK7_o.png" width="1200"></p> 
+<p></p> 
+<p>        3. 查看项目日志，状态码为1，是回调接口打印出来的，代表返回给回调接口最终结果是成功。<img alt="" height="91" src="https://images2.imgbox.com/a4/dd/hCVZrtIb_o.png" width="1099"></p> 
+<p>        4.最终去数据库看下新添加记录是否已有，这里就不截图了，记录插入成功，异步任务执行成功，也满足了开始我们沟通的三个需求。</p> 
+<p>        5.前端同学给你竖起了大拇指，直呼你牛！</p> 
+<p>          <img alt="" height="144" src="https://images2.imgbox.com/6a/51/EiJBUjYI_o.jpg" width="200"></p> 
+<p> </p> 
+<h2>备注：</h2> 
+<p>                ​​​​​​​        ​​​​​​​        ​​​​​​​        ​​​​​​​        ​​​​​​​        ​​​​​​​<img alt="" height="240" src="https://images2.imgbox.com/03/d1/ArVPZizi_o.png" width="240"></p> 
+<p> </p> 
+<p> </p> 
+<p>        celery还可以用来做定时任务，感兴趣的伙伴们可以去官网或者其他途径去研究下，楼主第一次写这么大的博客，有些地方我描述不清楚的或者您没太看懂的可以私信我答疑解惑，我的微信zcw576020095,热爱python，热爱运维，一起加油！</p> 
+<p>        </p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>U-NET模型——pytorch实现 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">U-NET模型——pytorch实现</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p>论文传送门：<a href="https://arxiv.org/pdf/1505.04597.pdf" title="https://arxiv.org/pdf/1505.04597.pdf">https://arxiv.org/pdf/1505.04597.pdf</a></p> 
+<p><strong>U-NET</strong>是<strong>分割</strong>任务中的典型网络。</p> 
+<p><strong>U-NET模型结构：</strong></p> 
+<p class="img-center"><img alt="" height="663" src="https://images2.imgbox.com/17/17/FU2YxEqM_o.png" width="810"></p> 
+<p>模型整体呈<strong>“U”</strong>形，主要分为三个部分：</p> 
+<p>①<strong>左侧contraction</strong>，提取特征，整体结构类似VGG（没有BN层）；</p> 
+<p>②<strong>右侧expansion</strong>，将特征层上采样至原图片大小，最后通过1x1卷积，输出segmentation map；</p> 
+<p>③<strong>中间的copy and crop操作</strong>，多尺度特征图融合。</p> 
+<p><strong>Overlap-tile策略：</strong></p> 
+<p class="img-center"><img alt="" height="430" src="https://images2.imgbox.com/9b/13/3fFF9W4Q_o.png" width="809"></p> 
+<p>U-NET使用Overlap-tile策略，即在图片输入模型前进行<strong>镜像padding</strong>，使得模型对于图片边缘的预测也有较高的准确率。输入图片(1x388x388)采用镜像padding后，得到input image tile(1x572x572)，模型中所有的卷积操作均不进行padding处理，卷积后特征层尺寸减小，所以模型输出output segmentation map(2x388x388)与输入原图片尺寸相同，且多尺度特征融合时需要进行crop操作。</p> 
+<p></p> 
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class UNET(nn.Module):  # 定义UNET模型结构
+    def __init__(self, img_shape=(1, 388, 388)):  # 初始化方法
+        super(UNET, self).__init__()  # 继承初始化方法
+        self.img_shape = img_shape  # 输入图片形状，默认为(1,388,388)
+
+        self.reflectionpad = nn.ReflectionPad2d(92)  # 对输入图片进行镜像padding，对应原文的Overlap-tile策略,经计算，padding长度为92，此值与输入图片尺寸无关
+        self.contraction1 = self.contraction(self.img_shape[0], 64,
+                                             maxpool=False)  # contraction结构块，(maxpool)+conv+relu+conv+relu，第一个结构块不含maxpool
+        self.contraction2 = self.contraction(64, 128)  # contraction结构块
+        self.contraction3 = self.contraction(128, 256)  # contraction结构块
+        self.contraction4 = self.contraction(256, 512)  # contraction结构块
+        self.contraction5 = self.contraction(512, 1024)  # contraction结构块
+
+        self.deconv1 = nn.ConvTranspose2d(1024, 512, 2, 2, 0)  # transconv，实现upconv，上采样
+        self.expansion1 = self.expansion(1024, 512)  # expansion结构块，conv+relu+conv+relu+(transconv)，第一个结构块前单独进行一次upconv
+        self.expansion2 = self.expansion(512, 256)  # expansion结构块
+        self.expansion3 = self.expansion(256, 128)  # expansion结构块
+        self.expansion4 = self.expansion(128, 64, upconv=False)  # expansion块，最后一个结构块不含upconv
+        self.conv1 = nn.Conv2d(64, 2, 1, 1, 0)  # 1x1卷积，输出segmentation map
+
+    def contraction(self, in_channel, out_channel, maxpool=True):  # 定义contraction结构块，对应模型左侧
+        layers = []  # 列表，用于存放模型结构
+        if maxpool:  # 如果进行maxpool
+            layers += [nn.MaxPool2d(2, 2)]  # 添加maxpool
+        layers += [nn.Conv2d(in_channel, out_channel, 3, 1, 0),  # 添加conv
+                   nn.ReLU(),  # 添加relu
+                   nn.Conv2d(out_channel, out_channel, 3, 1, 0),  # 添加conv
+                   nn.ReLU()]  # 添加relu
+        return nn.Sequential(*layers)  # 返回contraction结构块，(maxpool)+conv+relu+conv+relu，方便进行copy and crop操作
+
+    def expansion(self, in_channel, out_channel, upconv=True):  # 定义expansion结构块，对应模型右侧
+        layers = []  # 列表，用于存放模型结构
+        layers += [nn.Conv2d(in_channel, out_channel, 3, 1, 0),  # 添加conv
+                   nn.ReLU(),  # 添加relu
+                   nn.Conv2d(out_channel, out_channel, 3, 1, 0),  # 添加conv
+                   nn.ReLU()]  # 添加relu
+        if upconv:  # 如果进行upconv
+            layers += [nn.ConvTranspose2d(out_channel, out_channel // 2, 2, 2, 0)]  # 添加transconv
+        return nn.Sequential(*layers)  # 返回expansion结构块，conv+relu+conv+relu+(transconv)，方便进行copy and crop操作
+
+    def crop(self, x, target_x):
+        '''
+        crop操作，将左侧特征层(n,c,h,w)裁剪至右侧特征层(n,c,h',w')
+        :param x: 输入特征
+        :param target_x:目标特征
+        :return: 经过裁剪后，与目标特征尺寸相同的输入特征
+        '''
+        pad_h = -(x.shape[2] - target_x.shape[2]) // 2  # H维度上裁剪尺寸，为负值
+        pad_w = -(x.shape[3] - target_x.shape[3]) // 2  # W维度上裁剪尺寸，为负值
+        return F.pad(x, (pad_h, pad_h, pad_w, pad_w))  # 使用pad操作，输入pad为负值，即实现裁剪操作
+
+    def forward(self, x):  # 前传函数
+        x = self.reflectionpad(x)  # 镜像padding,(n,1,388,388)--&gt;(n,1,572,572)
+        x1 = self.contraction1(x)  # contraction,(n,1,572,572)--&gt;(n,64,570,570)--&gt;(n,64,568,568)
+        x2 = self.contraction2(x1)  # contraction,(n,64,568,568)--&gt;(n,128,284,284)--&gt;(n,128,282,282)--&gt;(n,128,280,280)
+        x3 = self.contraction3(x2)  # contraction,(n,128,280,280)--&gt;(n,256,140,140)--&gt;(n,256,138,138)--&gt;(n,256,136,136)
+        x4 = self.contraction4(x3)  # contraction,(n,256,136,136)--&gt;(n,512,68,68)--&gt;(n,512,66,66)--&gt;(n,512,64,64)
+        x = self.contraction5(x4)  # contraction,(n,512,64,64)--&gt;(n,1024,32,32)--&gt;(n,1024,30,30)--&gt;(n,1024,28,28)
+        x = self.deconv1(x)  # upconv,(n,1024,28,28)--&gt;(n,512,56,56)
+
+        x4 = self.crop(x4, x)  # crop,(n,512,64,64)--&gt;(n,512,56,56)
+        x = torch.cat((x4, x), dim=1)  # cat,在C维度进行拼接,(n,512,56,56)+(n,512,56,56)--&gt;(n,1024,56,56)
+        x = self.expansion1(x)  # expasion,(n,1024,56,56)--&gt;(n,512,54,54)--&gt;(n,512,52,52)--&gt;(n,256,104,104)
+        x3 = self.crop(x3, x)  # crop,(n,256,128,128)--&gt;(n,256,104,104)
+        x = torch.cat((x3, x), dim=1)  # cat,在C维度进行拼接,(n,256,104,104)+(n,256,104,104)--&gt;(n,512,104,104)
+        x = self.expansion2(x)  # expasion,(n,512,104,104)--&gt;(n,256,102,102)--&gt;(n,256,100,100)--&gt;(n,128,200,200)
+        x2 = self.crop(x2, x)  # crop,(n,128,280,280)--&gt;(n,128,200,200)
+        x = torch.cat((x2, x), dim=1)  # cat,在C维度进行拼接,(n,128,200,200)+(n,128,200,200)--&gt;(n,256,200,200)
+        x = self.expansion3(x)  # expasion,(n,256,200,200)--&gt;(n,128,198,198)--&gt;(n,128,196,196)--&gt;(n,64,392,392)
+        x1 = self.crop(x1, x)  # crop,(n,64,568,568)--&gt;(n,64,392,392)
+        x = torch.cat((x1, x), dim=1)  # cat,在C维度进行拼接,(n,64,392,392)+(n,64,392,392)--&gt;(n,128,392,392)
+        x = self.expansion4(x)  # expasion,(n,128,392,392)--&gt;(n,64,390,390)--&gt;(n,64,338,338)
+        x = self.conv1(x)  # 1x1conv,(n,64,338,338)--&gt;(n,2,338,338)
+
+        return x  # 返回与输入图片尺寸相同的segmentation map</code></pre> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

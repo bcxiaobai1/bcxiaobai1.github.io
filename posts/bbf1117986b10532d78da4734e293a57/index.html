@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>长安链 VM Engine架构设计深度解读 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">长安链 VM Engine架构设计深度解读</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h3>VM Engine是长安链智能合约引擎的推荐选型，采用Docker容器化架构，容器内部由一个任务调度器和多个合约进程组成，实现了多合约隔离与多进程并发，支持独立部署，目前支持Golang语言合约。</h3> 
+<p></p> 
+<h1><strong>1. 背景说明</strong></h1> 
+<p>自2009年11月以来，Golang语言已经发展了13年，凭借着高并发、高性能、高开发效率迅速发展为热门语言，尤其在区块链领域，Golang语言已然成为底链必不可少的语言选型。在介绍总体架构前，我们需要解释两个具体的技术选型背景：</p> 
+<p>第一，长安链已经支持轻量级的TinyGo了，我们为什么还要选择原生Go语言？有如下两个原因：</p> 
+<p>1.  内存管理缺陷：TinyGo对wasm的支持不太完善，对内存逃逸分析、GC等方面有不足之处，容易造成栈溢出。因此对于循环、函数栈深度、内存申请等有较大的限制。</p> 
+<p>2.  导入包受限：TinyGo对导入包的支持有限（参考https://tinygo.org/lang-support/stdlib/），实际测试支持的并不完整，会发生一些错误，难以满足复杂的合约场景。</p> 
+<p>相信使用过TinyGo的开发者都有过上述经历。与公链有所不同，联盟链的合约更关注语言的丰富度与自由度，我们完全可以选择原生Go语言，从而使用更完备的类库，实现更稳定的区块链应用。</p> 
+<p>第二，我们为什么使用Docker容器化服务来支撑VM Engine项目呢？有如下三个原因：</p> 
+<p>(1) 可移植性：VM Engine启动Docker容器来运行合约虚拟机，调度和执行合约任务。用户能够在任意Linux机器上快速部署一套VM Engine虚拟机容器。</p> 
+<p>(2)  可扩展性：VM Engine与区块链属于不同的进程，通过gRPC进行通信，这牺牲了一部分性能，但是具有更高的扩展性。VM Engine能够进行独立部署，作为合约计算引擎服务提供给多个区块链。</p> 
+<p>(3)  安全性：如果要避免进程间/网络通信，需与区块链同进程，要用插件系统（Go Plugin），插件系统目前不成熟，无法主动释放，内存占用大。更重要的是，原生Golang代码自由度很高，用户合约行为难以限制。</p> 
+<p>基于上面两种技术选型我们依次推出了<strong>VM Docker Go</strong>和<strong>VM Engine</strong>核心引擎。</p> 
+<p>VM Engine是VM Docker Go的重构版本，相比原有版本，VM Engine具有50%的性能提升，支持任意合约语言的跨合约调用，更合理的进程资源限制，更稳定的合约执行环境。</p> 
+<p>在介绍VM Engine前，我们先介绍VM Docker Go的设计理念与架构。</p> 
+<h1><strong>2.  VM Docker Go的架构设计</strong></h1> 
+<p>VM Docker Go使用单容器多进程架构，与区块链通过双向流式gRPC的方式进行通信，具体模块交互架构方案如下：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/25/91/LT1tpe24_o.png"></p> 
+<p>图1</p> 
+<p>其中，各个模块的介绍如下：</p> 
+<p>1.  ChainMaker：长安链区块链项目主模块。</p> 
+<p>2.  VM Docker Go：基于Docker的容器化合约交易调度和执行引擎。</p> 
+<p>2.1  Contract Engine：合约交易调度引擎，负责转发请求/响应，调度请求与合约进程资源</p> 
+<p><em>i.  ChainMaker RPC：区块链RPC服务端，VM Docker Go与ChainMaker交互的唯一模块，交互内容主要包括交易请求、合约文件请求与响应、合约调用请求与响应和交易执行结果；</em></p> 
+<p><em>ii.  Docker Scheduler：容器调度器，负责解析并转发请求/响应；</em></p> 
+<p><em>iii.  Process Manager：进程管理器，负责管理请求/合约进程资源；</em></p> 
+<p><em>iv.  Process Balance：进程负载均衡器，负责管理同一合约同一版本的所有合约进程资源和交易；</em></p> 
+<p><em>v.  Process：进程控制器，负责管理一个合约进程的生命周期；</em></p> 
+<p><em>vi.  Process Handler：进程处理器，负责接收并调度合约进程的所有调用交互；</em></p> 
+<p><em>vii.  Sandbox RPC：合约进程RPC服务端，Contract Engine与Sandbox交互的唯一模块，交互内容主要包括交易请求、合约调用请求、合约调用响应和合约进程执行结果。</em></p> 
+<p>2.2  Sandbox：合约进程，合约二进制代码的运行实体，同一个合约可能有多个合约进程，从而实现交易并发。</p> 
+<p>通过上述架构设计，我们总结出【VM Docker Go的设计思想】如下：</p> 
+<p>(1)  合约隔离：每个合约任务用独立进程（Sandbox）来执行，采用CGroup限制进程资源的占用（暂未强制限制），避免合约恶意消耗、非法访问或写入系统资源。</p> 
+<p>(2)  任务独立：Sandbox中同时只存在一笔交易，这会牺牲较多性能，但能够避免Sandbox出现问题时多笔交易失败，读写集不一致。</p> 
+<p>(3)  单合约最大进程数并发：为了尽可能避免Sandbox进程关闭与启动，系统会尽量为每个任务创建新Sandbox进程，直到达到用户设定的单合约进程数最大阈值，一定时间空闲后释放进程。但这样也会引入进程数量无法控制的问题。</p> 
+<h1><strong>3.  VM Docker Go重构的原因</strong></h1> 
+<p>我们为什么要对VM Docker Go进行重构呢，我们的目标如下：</p> 
+<p><strong>1.  更高效：</strong>VM Docker Go原生Go语言的性能方面已经非常优异。但我们依然想要达到更高的性能，调整的方式如下：</p> 
+<p>(1) 避免多余的RPC通信，Sandbox与链进行常规交互时，可以不经过Contract Engine；</p> 
+<p>(2)  总进程数限制，让单个合约能够拥有更多的进程资源并发执行交易；</p> 
+<p>(3)  其他优化，包括gRPC调优、缓存、分段锁、并发控制等。</p> 
+<p><strong>2.  更稳定：</strong>VM Engine功能支持更加完备，极端情况下表现稳定：</p> 
+<p>(1)  VM Docker Go采用单合约进程数限制方式来限制进程资源，单合约进程数限制设置过大时，在合约数过多时，容易出现大量进程创建的情况，设置过小时，在压力峰值时，资源无法充分利用；如果预设用户数不合理，会导致进程无法分配到用户而超时，重构方案实现了抢占式的合约进程资源动态切换与调度算法，对总进程数进行了限制，充分利用进程资源；</p> 
+<p>(2)  跨合约调用， VM Docker Go仅支持调用同样的合约，重构支持所有合约相互调用；</p> 
+<p>(3)  VM Engine采用基于流式的任务处理与消息通知机制，吞吐量更高，架构设计更合理。</p> 
+<h1><strong>4.  VM Engine架构设计与常见调用流程</strong></h1> 
+<h2><strong>4.1 VM Engine架构设计</strong></h2> 
+<p>VM Engine的架构进行了重构设计，具体的系统架构如下：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/50/14/QQlquDe0_o.png"></p> 
+<p>图2</p> 
+<p>4.1.1  ChainMaker：长安链区块链项目主模块</p> 
+<p>(1)  Runtime Server：合约交互服务端，直接处理来自Sandbox的交易请求和执行结果.</p> 
+<p>(2)  Contract Engine Client：合约引擎客户端，负责发送交易请求/合约文件给Contract Engine。</p> 
+<p>(3)  VM Runtime Instance：交易运行时处理器，负责处理交易运行时的所有请求与响应。</p> 
+<p>4.1.2 VM Engine：基于Docker的容器化合约交易调度和执行引擎。</p> 
+<p>(1)  Contract Engine：合约交易调度引擎，负责转发请求/响应，调度请求与合约进程资源。</p> 
+<p><em>i.  Contract Engine Server：合约引擎服务端，VMEngine与ChainMaker交互的唯一模块，交互内容主要包括交易请求、合约文件请求与响应和交易异常信息；</em></p> 
+<p><em>ii.  Request Scheduler：请求调度器，负责解析并转发请求/响应；</em></p> 
+<p><em>iii.  Request Group：交易组，负责管理同一合约同一版本的所有交易，并根据交易存数来申请进合约程资源；</em></p> 
+<p><em>iv.  Contract Manager：合约管理器，负责管理合约文件/缓存信息；</em></p> 
+<p><em>v.  Process Manager：进程管理器，负责管理合约进程资源；</em></p> 
+<p><em>vi.  Process：进程控制器，负责管理一个合约进程的生命周期；</em></p> 
+<p><em>vii.  User Manager：用户管理器，负责管理合约进程Linux用户；</em></p> 
+<p><em>viii.  Security：安全控制器，负责CGroup等系统资源管理。</em></p> 
+<p>(2)  Sandbox：合约进程，合约二进制代码的运行实体，同一个合约可能有多个合约进程，从而实现交易并发（Java版本尚未推出）</p> 
+<p><em>i.  Runtime Client：合约交互客户端，直接向ChainMaker进行调用请求；</em></p> 
+<p><em>ii.  SDK Instance：合约SDK实例，存储交易相关元信息；</em></p> 
+<p><em>iii.  Contract Engine Client：交易传输客户端，接收来自VM Engine的交易并返回完成信号。</em></p> 
+<h2><strong>4.2 VM Engine常见调用流程</strong></h2> 
+<p>下面我们介绍几种常见的调用流程：</p> 
+<p>4.2.1  简单合约调用流程</p> 
+<p>阶段1：发送交易</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/5d/86/OVSUBiw5_o.png"></p> 
+<p>图3</p> 
+<p>该阶段由ChainMaker并发调用VM Runtime Instance，多笔交易调用请求会通过Contract Engine Client发送到VM Engine，Contract Engine Server接收到后会直接发送给Request Scheduler进行调度。</p> 
+<p>阶段2：调度交易</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/f5/0b/B9KZlzx4_o.png"></p> 
+<p>图4</p> 
+<p>Request Scheduler根据交易中的链ID、合约名、合约版本将其分配到不同的Request Group中，如果交易积攒过多，Request Group会向Process Manager申请进程资源，Process Manager优先分配未启动进程，再尝试切换闲置进程资源。Process监听Tx Channel，并发送给Sandbox执行任务。</p> 
+<p>阶段3：合约调用</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/30/8a/S4KwT870_o.png"></p> 
+<p>图5</p> 
+<p>Sandbox在执行过程所有的合约交互都直接与ChainMaker的Runtime Server进行同步交互。由于交易隔离性和安全性考虑，Sandbox内部不支持交易并发执行。</p> 
+<p>阶段4：返回结果</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/e8/ab/NHKDGKLl_o.png"></p> 
+<p>图6</p> 
+<p>Sandbox执行完成后，会向ChainMaker的Runtime Server返回执行结果，并向Contract Engine的对应的Process发送完成信号，从而继续处理下一笔交易。</p> 
+<p>4.2.2  创建合约流程</p> 
+<p>所有交易都是从创建合约开始的，创建合约的具体流程如下：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/07/bd/EUwY6j6g_o.png"></p> 
+<p>图7</p> 
+<p>事实上，如果Contract Engine合约丢失，它也会向ChainMaker发送请求获取合约文件。</p> 
+<p>4.3  跨合约调用流程</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/aa/f1/NCII74XO_o.png"></p> 
+<p>图8</p> 
+<p>跨合约调用本质上是调度一笔新的交易执行，执行结果返回给上一个等待的交易，该版本支持不同语言间跨合约调用。</p> 
+<h1><strong>5.  VM Engine进程状态机设计与进程资源分配机制</strong></h1> 
+<h2><strong>5.1 VM Engine进程状态机设计</strong></h2> 
+<p>VM Engine中进程资源的状态机设计包括Process详细状态和Process Manager总体状态，双方保持强一致性。具体状态机如下：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/ee/a0/OeDMa5ra_o.png"></p> 
+<p>图9</p> 
+<p>Process状态机：</p> 
+<p>(1)  created：初始创建状态，进程刚刚创建；</p> 
+<p>(2)  ready：就绪状态，进程创建后握手成功或刚刚执行完成交易或刚从idle状态转换过来；</p> 
+<p>(3)  busy：忙碌状态，进程正在执行交易；</p> 
+<p>(4)  idle：闲置状态，进程就绪一段时间后都没有新交易执行；</p> 
+<p>(5)  changing：进程切换到新合约进程的中间态，闲置后可以被其他合约进程抢占，即将切换合约信息与任务信息；</p> 
+<p>(6) closing：进程关闭的中间态，进程即将退出并销毁。</p> 
+<p>Process Manager状态机：</p> 
+<p>(1)  busy，忙碌状态，包括Process中的created、ready与busy状态，该状态下进程资源不可被抢占；</p> 
+<p>(2)  idle，闲置状态，对应Process中的idle状态，该状态下进程资源可以被抢占。</p> 
+<h2>5.2 VM Engine进程资源分配机制</h2> 
+<p>Request Group进程申请机制：每一个Request Group都包含原始交易队列和跨合约交易队列，分别放置第一层交易和&gt;1层子交易，在合约就绪、新交易入队和上次进程返回时触发合约进程资源申请，申请进程数为：总任务数-处于ready/busy状态中的合约进程，最小值为0。</p> 
+<p>Process Manager进程数据结构：原始进程与跨合约进程由不同的Process Manager管理，内部结构保持一致，主要包括：</p> 
+<p>(1)  闲置进程，长时间没有执行交易的进程，随时会被抢占；</p> 
+<p>(2)  忙碌进程：正在处理/准备处理任务的进程；</p> 
+<p>(3)  等待中的Request Group，有闲置进程时，优先释放给队头元素。</p> 
+<p>Process Manager进程分配原则：申请新进程时，优先启动进程，如果不够则释放闲置进程，最后将其加入等待队列。（如果申请数为0，说明不需要进程，将其从等待队列移出）</p> 
+<p>Process Manager进程回收原则：系统会进行进程资源的周期性回收，回收数为配置的回收比例和闲置进程的最小数。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/70/a3/XMDxtqes_o.png"></p> 
+<p>图10</p> 
+<h1><strong>6.  VM Engine的架构优势与实际效果</strong></h1> 
+<p>VM Engine的架构设计优势如下：</p> 
+<p>(1)  性能更高，通过gRPC通信次数的降低、gRPC参数的调优、协程状态机的合理控制、缓存与并发的优化等，VM Engine具备更高的性能；</p> 
+<p>(2)  稳定性更高，通过合约进程资源总数的最大限制与合理的进程资源动态切换与调度算法，合约进程能够以较优的方式进行动态分配，高效并发地执行交易；</p> 
+<p>(3)  应用更广泛，支持多语言的跨合约调用，能够满足任意语言的合约之间相互调用；</p> 
+<p>(4)  可维护性更高，模块分工明确，采用基于流式的任务处理与消息通知机制与进程状态机控制，架构设计更加清晰。</p> 
+<p>为了验证重构的效果，我们按照下面的测试条件进行测试：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/5d/aa/VQS9Kxdw_o.png"></p> 
+<p>图11</p> 
+<p>性能测试结果如下：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/79/ca/9VIsQtRi_o.png"></p> 
+<p>图12</p> 
+<h1><strong>7. 兼容性问题</strong></h1> 
+<p>VM Engine在v2.3.0版本推出并长期维护，对于VM Docker Go合约/引擎用户来说，如何实现兼容呢？</p> 
+<p>由于gRPC架构的调整，v2.3.0及后续版本的VM Engine与v2.3.0及后续版本合约SDK（contract-sdk-go）是配套的，而VM Docker Go是与v2.2.X版本的合约SDK是配套的。如果想要使用VM Engine，请使用新版合约SDK，并启用VM Engine，如果想要使用VM Docker Go，请使用旧版合约SDK，并启用VM Docker Go。具体如下：</p> 
+<p>1.  仅使用VM Engine，请使用对应的新版本合约SDK编译合约，并在chainmaker.yml中启用VM Engine，此时区块链会拉起VM Engine合约容器，安装并调用新合约时只会发送到VM Engine容器中（如果使用了旧版的合约SDK编译合约，会收到VM Docker Go未配置的错误信息）；</p> 
+<p>2.  仅使用VM Docker Go，请使用对应的旧版本合约SDK编译合约，并在chainmaker.yml中启用VM Docker Go，此时区块链会拉起VM Docker Go合约容器，安装并调用旧合约时只会发送到VM Docker Go容器中（如果使用了新版的合约SDK编译合约，会收到VM Engine未配置的错误信息）；</p> 
+<p>3.  同时使用VM Engine与VM Docker Go，分别使用对应的合约SDK编译合约，在chainmaker.yml中同时启用两种容器，此时区块链会拉起两种容器，安装并调用合约会发送到各自的容器中。</p> 
+<p>另外，cmc与sdk的调用方式不变，新版VM Engine额外支持将方法从调用的params中抽离到外层的methods中（详情请参考长安链官方文档）。</p> 
+<h1><strong>8. 总结</strong></h1> 
+<p>VM Engine在VM Docker Go的基础上进行了全面的重构和优化，包括架构优化设计、多种性能提升手段应用、进程总数资源限制、跨合约调用扩展等等。新的合约引擎将作为核心支撑持续保障长安链项目的稳定高效运行。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/4d/da/cVs2giwU_o.png"></p> 
+<p><strong id="js_a11y_wx_profile_nickname">长安链ChainMaker</strong></p> 
+<p>长安链 · ChainMaker是新一代区块链开源底层软件平台，包含区块链核心框架、丰富的组件库和工具集，致力于为用户高效、精准地解决差异化区块链实现需求，构建高性能、高可信、高安全的新型数字基础设施。</p> 
+<p>38篇原创内容</p> 
+<p>公众号</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

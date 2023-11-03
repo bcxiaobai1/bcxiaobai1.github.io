@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>比特币源码分析--深入理解区块链 3.高安全的随机数生成器 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">比特币源码分析--深入理解区块链 3.高安全的随机数生成器</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <p style="margin-left:0">        计算机程序中使用随机数是常见的，常用来做数据校验、密码或其他安全用途。比如很多短信验证码就是6位数的随机数字。之所以一般是6位因为要考虑用户的记忆和输入方便。太长了用户记不住输入也不方便，它可以结合验证码的时效和对应的手机号码来提高安全性。但在Bitcoin中，这种有限长度的数字作为随机数，在强大的算力面前分分钟被破解。作为Bitcoin的随机数生成器（RNG）使用了大量高强度的随机数来提高系统安全，随机数的核心的应用就是钱包（wallet）系统的私钥（有关钱包系统在以后的章节中会介绍）。私钥是一个长度为64的十六进制字符串（32个字节，256位）。为了保证安全，系统必须保证随机数不被猜中而且是唯一的。对于Bitcoin这种开放、几乎人人皆可随时访问的区块链数据库，其中钱包系统的安全等级最高，它要求在现有的运算条件下对私钥的破解概率降低到几乎是零。因为一旦私钥遭破解就可以操控钱包账户的一切资金。要做到这样的高安全就必须保证随机生成的私钥有最安全的熵源。</p> 
+<p style="margin-left:0">        计算机中的常用的随机数我们通常称之为伪随机数(Pseudo-random)，它不是真正的随机，而是按照某种统计学算法生成的。在C++语言中很多生成随机数的函数，比如：srand、rand等，但这些远不能满足Bitcoin安全的需求，这些函数几乎排除在Bitcoin能使用的函数之外。熵作为混乱程度的度量，熵源可以理解为计算随机数的数据来源。必须保证这些数据是高度混乱的、不规律的，以确保攻击者无法预测和破解。</p> 
+<p style="margin-left:0"><strong>关于熵</strong></p> 
+<p style="margin-left:0">        维基百科中关于熵是这样解释的：在信息论中，熵（entropy）是接收的每条消息中包含的信息的平均量，又被称为信息熵、信源熵、平均自信息量。这里，“消息”代表来自分布或数据流中的事件、样本或特征。（熵最好理解为不确定性的量度而不是确定性的量度，因为越随机的信源的熵越大。）来自信源的另一个特征是样本的概率分布。熵的概念最早起源于物理学，用于度量一个热力学系统的无序程度。在信息论里面，熵是对不确定性的测量。但是在信息世界，熵越高，则能传输越多的信息，熵越低，则意味着传输的信息越少。</p> 
+<p style="margin-left:0;text-align:justify"><strong><span style="color:#333333">比特币随机数生成器和熵源的设计</span></strong></p> 
+<p><span style="color:#333333">B</span><span style="color:#333333">itcoin</span><span style="color:#333333">中</span><span style="color:#333333">随机数据生成的</span><span style="color:#333333">主</span><span style="color:#333333">要函数代码（注释有对应的文件名）：</span></p> 
+<pre><code class="language-cpp">// https://github.com/bitcoin/bitcoin/blob/master/src/random.cpp
+static void ProcRand(unsigned char* out, int num, RNGLevel level) noexcept
+{
+    // Make sure the RNG is initialized first (as all Seed* function possibly need hwrand to be available).
+    RNGState&amp; rng = GetRNGState();
+
+    assert(num &lt;= 32);
+
+    CSHA512 hasher;
+    switch (level) {
+    case RNGLevel::FAST:
+        SeedFast(hasher);
+        break;
+    case RNGLevel::SLOW:
+        SeedSlow(hasher, rng);
+        break;
+    case RNGLevel::PERIODIC:
+        SeedPeriodic(hasher, rng);
+        break;
+    }
+
+    // Combine with and update state
+    if (!rng.MixExtract(out, num, std::move(hasher), false)) {
+        // On the first invocation, also seed with SeedStartup().
+        CSHA512 startup_hasher;
+        SeedStartup(startup_hasher, rng);
+        rng.MixExtract(out, num, std::move(startup_hasher), true);
+    }
+}
+</code></pre> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">下面分别说明三种级别的随机数以及熵源设计：</span></p> 
+<p style="margin-left:0;text-align:justify"><strong><span style="color:#333333">1.RNGLevel::FAST</span></strong></p> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">顾名思义就是比较快速生成随机数，计算时间相对短，复杂程度相对低，构造流程如下图：</span></p> 
+<p style="margin-left:0;text-align:justify"><img alt="" height="577" src="https://images2.imgbox.com/3b/2d/IsZALis9_o.png" width="880"></p> 
+<ol>
+<li style="text-align:justify"><span style="color:#333333"><strong>Stack pointer：</strong> 使用了一个32字节长度的buffer在堆栈中的地址。该地址长度一般为8字节。注意是buffer的堆栈地址，而不是buffer本身的值。堆栈地址是高度随机且外部用户无法获取的安全地址。</span></li>
+<li style="text-align:justify"><span style="color:#333333"><strong>SeedHardwareFast：</strong>调用GetRdRand从芯片上的硬件随机数生成器中获取随机数。所用到的随机数生成器由芯片上的熵池初始化。在调用之前，首先在随机数生成器RNGState的初始化中调用InitHardwareRand来判断CPU处理器是否支持RDRAND和RDSEED指令。RDSEED和RDRAND提供了访问硬件熵池的高级方法，功能比较类似，它们都是计算机的硬件指令。其中RDSEED指令的熵来自时序线路，并且使用硅片上的热噪声来以3GHz的速度输出随机比特流。在Linux C++中，使用内联的汇编指令来完成这些指令调用。</span></li>
+<li style="text-align:justify"><span style="color:#333333"><strong>SeedTimestamp：</strong>调用GetPerformanceCounter来读取CPU时间计数器，返回一个无符号的64位整数。该数字同样具有高度随机性和不可预测性。</span></li>
+<li style="text-align:justify"><span style="color:#333333"><strong>MixExtract：</strong>混合熵并计算512位的哈希值。首先在熵中混合上一次计算的Hash值，同时混合一个64位的无符号计数器，然后计算Hash-512，并将计算结果保存在m_state中供下一次使用。</span></li>
+<li style="text-align:justify"><span style="color:#333333"><strong>SeedStartup:</strong> 继续构造随机数的熵源，上面步骤构造的熵源已经在暂存在m_state中，该函数继续执行SeedHardwareSlow，它与SeedHardwareFast类似，加入了RNDSEED随机数。熵源包括：SeedSlow（在下面介绍）、RandAddDynamicEnv动态的环境变量数据，RandAddStaticEnv静态的环境变量数据、SeedStrengthen执行10毫秒强度的哈希运算并混合熵源。其中SeedStartup只执行一次。</span></li>
+<li style="text-align:justify"><span style="color:#333333"><strong>MixExtract：</strong>再次混合熵源并计算哈希值。</span></li>
+</ol>
+<p style="margin-left:18pt;text-align:justify">        <span style="color:#333333">通过上述复杂和多重混合计算，其目的是为了构造一个高度随机且无法预测的熵源种子随机数，最后通过计算熵源的512位的哈希值获得指定长度的随机值（最长64个字节）。且每一次计算都是根据上一次计算的结果再进行混合并不断累积，从而使信息熵越来越高，随机值也越趋安全。</span></p> 
+<p style="margin-left:0;text-align:justify"></p> 
+<p style="margin-left:0;text-align:justify"><strong><span style="color:#333333">2. RNGLevel::SLOW</span></strong></p> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">        计算时间较长，较复杂，混合的熵源比较多。如下图：</span></p> 
+<p style="margin-left:0;text-align:justify"></p> 
+<p style="margin-left:0;text-align:justify"><img alt="" height="633" src="https://images2.imgbox.com/17/f3/dKhfl79U_o.png" width="1188"></p> 
+<p style="margin-left:0;text-align:justify"></p> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">它在</span><span style="color:#333333">SeedFast的基础上增加了：</span></p> 
+<ul>
+<li style="text-align:justify">
+<strong><span style="color:#333333">GetOSRand</span></strong><span style="color:#333333">：用于获取系统设设备的随机数</span>
+</li>
+<li style="text-align:justify">
+<strong><span style="color:#333333">SeedEvents</span></strong><span style="color:#333333">：它是</span><span style="color:#333333">RNGState中根据随机事件来混合熵源，当系统连接到一个新的节点时，调用RandAddEvent函数器混合一个32位无符号的的节点id，其目的是系统在运行过程中动态混合一些新的随机种子，以提高信息源的熵强度，从而提高随机数的安全性。</span>
+</li>
+</ul>
+<p style="margin-left:0;text-align:justify"><strong><span style="color:#333333">3.RNGLevel::PERIODIC</span></strong></p> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">   系统会周期（每隔一分钟）调用RandAddPeriodic，从而不断进行哈希运算和累积熵，从而提高熵的不确定性和安全性。如下图(蓝色背景部分为代码)：</span></p> 
+<p style="margin-left:0;text-align:justify"></p> 
+<p style="margin-left:0;text-align:justify"><img alt="" height="498" src="https://images2.imgbox.com/d3/c6/Wutdbymw_o.png" width="1196"></p> 
+<p style="margin-left:0;text-align:justify"></p> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">它与</span><span style="color:#333333">SLOW和FAST区别是增加了SeedStrengthen，其用意是根据CPU的时钟来加熵的强度。这三种级别的算法不是独立的，而是相互关联的，</span><span style="color:#333333">​<span style="color:#333333">并</span><span style="color:#333333">且不断累积熵源</span><span style="color:#333333">。</span></span><span style="color:#333333">​</span></p> 
+<p style="margin-left:0;text-align:justify"></p> 
+<p style="margin-left:0;text-align:justify"><strong><span style="color:#333333">快速随机数</span></strong><strong><span style="color:#333333">(FastRandomContext)</span></strong></p> 
+<p style="margin-left:0;text-align:justify"><strong>        </strong><span style="color:#333333">相对于钱包私钥使用的随机数需要很高的密码安全特性，一般的随机数，如使用随机数来命名文件就不需要经过上述那么复杂的运算。因此</span><span style="color:#333333">Bitcoin中针对这些开发了快速随机数的算法，如下图所示：</span></p> 
+<p style="margin-left:0;text-align:justify"><img alt="" height="266" src="https://images2.imgbox.com/56/13/WlmZwvBO_o.png" width="718"></p> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">          快速随机数生成器有两个主要函数rand256和randbytes。rand256获取256位长度的随机数。randbytes获取指定字节长度的随机数（不超过64个字节数）。与上面介绍的通过熵源构造的随机数生成器RNGState不同的是，快速随机数使用了ChaCha20（一种新型的流密码算法）伪随机的密钥流(keystream)的算法。通过/src/random.cpp的代码得知，在FastRandomContext的构造函数中，通过对chacha20设定key来计算keystream。默认情况下，必须首先请求RandomSeed来获取一个key，该key通过RNGState来获取。如果用户在构造FastRandomContext时设定了key，则不需要通过定RandomSeed来获得key。Key值是ChaCha20算法计算keystream的基础（关于ChaCha20算法在后面的章节介绍）。</span></p> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">下面的代码是</span><span style="color:#333333">FastRandomContext的两个构造函数：</span></p> 
+<pre><code class="language-cpp">FastRandomContext::FastRandomContext(bool fDeterministic) noexcept : 
+requires_seed(!fDeterministic), bytebuf_size(0), bitbuf_size(0)
+{
+    if (!fDeterministic) {
+        return;
+    }
+    uint256 seed;
+    rng.SetKey(seed.begin(), 32);
+}
+
+FastRandomContext::FastRandomContext(const uint256&amp; seed) noexcept : requires_seed(false), bytebuf_size(0), bitbuf_size(0)
+{
+    rng.SetKey(seed.begin(), 32);
+}
+</code></pre> 
+<p> <span style="color:#333333">第一个构造函数</span>表示需要<span style="color:#333333">RandomSeed来设定key。第二个构造函数表明用户指定了key</span><span style="color:#333333">​<span style="color:#333333">。</span>这里的</span><span style="color:#333333">uint256是一个256位32字节长度的uint8_t类型的数组。</span></p> 
+<p style="margin-left:0;text-align:justify"></p> 
+<p style="margin-left:0;text-align:justify"><strong><span style="color:#333333">使用</span></strong><strong><span style="color:#333333">SHA-512获取随机值</span></strong></p> 
+<p style="margin-left:0;text-align:justify"><span style="color:#333333">        Bitcoin系统中获取高安全随机数，其中钱包系统的256位私钥，都是通过复杂的计算和混合不同的随机数据来获得高度混乱和不可预测的熵源，并最终计算它的SHA-512来获得随机值。该随机值具有很高的密码安全性，使黑客攻击变得几乎不可能。有关SHA-512的算法在后面的章节再介绍，需注意的是快速随机数算法并不需要计算SHA-512，而是通过Chacha20算法实现的。</span></p> 
+<p style="margin-left:0;text-align:justify"></p> 
+<p style="margin-left:0;text-align:justify"><strong><span style="color:#333333">代码位置</span></strong></p> 
+<p><span style="color:#333333">关于</span><span style="color:#333333">本章</span><span style="color:#333333">随机数的相关代码主要在</span><span style="color:#333333">Bitcoin</span><span style="color:#333333">下面的文件中实现：</span></p> 
+<p><span style="color:#333333"><a class="link-info" href="https://github.com/bitcoin/bitcoin/blob/master/src/random.cpp" title="https://github.com/bitcoin/bitcoin/blob/master/src/random.cpp">https://github.com/bitcoin/bitcoin/blob/master/src/random.cpp</a></span></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>36.RocketMQ之Broker如何实现磁盘文件高性能读写 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">36.RocketMQ之Broker如何实现磁盘文件高性能读写</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <div style="font-size: 16px"> 
+ <hr> 
+ <h2>highlight: arduino-light</h2> 
+ <h1>Broker读写磁盘文件的核心技术:mmap</h1> 
+ <p>Broker中大量的使用mmap技术去实现CommitLog这种大磁盘文件的高性能读写优化的。</p> 
+ <p>通过之前的学习，我们知道了一点，就是Broker对磁盘文件的写入主要是借助直接写入os cache来实现性能优化的，因为直接写入os cache，相当于就是写入内存一样的性能，后续等os内核中的线程异步把cache中的数据刷入磁盘文件即可。</p> 
+ <p>那么今天我们就要对这个过程中涉及到的mmap技术进行一定的分析。</p> 
+ <h2>1.传统文件IO:4次数据拷贝</h2> 
+ <p>首先我们先来给大家分析一下，假设RocketMQ没有使用mmap技术，就是使用最传统和基本的普通文件IO操作去进行磁盘文件的读写，那么会存在什么样的性能问题？</p> 
+ <p>答案是：多次数据拷贝问题</p> 
+ <p>首先，假设我们有一个程序，这个程序需要对磁盘文件发起IO操作读取他里面的数据到自己这儿来，那么会经过以下一个顺序：</p> 
+ <p>首先从磁盘上把数据读取到内核IO缓冲区里去，然后再从内核IO缓存区里读取到用户进程私有空间里去，然后我们才能拿到这个文件里的数据。</p> 
+ <p><img src="https://images2.imgbox.com/8a/8f/CTKsxYCG_o.png" alt="image.png"></p> 
+ <p>为了读取磁盘文件里的数据，是不是发生了两次数据拷贝？</p> 
+ <p>没错，所以这个就是普通的IO操作的一个弊端，必然涉及到两次数据拷贝操作，对磁盘读写性能是有影响的。</p> 
+ <p>那么如果我们要将一些数据写入到磁盘文件里去呢？</p> 
+ <p>那这个就是一样的过程了，必须先把数据写入到用户进程私有空间里去，然后从这里再进入内核IO缓冲区，最后进入磁盘文件里去</p> 
+ <p><img src="https://images2.imgbox.com/a8/33/6E53fxsT_o.png" alt="image.png"></p> 
+ <p>在数据进入磁盘文件的过程中，是不是再一次发生了两次数据拷贝？</p> 
+ <p>没错，所以这就是传统普通IO的问题，有4次数据拷贝问题。</p> 
+ <h2>2.基于mmap+pageCache技术优化</h2> 
+ <h3>mmap是什么</h3> 
+ <p>mmap是一种内存映射文件的方法，即将一个文件或者其它对象映射到进程的地址空间，实现文件磁盘地址和进程虚拟地址空间中一段虚拟地址的一一对映关系.</p> 
+ <p>对文件进行mmap后，会在进程的虚拟内存分配地址空间，创建与磁盘的映射关系。 实现这样的映射后，就可以以指针的方式读写操作映射的虚拟内存，系统则会自动回写磁盘；相反，内核空间对这段区域的修改也直接反映到用户空间，从而可以实现不同进程间的数据共享。与传统IO模式相比，<strong>减少了一次用户态copy到内核态的操作</strong>。</p> 
+ <h3>mmap+write</h3> 
+ <p>mmap+write简单来说就是使用mmap替换了read+write中的read操作，减少了一次CPU的拷贝。</p> 
+ <p>mmap主要实现方式是将读缓冲区的地址和用户缓冲区的地址进行映射，内核缓冲区和应用缓冲区共享，从而减少了从读缓冲区到用户缓冲区的一次CPU拷贝。</p> 
+ <p>本来是read + write是4切4拷。</p> 
+ <p>现在变成了1次映射 + 3次拷贝 + 4切</p> 
+ <p><code> 1.从磁盘通过DMA拷贝到内核缓存区 2.从内核映射到用户缓存区 3.写的时候直接基于内核缓存区写到socket缓冲区 4.再从socket缓冲区到网卡引擎 </code></p> 
+ <p><img src="https://images2.imgbox.com/26/ee/npjLYTYe_o.png" alt="image.png"></p> 
+ <p>接着我们来看一下，RocketMQ如何利用mmap技术配合page cache技术进行文件读写优化的？</p> 
+ <p>首先，RocketMQ底层对CommitLog、ConsumeQueue之类的磁盘文件的读写操作，基本上都会采用mmap技术来实现。</p> 
+ <p><strong>如果具体到代码层面，就是基于JDK NIO包下的MappedByteBuffer的map()函数，来将磁盘文件CommitLog文件，或者ConsumeQueue文件映射到内存里来</strong></p> 
+ <p>这里我必须给大家解释一下，这个所谓的内存映射是什么意思</p> 
+ <p><strong>其实有的人可能会误以为是直接把那些磁盘文件里的数据给读取到内存里来了，类似这个意思，但是并不完全是对的。</strong></p> 
+ <p><strong>因为刚开始你建立映射的时候，并没有任何的数据拷贝操作，其实磁盘文件还是停留在那里，只不过他把物理上的磁盘文件的一些地址和用户进程私有空间的一些虚拟内存地址进行了一个映射</strong></p> 
+ <p>``` mmap 把文件映射到用户空间里的虚拟内存，省去了从内核缓冲区复制到用户空间的过程，文件中的位置在虚拟内存中有了对应的地址，可以像操作内存一样操作这个文件，这样的文件读写文件方式少了数据从内核缓存到用户空间的拷贝，效率很高。</p> 
+ <p>第一步：mmap系统调用使得文件内容被DMA引擎复制到内核缓冲区。然后该缓冲区与用户进程共享，在内核和用户内存空间之间不进行任何拷贝。</p> 
+ <p>第二步：写系统调用使得内核将数据从原来的内核缓冲区复制到与套接字相关的内核缓冲区。</p> 
+ <p>第三步：第三次拷贝发生在DMA引擎将数据从内核套接字缓冲区传递给协议引擎时。</p> 
+ <p>通过使用mmap而不是read，我们将内核需要拷贝的数据量减少了一半。当大量的数据被传输时，这将有很好的效果。 ```</p> 
+ <p><img src="https://images2.imgbox.com/ba/e2/8tiuGkdY_o.png" alt="image.png"></p> 
+ <p>这个地址映射的过程，就是JDK NIO包下的MappedByteBuffer.map()函数干的事情，底层就是基于mmap技术实现的。</p> 
+ <p>另外这里给大家说明白的一点是，这个mmap技术在进行文件映射的时候，一般有大小限制，在1.5GB~2GB之间</p> 
+ <p>所以RocketMQ才让CommitLog单个文件在1GB，ConsumeQueue文件在5.72MB，不会太大。</p> 
+ <p>这样限制了RocketMQ底层文件的大小，就可以在进行文件读写的时候，很方便的进行内存映射了。</p> 
+ <p>然后接下来要给大家讲的一个概念，就是之前给大家说的PageCache，实际上在这里就是对应于虚拟内存</p> 
+ <p>所以我们在下面的图里就给大家画出了这个示意。 !</p> 
+ <p><img src="https://images2.imgbox.com/52/8d/tWNZyxP8_o.png" alt="5e6349740001bedf04800304.jpg"></p> 
+ <h3>mmap优点</h3> 
+ <p>1、对文件的读取操作跨过了页缓存，减少了数据的拷贝次数，用内存读写取代I/O读写，提高了文件读取效率。</p> 
+ <p>2、实现了用户空间和内核空间的高效交互方式。两空间的各自修改操作可以直接反映在映射的区域内，从而被对方空间及时捕捉。</p> 
+ <p>3、提供进程间共享内存及相互通信的方式。不管是父子进程还是无亲缘关系的进程，都可以将自身用户空间映射到同一个文件或匿名映射到同一片区域。从而通过各自对映射区域的改动，达到进程间通信和进程间共享的目的。</p> 
+ <p>同时，如果进程A和进程B都映射了区域C，当A第一次读取C时通过缺页从磁盘复制文件页到内存中；但当B再读C的相同页面时，虽然也会产生缺页异常，但是不再需要从磁盘中复制文件过来，而可直接使用已经保存在内存中的文件数据。</p> 
+ <p>4、可用于实现高效的大规模数据传输。内存空间不足，是制约大数据操作的一个方面，解决方案往往是借助硬盘空间协助操作，补充内存的不足。但是进一步会造成大量的文件I/O操作，极大影响效率。这个问题可以通过mmap映射很好的解决。换句话说，但凡是需要用磁盘空间代替内存的时候，mmap都可以发挥其功效。</p> 
+ <p><strong>相比磁盘空间，内存那么小，Mmap操作是不是很占用内存空间？</strong></p> 
+ <p>需要注意的是，进行Mmap映射时，并不是直接申请与磁盘文件一样大小的内存空间；而是使用进程的地址空间与磁盘文件地址进行映射，当真正的文件读取是当进程发起读或写操作时。</p> 
+ <p>当进行IO操作时，发现用户空间内不存在对应数据页时(缺页)，会先到交换缓存空间(swap cache)去读取，如果没有找到再去磁盘加载(调页)。</p> 
+ <p>需要注意的是，进行Mmap映射时，并不是直接申请与磁盘文件一样大小的内存空间；而是使用进程的地址空间与磁盘文件地址进行映射，当真正的文件读取是当进程发起读或写操作时。</p> 
+ <p>当进行IO操作时，发现用户空间内不存在对应数据页时(缺页)，会先到交换缓存空间(swap cache)去读取，如果没有找到再去磁盘加载(调页)。</p> 
+ <h3>mmap有哪些应用场景？</h3> 
+ <p><strong>进程间通信：</strong> 从自身属性来看，mmap具有提供进程间共享内存及相互通信的能力，各进程可以将自身用户空间映射到同一个文件的同一片区域，通过修改和感知映射区域，达到进程间通信和进程间共享的目的。</p> 
+ <p><strong>大数据高效存取：</strong> 对于需要管理或传输大量数据的场景，内存空间往往是不够用的，这时可以考虑使用Mmap进行高效的磁盘IO，弥补内存的不足。例如RocketMQ，MangoDB等主流中间件中都用到了Mmap技术；总之，但凡<strong>需要用磁盘空间替代内存空间的时候都可以考虑使用Mmap</strong>。</p> 
+ <p>参考:<a href="https://www.cnblogs.com/liqiangchn/p/13587437.html">高效IO解决方案-mmap给你想要的快</a></p> 
+ <h3>基于mmap+pagecache实现高性能的文件读写</h3> 
+ <p>接下来就可以对这个已经映射到内存里的磁盘文件进行读写操作了，比如要写入消息到CommitLog文件，你先把一个CommitLog文件通过MappedByteBuffer的map()函数映射其地址到你的虚拟内存地址。</p> 
+ <p>接着就可以对这个MappedByteBuffer执行写入操作了，写入的时候他会直接进入PageCache中，然后过一段时间之后，由os的线程异步刷入磁盘中，如下图我们可以看到这个示意。</p> 
+ <p><img src="https://images2.imgbox.com/a3/35/bII85mqv_o.png" alt="image.png"></p> 
+ <p>看到这里我们有没有发现什么问题？</p> 
+ <p>对了！就是上面的图里，似乎只有一次数据拷贝的过程，他就是从PageCache里拷贝到磁盘文件里而已！这个就是你使用mmap技术之后，相比于传统磁盘IO的一个性能优化。</p> 
+ <p>接着如果我们要从磁盘文件里读取数据呢？</p> 
+ <p>那么此时就会判断一下，当前你要读取的数据是否在PageCache里？</p> 
+ <p>如果在的话，就可以直接从PageCache里读取了！</p> 
+ <p>比如刚写入CommitLog的数据还在PageCache里，此时你Consumer来消费肯定是从PageCache里读取数据的。</p> 
+ <p>但是如果PageCache里没有你要的数据，那么此时就会从磁盘文件里加载数据到PageCache中去，如下图</p> 
+ <p>而且PageCache技术在加载数据的时候，还会将你加载的数据块的临近的其他数据块也一起加载到PageCache里去。</p> 
+ <p><img src="https://images2.imgbox.com/d3/34/5spXuM7e_o.png" alt="image.png"></p> 
+ <p>大家可以看到，在你读取数据的时候，其实也仅仅发生了一次拷贝，而不是两次拷贝，所以这个性能相较于传统IO来说，肯定又是提高了。</p> 
+ <h2>3.预映射机制 + 文件预热机制</h2> 
+ <p>接着给大家说几个Broker针对上述的磁盘文件高性能读写机制做的一些优化：</p> 
+ <p>(1)内存预映射机制：Broker会针对磁盘上的各种CommitLog、ConsumeQueue文件预先分配好MappedFile，也就是提前对一些可能接下来要读写的磁盘文件，提前使用MappedByteBuffer执行map()函数完成映射，这样后续读写文件的时候，就可以直接执行了。</p> 
+ <p>(2)文件预热：在提前对一些文件完成映射之后，因为映射不会直接将数据加载到内存里来，那么后续在读取尤其是CommitLog、ConsumeQueue的时候，其实有可能会频繁的从磁盘里加载数据到内存中去。</p> 
+ <p>所以在执行完map()函数之后，会进行madvise系统调用，就是提前尽可能多的把磁盘文件加载到内存里去。</p> 
+ <p>通过上述优化，才真正能实现一个效果，就是写磁盘文件的时候都是进入PageCache的，保证写入高性能；</p> 
+ <p>同时尽可能多的通过map + madvise的映射后预热机制，把磁盘文件里的数据尽可能多的加载到PageCache里来，后续对CosumeQueue、CommitLog进行读取的时候，才能尽可能从内存里读取数据。</p> 
+ <h2>4.磁盘顺序读写</h2> 
+ <p>磁盘如果使用得当，磁盘的速度完全可以匹配上网络的数据传输速度。目前的高性能磁盘，顺序写速度可以达到600MB/s， 超过了一般网卡的传输速度。但是磁盘随机写的速度只有大概100KB/s，和顺序写的性能相差6000倍！</p> 
+ <p>因为有如此巨大的速度差别，好的消息队列系统会比普通的消息队列系统速度快多个数量级。<strong>RocketMQ的消息用顺序写，保证了消息存储的速度。</strong></p> 
+</div>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

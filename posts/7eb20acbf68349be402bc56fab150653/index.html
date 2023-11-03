@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>自监督学习系列（四）：基于蒸馏的图片掩码学习 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">自监督学习系列（四）：基于蒸馏的图片掩码学习</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_3"></a>前文</h2> 
+<p>好久不见！自监督系列文章继续更新啦！在前几期的文章我们介绍了基于辅助任务，对比学习，和图片掩码学习的自监督学习范式</p> 
+<p>(对比学习，图片掩码学习其实也可以归属于基于辅助任务的自监督学习，由于这两类是目前最流行的研究方向，所以我们在此进行这样的区分)。</p> 
+<p>有感兴趣的读者可以查看前几期的文章:</p> 
+<p>https://zhuanlan.zhihu.com/p/470914640</p> 
+<p>https://zhuanlan.zhihu.com/p/474847821</p> 
+<p>https://zhuanlan.zhihu.com/p/475952825</p> 
+<p>由于 BEiT 和 MAE 的推出，目前自监督预训练领域的发展仍然是：改进现有的图片掩码学习模型。从前一期的文章可以知道，很多掩码学习的工作都以纯 RGB 像素值作为预测的目标，这些方法的具体操作步骤为:</p> 
+<ol><li>将一张图片划分为多个 patch；</li></ol> 
+ 
+<ol start="2"><li>随机覆盖掉其中的一部分 patch, 并将剩余的 patch 送入网络；</li></ol> 
+ 
+<ol start="3"><li>用网络预测的被覆盖掉的 patch 去拟合这些 patch 的真实的像素值。</li></ol> 
+<p>这些方法以 MAE 为代表，这样做的好处是整个模型的结构简单，计算量小。但是纯 RGB 像素作为预测目标也有两个明显的劣势:</p> 
+<ol><li>纯像素值是 low-level 的特征，模型往往需要预训练更长的迭代次数才能够达到一个不错的效果；</li></ol> 
+ 
+<ol start="2"><li>模型容易通过训练一些捷径，例如像素插值，来完成这样一个重建的任务，所以采用纯 RGB 像素作为预测目标的模型往往需要一个非常大的 mask ratio，例如，MAE 采用了 0.75，SimMIM 采用了 0.6。</li></ol> 
+<p>目前大多数方法主要是针对下面两个方面进行优化:</p> 
+<ol><li>重建目标，将 RGB 像素替换为具有丰富语义信息的模型输出的特征，例如，CLIP 输出特征；</li></ol> 
+ 
+<ol start="2"><li>引入额外的任务，例如，CMAE 除了重建任务以外，引入了一个对比学习的任务。</li></ol> 
+<p>今天这篇文章就主要围绕重建目标介绍几篇典型的文章：MILAN、BEiT-v2、MASKDISTILL。下表展示了这几个算法的概要。</p> 
+<table>
+<thead><tr>
+<th><strong>Method</strong></th>
+<th><strong>Backbone</strong></th>
+<th><strong>Decoder</strong></th>
+<th><strong>Target</strong></th>
+<th><strong>lin</strong></th>
+<th><strong>ft</strong></th>
+<th><strong>seg</strong></th>
+</tr></thead>
+<tbody>
+<tr>
+<td>MILAN</td>
+<td>ViT-B</td>
+<td>Prompt-decoder</td>
+<td>CLIP</td>
+<td>78.9</td>
+<td>85.4</td>
+<td>52.7</td>
+</tr>
+<tr>
+<td>MASKDISTILL</td>
+<td>ViT-B</td>
+<td>FC</td>
+<td>CLIP</td>
+<td>-</td>
+<td>85.5</td>
+<td>54.3</td>
+</tr>
+<tr>
+<td>BEiT-v2</td>
+<td>ViT-B</td>
+<td>FC</td>
+<td>VQ-KD</td>
+<td>80.1</td>
+<td>85.0</td>
+<td>52.7</td>
+</tr>
+</tbody>
+</table>
+<h2>
+<a id="MASKDISTILL_56"></a>MASKDISTILL</h2> 
+<p><strong>TL;DR: 图片掩码学习的统一范式</strong></p> 
+<p>MASKDISTILL 站在一个更高角度审视现有的图片掩码模型算法，将其抽象为下图的结构，简而言之就是，一张图片经过 mask 送入一个 encoder，这些 encoder 的选择多种多样，例如 ViT 和 Swin；然后将 encoder 输出的特征送入一个 head，这个 head 可能是一个线性层，也有可能是一个具有多层的 decoder。</p> 
+<p><img src="https://images2.imgbox.com/30/ec/W4ztBVrv_o.png" alt=""></p> 
+<p align="center">图 1</p> 
+<p>而对于 target 特征，也存在多种选择，例如纯像素、CLIP 之类的，然后 target 经过一个 normalization 层，最终输出，并完成和预测特征的匹配。</p> 
+<p>基于这个统一的框架，MASKDISTILL 使用 CLIP 作为 target，以及使用 smooth-l1 loss，在没有其他额外技术的加持下，也可以取得不错的效果。下表展现了 MASKDISTILL 与目前大多数主流自监督学习方法的一个比较：</p> 
+<p><img src="https://images2.imgbox.com/4d/d6/LHiGmzl9_o.png" alt=""></p> 
+<h2>
+<a id="MILAN_75"></a>MILAN</h2> 
+<h2>
+<a id="CLIP_target_Prompting_Decoder_Semantic_Aware_Sampling_77"></a><strong>划重点：CLIP target, Prompting Decoder, Semantic Aware Sampling</strong>
+</h2> 
+<p><strong>另外 MMSelfSup 现已支持 MILAN</strong>，欢迎体验 <strong>：</strong></p> 
+<p><a href="https://github.com/open-mmlab/mmselfsup/tree/dev-1.x/configs/selfsup/milan">https://github.com/open-mmlab/mmselfsup/tree/dev-1.x/configs/selfsup/milan</a></p> 
+<p>从下图可以看出 MILAN 具有三个重要部分:</p> 
+<ul><li>CLIP target</li></ul> 
+ 
+<ul><li>Prompting Decoder</li></ul> 
+ 
+<ul><li> <p>Semantic Aware Sampling</p> 
+  <ul><li><img src="https://images2.imgbox.com/91/d8/pM0PS1rt_o.png" alt=""></li></ul> </li></ul> 
+<p align="center">图 2</p> 
+<h3>
+<a id="CLIP_target_102"></a>CLIP target</h3> 
+<p>CLIP 为 OpenAI 推出的多模态大规模预训练模型。其通过在大量的图文对上进行大规模的对比学习，使得 image encoder 分支具有捕捉图片高维语义的能力，其训练范式如下图所示：</p> 
+<p align="center"><img src="https://images2.imgbox.com/ad/39/gTt6c6Wp_o.png" alt=""></p> 
+<p align="center">图 3</p> 
+<p>使用 CLIP 特征作为预测 target 可以极大地提升模型的性能，从下表第 1 和第 2 组消融实验可以看出。同时，相较于其他的 target，例如 SLIP，CLIP 具有明显的优势，这一点从下表的第 8 组和第 9 组实验可以看出。</p> 
+<p><img src="https://images2.imgbox.com/53/72/xilsSLEI_o.png" alt=""></p> 
+<p>其实，相较于这些模型，之前的模型例如 BEiT 也采用了预训练模型（DALLE）输出的特征作为预测的，但是由于这些预训练模型本身性能的问题，使得最终模型的性能也是不尽人意。</p> 
+<h3>
+<a id="Prompt_Decoder_116"></a>Prompt Decoder</h3> 
+<p>相较于 MAE 采用的使用自注意力机制作为 decoder 的基础模块，MILAN 采用的是一种类似于 CAE 所使用的 cross attention 机制。</p> 
+<p>这种机制最主要的特征是在解码阶段只会去更新 mask token 的特征，而保持 encoder 输出的可见 token 的特征不变。</p> 
+<p>这样做的一个明显的好处就是可以降低解码阶段的计算量。同时在与 CLIP target 配合使用的时候，可以进一步提升模型的精度。</p> 
+<h3>
+<a id="Semantic_Aware_Sampling_124"></a>Semantic Aware Sampling</h3> 
+<p>目前大多数图片掩码学习的算法都是使用的随机掩码策略，这种策略虽然简单，但是对需要 mask 的区域进行无差别的对待，可能使得很多具有更多语义信息的地方被 mask 掉（如，前景物体）。</p> 
+<p>所以 MILAN 采用了一个 semantic aware 的 mask 策略。具体而言就是，通过 CLIP 输出的特征，计算各个地方被 mask 的概率，依赖这种概率去 mask 图片，使得具有丰富语义信息的地方得以保留。</p> 
+<p>由于 CLIP 的特征具有提取图片语义的能力，所以这种策略是合理的。通过上表的第 4 组实验也可以看出，这种策略也是有效的。</p> 
+<h2>
+<a id="BEiTv2_135"></a>BEiT-v2</h2> 
+<p><strong>TL;DR: VQ-KD 训练, Class Token Pretraining</strong></p> 
+<p><strong>MMSelfSup 现已支持 BEiT(</strong> <strong>https://github.com/open-mmlab/mmselfsup/tree/dev-1.x/configs/selfsup/beit</strong> <strong>), 同时 BEiT-v2 也在加速支持中</strong></p> 
+<p>BEiT-v2 是 BEiT 的拓展，两者主要的差距在于以下两点:</p> 
+<ol><li>BEiT-v2 使用 CLIP 作为 teacher，自己设计了一套范式蒸馏得到了一个具有更好性能的目标提取器；</li></ol> 
+ 
+<ol start="2"><li>为了使得 class token 具有整张图的全局表达能力，将 encoder 最后一层的 cls token 连同其中某一层的特征一起送入了一个比较轻量的 decoder，从而引入另外一个重建损失。</li></ol> 
+<h3>
+<a id="VQKD_149"></a>VQ-KD</h3> 
+<p>VQ-KD 的训练方式如下图所示，对于每一张图片，encoder 吐出的特征去一个预先定义好的 Codebook 寻找一个离当前特征最近的一个特征，然后将这个找到的特征喂入后面的 decoder 重建 CLIP 输出的特征。当训练结束之后，只有图中的 tokenizer encoder 被用于后面预训练中的目标特征提取。</p> 
+<p><img src="https://images2.imgbox.com/d8/37/uGo7VrQP_o.png" alt=""></p> 
+<p align="center">图 4</p> 
+<h3>
+<a id="Class_Token_Pretraining_163"></a>Class Token Pretraining</h3> 
+<p>如图 5 的右侧所示，Class Token Pretraining 的具体做法是将 encoder 最后一层的 class token 连接到encoder 的其中某一层输出的 token，这新组成的一组输入喂入额外的一个 encoder 中进行解码，最终完成整张图特征的重建。这样做的目的是为了改善 class token 的全局特征表达能力。</p> 
+<p><img src="https://images2.imgbox.com/8f/25/sxGiZ8DM_o.png" alt=""></p> 
+<p align="center">图 5</p> 
+<p>这样做，本人认为基于的一个假设应该是：只有最后一层的 class token 具有良好的全局表达能力，其才可能在解码阶段将图片的全局语义传递给其他 token，从而完成整张图的重建。通过下表的消融实验也可以发现，class token pretraining 可以极大地改善模型的 linear probing 精度。</p> 
+<p><img src="https://images2.imgbox.com/87/f8/a8VPxXPO_o.png" alt=""></p> 
+<h2>
+<a id="_181"></a>总结</h2> 
+<p>今天我们讲了目前几种基于 CLIP 的图片掩码学习算法，总结一下，采用 CLIP 的特征作为目标特征，由于这种特征包含丰富的语义信息，相较于使用纯像素的方法，其收敛更快（例如，MILAN 预训练 400 epoch 也能够达到不错的效果）, 下游表现更好。</p> 
+<p>但是，采用这种方式也会让整个预训练的 pipeline 变得更加复杂，同时引入额外的计算量。</p> 
+<p>目前，MMSelfSup 已经支持了目前主流的图片掩码学习算法，如 MAE, SimMIM, CAE，以及上面提到的 MILAN, 对于上文提到的其他几种蒸馏类型的图片掩码学习算法也在积极支持中, 欢迎大家使用 <a href="https://github.com/open-mmlab/mmselfsup">MMSelfSup</a>，如果发现不错，也希望大家多多 Star、Issue 和 PR！</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

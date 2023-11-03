@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>raft一致性协议 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">raft一致性协议</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p>本文主要参考大佬文章<a href="https://juejin.cn/post/6907151199141625870#heading-3">深入理解raft协议</a>，并适当修正了其中自认为表述有误差的地方。</p> 
+<h3>
+<a id="1_1"></a>1、一致性协议说明：</h3> 
+<p>布式存储系统通常通过维护多个副本来进行容错，提高系统的可用性。要实现此目标，就必须要解决分布式存储系统的最核心问题：维护多个副本的一致性。这里说的是强一致性</p> 
+<p>首先需要解释一下什么是一致性（consensus）,它是构建具有容错性（fault-tolerant）的分布式系统的基础。 在一个具有一致性的性质的集群里面，同一时刻所有的结点对存储在其中的某个值都有相同的结果，即对其共享的存储保持一致。集群具有自动恢复的性质，当少数结点失效的时候不影响集群的正常工作，当大多数集群中的结点失效的时候，集群则会停止服务（不会返回一个错误的结果）。</p> 
+<p>共识算法（Consensus Algorithm）就是用来做这个事情的，它保证即使在小部分（≤ (N-1)/2）节点故障的情况下，系统仍然能正常对外提供服务。共识算法通常基于replicated state machines，即所有结点都从同一个state出发，都经过同样的一些操作序列（log），最后到达同样的state。<br> <img src="https://images2.imgbox.com/38/28/zSNQbIfh_o.png" alt="在这里插入图片描述"></p> 
+<p>系统中每个结点有三个组件：</p> 
+<ul>
+<li>状态机：当我们说一致性的时候，实际就是在说要保证这个状态机的一致性。状态机会从log里面取出所有的命令，然后执行一遍，得到的结果就是我们对外提供的保证了一致性的数据</li>
+<li>Log：保存了所有修改记录</li>
+<li>一致性模块：一致性模块算法就是用来保证写入的log的命令的一致性，这也是raft算法核心内容</li>
+</ul> 
+<h3>
+<a id="2raftUnderstandable_Distributed_Consensus_18"></a>2、raft协议（Understandable Distributed Consensus）</h3> 
+<p>Paxos是最先提出和被证明的分布式一致性算法，后续的算法都是基于它发展而来的，但是它难以理解，存在诸多限制难实现。</p> 
+<p>Raft协议是Paxos的扩展，工程可实现的。它分成3个部分来增加可理解性，分别是领导人选举、日志复制和安全性。</p> 
+<ul>
+<li>领导人选举，Raft协议规定集群中必须有且只有一个领导者，客户端所有的读写请求最终都是发给领导人来处理的。在没有领导人的情况下，集群不对外提供服务。所以领导人选举是首要要解决的问题。</li>
+<li>日志复制，一致性算法是从复制状态机的背景下提出的，复制状态机通常都是基于复制日志实现的。在整个集群中，通过日志按顺序执行，来保证集群中节点上的数据最终都是一致的。保证复制日志相同就是一致性算法的工作，所以协议针对日志复制，定义了一系列需遵守的规范。</li>
+<li>安全性限制，因为主节点的责任是如此之大，所以节点们在选主的时候一定要谨慎，只有<strong>符合条件</strong>的节点才可以当选主节点。此外主节点在处理操作日志的时候也一定要谨慎，为了保证集群对外展现的一致性，不可以<strong>覆盖或删除</strong>前任主节点已经处理成功的操作日志。所谓的“谨慎处理”，其实就是在选主和提交日志的时候进行一些限制，这一部分在 Raft 核心算法中叫<strong>安全性</strong>（<strong>Safety</strong>）。</li>
+</ul> 
+<h4>
+<a id="21_Leader_election_28"></a>2.1 领导人选举（Leader election）</h4> 
+<h5>
+<a id="211__30"></a>2.1.1 节点角色</h5> 
+<p>Raft 集群中每个节点都处于以下三种角色之一：</p> 
+<ul>
+<li> <p><strong>Leader</strong>: 所有请求的处理者，接收客户端发起的操作请求，写入本地日志后同步至集群其它节点。</p> </li>
+<li> <p><strong>Follower</strong>: 请求的被动更新者，从 leader 接收更新请求，写入本地文件。如果客户端的操作请求发送给了 follower，会首先由 follower 重定向给 leader。</p> </li>
+<li> <p><strong>Candidate</strong>: 如果 follower 在一定时间内没有收到 leader 的心跳，则判断 leader 可能已经故障，此时启动 leader election 过程，本节点切换为 candidate 直到选主结束。</p> </li>
+</ul> 
+<h5>
+<a id="212__40"></a>2.1.2 任期</h5> 
+<p>每开始一次新的选举，称为一个<strong>任期</strong>（<strong>term</strong>），每个 term 都有一个严格递增的整数与之关联。</p> 
+<p>每当 candidate 触发 leader election 时都会增加 term，如果一个 candidate 赢得选举，他将在本 term 中担任 leader 的角色。但并不是每个 term 都一定对应一个 leader，有时候某个 term 内会由于选举超时导致选不出 leader，这时 candicate 会递增 term 号并开始新一轮选举。<br> <img src="https://images2.imgbox.com/8c/f1/1tfA1H4y_o.png" alt="在这里插入图片描述"></p> 
+<p>Term 更像是一个<strong>逻辑时钟</strong>（<strong>logic clock</strong>）的作用，有了它，就可以发现哪些节点的状态已经过期。每一个节点都保存一个 current term，在通信时带上这个 term 号。</p> 
+<p>节点间通过 RPC 来通信，主要有两类 RPC 请求：</p> 
+<ul>
+<li>
+<strong>RequestVote RPCs</strong>: 用于 candidate 拉票选举。</li>
+<li>
+<strong>AppendEntries RPCs</strong>: 用于 leader 向其它节点复制日志以及同步心跳。</li>
+</ul> 
+<h5>
+<a id="213__55"></a>2.1.3 节点状态转换</h5> 
+<p>我们知道集群每个节点的状态都只能是 leader、follower 或 candidate，那么节点什么时候会处于哪种状态呢？下图展示了一个节点可能发生的状态转换：</p> 
+<p><img src="https://images2.imgbox.com/f5/3c/iIxTdnXy_o.png" alt="在这里插入图片描述"></p> 
+<h5>
+<a id="214_Follower_62"></a>2.1.4 Follower状态转换过程</h5> 
+<p>Raft 的选主基于一种心跳机制，集群中每个节点刚启动时都是 follower 身份（<strong>Step: starts up</strong>），leader 会周期性的向所有节点发送心跳包来维持自己的权威，那么首个 leader 是如何被选举出来的呢？方法是如果一个 follower 在一段时间内没有收到任何心跳，也就是选举超时，那么它就会主观认为系统中没有可用的 leader，并发起新的选举（<strong>Step: times out, starts election</strong>）。</p> 
+<p>这里有一个问题，即这个“选举超时时间”该如何制定？如果所有节点在同一时刻启动，经过同样的超时时间后同时发起选举，整个集群会变得低效不堪，极端情况下甚至会一直选不出一个主节点。Raft 巧妙的使用了一个随机化的定时器，让每个节点的“超时时间”在一定范围内随机生成，这样就大大的降低了多个节点同时发起选举的可能性。</p> 
+<p>[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-gJt3eRxV-1639480136195)(D:Users80304473Picturesraftraft1.png)]</p> 
+<h5>
+<a id="215_Candicate_70"></a>2.1.5 Candicate状态转换过程</h5> 
+<p>Follower 切换为 candidate 并向集群其他节点发送“请给自己投票”的消息后，接下来会有三种可能的结果，也即上面<strong>节点状态图中 candidate 状态向外伸出的三条线</strong>。</p> 
+<p>每个节点针对每个 term 只能投出一张票，并且按照先到先得的原则。这个规则确保只有一个 candidate 会成为 leader。</p> 
+<ul><li><strong>1、选举成功（Step: receives votes from majority of servers）</strong></li></ul> 
+<p>当candicate从整个集群的<strong>大多数</strong>（N/2+1）节点获得了针对同一 term 的选票时，它就赢得了这次选举，立刻将自己的身份转变为 leader 并开始向其它节点发送心跳来维持自己的权威。</p> 
+<p><img src="https://images2.imgbox.com/9b/dc/hjuEIugx_o.png" alt="在这里插入图片描述"></p> 
+<ul><li> <p><strong>2. 选举失败（Step: discovers current leader or new term）</strong></p> <p>Candidate 在等待投票回复的时候，可能会突然收到其它自称是 leader 的节点发送的心跳包，如果这个心跳包里携带的 term <strong>不小于</strong> candidate 当前的 term，那么 candidate 会承认这个 leader，并将身份切回 follower。这说明其它节点已经成功赢得了选举，我们只需立刻跟随即可。但如果心跳包中的 term 比自己小，candidate 会拒绝这次请求并保持选举状态。</p> </li></ul> 
+<p><img src="https://images2.imgbox.com/e0/91/09lBr7HW_o.png" alt="在这里插入图片描述"></p> 
+<ul><li> <p><strong>3. 选举超时（Step: times out, new election）</strong></p> <p>第三种可能的结果是 candidate 既没有赢也没有输。如果有多个 follower 同时成为 candidate，选票是可能被瓜分的，如果没有任何一个 candidate 能得到大多数节点的支持，那么每一个 candidate 都会超时。此时 candidate 需要增加自己的 term，然后发起新一轮选举。如果这里不做一些特殊处理，选票可能会一直被瓜分，导致选不出 leader 来。这里的“特殊处理”指的就是前文所述的<strong>随机化选举超时时间</strong>。</p> </li></ul> 
+<p><img src="https://images2.imgbox.com/59/fc/UCWoWltq_o.png" alt="在这里插入图片描述"></p> 
+<h5>
+<a id="216_Leader__99"></a>2.1.6 Leader 状态转换过程</h5> 
+<p>节点状态图中的最后一条线是：<strong>discovers server with higher term</strong>。想象一个场景：当 leader 节点发生了宕机或网络断连，此时其它 follower 会收不到 leader 心跳，首个触发超时的节点会变为 candidate 并开始拉票（由于随机化各个 follower 超时时间不同），由于该 candidate 的 term 大于原 leader 的 term，因此所有 follower 都会投票给它，这名 candidate 会变为新的 leader。一段时间后原 leader 恢复了，收到了来自新leader 的心跳包，发现心跳中的 term 大于自己的 term，此时该节点会立刻切换为 follower 并跟随的新 leader。</p> 
+<p><img src="https://images2.imgbox.com/ce/77/cIaTiqo8_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/d3/29/HAzXL6Ja_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/87/2d/0r51oDHQ_o.png" alt="在这里插入图片描述"></p> 
+<p>以上就是 Raft 的选主逻辑，但还有一些细节（譬如是否给该 candidate 投票还有一些其它条件）依赖算法的其它部分基础，我们会在后续“安全性”一章描述。</p> 
+<p>当票选出 leader 后，leader 也该承担起相应的责任了，这个责任是什么？就是下一章将介绍的“日志复制”。</p> 
+<h4>
+<a id="22__112"></a>2.2 日志复制机制解析</h4> 
+<h5>
+<a id="221__114"></a>2.2.1 整体流程解析</h5> 
+<p>一旦 leader 被票选出来，它就承担起领导整个集群的责任了，开始接收客户端请求，并将操作包装成日志，并复制到其它节点上去。</p> 
+<p>整体流程如下：</p> 
+<ul>
+<li>Leader 为客户端提供服务，客户端的每个请求都包含一条即将被状态复制机执行的指令。</li>
+<li>Leader 把该指令作为一条新的日志附加到自身的日志集合，然后向其它节点发起<strong>附加条目请求</strong>（<strong>AppendEntries RPC</strong>），来要求它们将这条日志附加到各自本地的日志集合。</li>
+<li>当这条日志已经确保被<strong>安全的复制</strong>，即大多数（N/2+1）节点都已经复制后，leader 会将该日志 <strong>apply</strong> 到它本地的状态机中，然后把操作成功的结果返回给客户端，该条日志是commited状态。</li>
+</ul> 
+<p>整个集群的日志模型可以宏观表示为下图（x ← 3 代表 x 赋值为 3）：</p> 
+<p><img src="https://images2.imgbox.com/d4/3e/p4TOkDY8_o.png" alt="在这里插入图片描述"></p> 
+<p>每条日志除了存储状态机的操作指令外，还会拥有一个<strong>唯一的整数索引值</strong>（<strong>log index</strong>）来表明它在日志集合中的位置。此外，每条日志还会存储一个 <strong>term</strong> 号（日志条目方块最上方的数字，相同颜色 term 号相同），该 term 表示 leader 收到这条指令时的当前任期，term 相同的 log 是由同一个 leader 在其任期内发送的。</p> 
+<p>当一条日志被 leader 节点认为可以安全的 apply 到状态机时，称这条日志是 <strong>committed</strong>（上图中的 <strong>committed entries</strong>）。那么什么样的日志可以被 commit 呢？答案是：<strong>当 leader 得知这条日志被集群过半的节点复制成功时</strong>。因此在上图中我们可以看到 (term3, index7) 这条日志以及之前的日志都是 committed，尽管有两个节点拥有的日志并不完整。</p> 
+<p>Raft 保证所有 committed 日志都已经被<strong>持久化</strong>，且“<strong>最终</strong>”一定会被状态机apply。</p> 
+<h5>
+<a id="222__135"></a>2.2.2 对日志一致性的保证</h5> 
+<p>Raft 保证：<strong>如果不同的节点日志集合中的两个日志条目拥有相同的 term 和 index，那么它们一定存储了相同的指令。</strong></p> 
+<p>为什么可以作出这种保证？因为 Raft 要求 leader 在一个 term 内针对同一个 index 只能创建一条日志，并且永远不会修改它。</p> 
+<p>同时 Raft 也保证：<strong>如果不同的节点日志集合中的两个日志条目拥有相同的 term 和 index，那么它们之前的所有日志条目也全部相同。</strong></p> 
+<p>这是因为 leader 发出的 AppendEntries RPC 中会额外携带<strong>上一条</strong>日志的 (term, index)，如果 follower 在本地找不到相同的 (term, index) 日志，则<strong>拒绝接收这次新的日志</strong>。</p> 
+<h5>
+<a id="223__145"></a>2.2.3 如何处理日志不一致</h5> 
+<p>在所有节点正常工作的时候，leader 和 follower的日志总是保持一致，AppendEntries RPC 也永远不会失败。然而我们总要面对任意节点随时可能宕机的风险，如何在这种情况下继续保持集群日志的一致性才是我们真正要解决的问题。</p> 
+<p>Raft 是如何应对这么多不一致场景的呢？其实方式很简单暴力，想想 <strong>Strong Leader</strong> 这个词。</p> 
+<p><strong>Raft 强制要求 follower 必须复制 leader 的日志集合来解决不一致问题。</strong></p> 
+<p>也就是说，follower 节点上任何与 leader 不一致的日志，都会被 leader 节点上的日志所覆盖。这并不会产生什么问题，因为某些选举上的限制，如果 follower 上的日志与 leader 不一致，那么该日志在 follower 上<strong>一定是未提交的</strong>。未提交的日志并不会应用到状态机，也不会被外部的客户端感知到。</p> 
+<p>要使得 follower 的日志集合跟自己保持完全一致，leader 必须先找到二者间<strong>最后一次</strong>达成一致的地方。因为一旦这条日志达成一致，在这之前的日志一定也都一致（回忆下前文）。这个确认操作是在 AppendEntries RPC 的一致性检查步骤完成的。</p> 
+<p>Leader 针对每个 follower 都维护一个 <strong>next index</strong>，表示下一条需要发送给该follower 的日志索引。当一个 leader 刚刚上任时，它初始化所有 next index 值为自己最后一条日志的 index+1。但凡某个 follower 的日志跟 leader 不一致，那么下次 AppendEntries RPC 的一致性检查就会失败。在被 follower 拒绝这次 Append Entries RPC 后，leader 会减少 next index 的值并进行重试。</p> 
+<p>最终一定会存在一个 next index 使得 leader 和 follower 在这之前的日志都保持一致。极端情况下 next index 为1，表示 follower 没有任何日志与 leader 一致，leader 必须从第一条日志开始同步。</p> 
+<p>针对每个 follower，一旦确定了 next index 的值，leader 便开始从该 index 同步日志，follower 会删除掉现存的不一致的日志，保留 leader 最新同步过来的。</p> 
+<p>整个集群的日志会在这个简单的机制下自动趋于一致。此外要注意，<strong>leader 从来不会覆盖或者删除自己的日志</strong>，而是强制 follower 与它保持一致。</p> 
+<p>这就要求集群票选出的 leader 一定要具备“日志的正确性”，这也就关联到了前文提到的：<strong>选举上的限制。</strong></p> 
+<h5>
+<a id="224__167"></a>2.2.4 可能出现的日志不一致场景</h5> 
+<p>下图展示了一个 term8 的 leader 刚上任时，集群中日志可能存在的混乱情况。例如 follower 可能缺少一些日志（a ~ b），可能多了一些未提交的日志（c ~ d），也可能既缺少日志又多了一些未提交日志（e ~ f）。</p> 
+<p><em>注：Follower 不可能比 leader 多出一些已提交（committed）日志，这一点是通过选举上的限制来达成的，会在下一章《安全性》介绍。</em></p> 
+<p><img src="https://images2.imgbox.com/2d/b5/Ta74z3RQ_o.png" alt="在这里插入图片描述"></p> 
+<p>我们先来尝试复现上述 a ~ f 场景，最后再讲 Raft 如何解决这种不一致问题。</p> 
+<p><strong>场景a~b. Follower 日志落后于 leader</strong></p> 
+<p>这种场景其实很简单，即 <strong>follower 宕机了一段时间</strong>，follower-a 从收到 (term6, index9) 后开始宕机，follower-b 从收到 (term4, index4) 后开始宕机。这里不再赘述。</p> 
+<p><strong>场景c. Follower 日志比 leader 多 term6</strong></p> 
+<p>当 term6 的 leader 正在将 (term6, index11) 向 follower 同步时，该 leader 发生了宕机，且此时只有 follower-c 收到了这条日志的 AppendEntries RPC。然后经过一系列的选举，term7 可能是选举超时，也可能是 leader 刚上任就宕机了，最终 term8 的 leader 上任了，成就了我们看到的场景 c。</p> 
+<p><strong>场景d. Follower 日志比 leader 多 term7</strong></p> 
+<p>当 term6 的 leader 将 (term6, index10) 成功 commit 后，发生了宕机。此时 term7 的 leader 走马上任，连续同步了两条日志给 follower，然而还没来得及 commit 就宕机了，随后集群选出了 term8 的 leader。</p> 
+<p><strong>场景e. Follower 日志比 leader 少 term5 ~ 6，多 term4</strong></p> 
+<p>当 term4 的 leader 将 (term4, index7) 同步给 follower，且将 (term4, index5) 及之前的日志成功 commit 后，发生了宕机，紧接着 follower-e 也发生了宕机。这样在 term5~7 内发生的日志同步全都被 follower-e 错过了。当 follower-e 恢复后，term8 的 leader 也刚好上任了。</p> 
+<p><strong>场景f. Follower 日志比 leader 少 term4 ~ 6，多 term2 ~ 3</strong></p> 
+<p>当 term2 的 leader 同步了一些日志（index4 ~ 6）给 follower 后，尚未来得及 commit 时发生了宕机，但它很快恢复过来了，又被选为了 term3 的 leader，它继续同步了一些日志（index7~11）给 follower，但同样未来得及 commit 就又发生了宕机，紧接着 follower-f 也发生了宕机，当 follower-f 醒来时，集群已经前进到 term8 了。</p> 
+<h4>
+<a id="23__198"></a>2.3 安全性限制</h4> 
+<p>前面的章节我们讲述了 Raft 算法是如何选主和复制日志的，然而到目前为止我们描述的<strong>这套机制还不能保证每个节点的状态机会严格按照相同的顺序 apply 日志</strong>。想象以下场景：</p> 
+<p>1、Leader 将一些日志复制到了大多数节点上，进行 commit 后发生了宕机。</p> 
+<p>2、某个 follower 并没有被复制到这些日志，但它参与选举并当选了下一任 leader。</p> 
+<p>3、新的 leader 又同步并 commit 了一些日志，这些日志覆盖掉了其它节点上的上一任 committed 日志。</p> 
+<p>4、各个节点的状态机可能 apply 了不同的日志序列，出现了不一致的情况。</p> 
+<p>因此我们需要对“选主+日志复制”这套机制加上一些额外的限制，来保证<strong>状态机的安全性</strong>，也就是 Raft 算法的正确性。</p> 
+<h5>
+<a id="231__212"></a>2.3.1 对选举的限制</h5> 
+<p>我们再来分析下前文所述的 committed 日志被覆盖的场景，根本问题其实发生在第2步。Candidate 必须有足够的资格才能当选集群 leader，否则它就会给集群带来不可预料的错误。Candidate 是否具备这个资格可以在选举时添加一个小小的条件来判断，即：</p> 
+<p><strong>每个 candidate 必须在 RequestVote RPC 中携带自己本地日志的最新 (term, index)，如果 follower 发现这个 candidate 的日志还没有自己的新，则拒绝投票给该 candidate。</strong></p> 
+<p>Candidate 想要赢得选举成为 leader，必须得到集群大多数节点的投票，那么<strong>它的日志就一定至少不落后于大多数节点</strong>。又因为一条日志只有复制到了大多数节点才能被 commit，因此<strong>能赢得选举的 candidate 一定拥有所有 committed 日志</strong>。</p> 
+<p>因此前一篇文章我们才会断定地说：Follower 不可能比 leader 多出一些 committed 日志。</p> 
+<p>比较两个 (term, index) 的逻辑非常简单：如果 term 不同 term 更大的日志更新，否则 index 大的日志更新。</p> 
+<h5>
+<a id="232__224"></a>2.3.2 对提交的限制</h5> 
+<p>除了对选举增加一点限制外，我们还需对 commit 行为增加一点限制，来完成我们 Raft 算法核心部分的最后一块拼图。</p> 
+<p>回忆下什么是 commit：</p> 
+<blockquote> 
+ <p>当 leader 得知某条日志被集群过半的节点复制成功时，就可以进行 commit，committed 日志一定最终会被状态机 apply。</p> 
+</blockquote> 
+<p>所谓 commit 其实就是对日志简单进行一个标记，表明其可以被 apply 到状态机，并针对相应的客户端请求进行响应。</p> 
+<p>然而 leader 并不能在任何时候都随意 commit 旧任期留下的日志，即使它已经被复制到了大多数节点。Raft 论文给出了一个经典场景：</p> 
+<p><img src="https://images2.imgbox.com/df/be/wnpEHjYx_o.png" alt="在这里插入图片描述"></p> 
+<p>上图从左到右按时间顺序模拟了问题场景。</p> 
+<p><strong>阶段a</strong>：S1 是 leader，收到请求后将 (term2, index2) 只复制给了 S2，尚未复制给 S3 ~ S5。</p> 
+<p><strong>阶段b</strong>：S1 宕机，S5 当选 term3 的 leader（S3、S4、S5 三票），收到请求后保存了 (term3, index2)，尚未复制给任何节点。</p> 
+<p><strong>阶段c</strong>：S5 宕机，S1 恢复，S1 重新当选 term4 的 leader，继续将 (term2, index2) 复制给了 S3，已经满足大多数节点，我们将其 commit。</p> 
+<p><strong>阶段d</strong>：在阶段d，S1又很不幸地下线了，系统触发一次选主，而S5有可能被选为新的Leader（这是因为S5可以满足作为主的一切条件：1. term = 5 &gt; 4, 2. 最新的日志index为2，其他大多数节点（如S2/S3/S4的日志也是2），然后S5会将自己的日志更新到Followers，于是S2、S3中已经被提交的日志（2，2）被截断了，这是致命性的错误，因为一致性协议中不允许出现已经应用到状态机中的日志被截断。</p> 
+<p>为了避免这种错误，我们需要添加一个额外的限制：</p> 
+<p><strong>Leader 只允许 commit 包含当前 term 的日志。</strong></p> 
+<p>针对上述场景，问题发生在阶段c，即使作为 term4 leader 的 S1 将 (term2, index2) 复制给了大多数节点，它也不能直接将其 commit，而是必须等待 term4 的日志到来并成功复制后，一并进行 commit。</p> 
+<p><strong>阶段e</strong>：在添加了这个限制后，要么 (term2, index2) 始终没有被 commit，这样 S5 在阶段d将其覆盖就是安全的；要么 (term2, index2) 同 (term4, index3) 一起被 commit，这样 S5 根本就无法当选 leader，因为大多数节点的日志（term4, index3）都比它（term5, index2）新，也就不存在前边的问题了。</p> 
+<p>以上便是对算法增加的两个小限制，它们对确保状态机的安全性起到了至关重要的作用。</p> 
+<h4>
+<a id="3_260"></a>3、总结与扩展</h4> 
+<h5>
+<a id="31_raft_262"></a>3.1 raft协议总结</h5> 
+<p>raft将共识问题分解成两个相对独立的问题，leader election，log replication。流程是先选举出leader，然后leader负责复制、提交log（log中包含command）</p> 
+<p>为了在任何异常情况下系统不出错，即满足safety属性，对leader election，log replication两个子问题有诸多约束</p> 
+<p>leader election约束：</p> 
+<ul>
+<li>同一任期内最多只能投一票，先来先得</li>
+<li>选举人必须比自己知道的更多（比较term，log index）</li>
+</ul> 
+<p>log replication约束：</p> 
+<ul>
+<li>一个log被复制到大多数节点，就是committed，保证不会回滚</li>
+<li>leader一定包含最新的committed log，因此leader只会追加日志，不会删除覆盖日志</li>
+<li>不同节点，某个位置上日志相同，那么这个位置之前的所有日志一定是相同的</li>
+</ul> 
+<h5>
+<a id="32_raft_279"></a>3.2 raft协议扩展</h5> 
+<ol>
+<li> <p><strong>集群成员变更</strong>：如何安全地改变集群的节点成员。</p> </li>
+<li> <p><strong>日志压缩</strong>：如何解决日志集合无限制增长带来的问题。</p> <p>3.线性一致性实现与读优化</p> </li>
+</ol> 
+<h4>
+<a id="4_286"></a>4、动画展示</h4> 
+<p>http://thesecretlivesofdata.com/raft/<br> 另外有兴趣的读者可以查看raft协议实现<a href="http://ratis.incubator.apache.org/">Apache Ratis</a></p> 
+<h4>
+<a id="5CAPBASE_291"></a>5、CAP定理与BASE理论</h4> 
+<p>CAP是指在一个分布式系统中，一致性（Consistency）、可用性（Availability）、分区容错性（Partition tolerance）这三个要素最多只能同时实现两点，不可能三者兼顾。</p> 
+<ul><li>Consistency 一致性</li></ul> 
+<p>一致性指“all nodes see the same data at the same time”，即更新操作成功并返回客户端完成后，所有节点在同一时间的数据完全一致。等同于所有节点拥有数据的最新版本。（强一致性）</p> 
+<ul><li>Availability 可用性</li></ul> 
+<p>可用性指“Reads and writes always succeed”，即服务一直可用，而且是正常响应时间。</p> 
+<p>对于一个可用性的分布式系统，每一个非故障的节点必须对每一个请求作出响应。如果不考虑一致性，这个是很好实现的，立即返回本地节点的数据即可，而不需要等到数据一致才返回。</p> 
+<ul><li>Partition Tolerance 分区容忍性</li></ul> 
+<p>Tolerance也可以翻译为容错，分区容忍性具体指“the system continues to operate despite arbitrary message loss or failure of part of the system”，即系统容忍网络出现分区，分区之间网络不可达的情况，分区容忍性和扩展性紧密相关，Partition Tolerance特指在遇到某节点或网络分区故障的时候，仍然能够对外提供满足一致性和可用性的服务。</p> 
+<p>具体情况：</p> 
+<ul>
+<li>传统数据库都是假设不保证P的，因为传统数据库都是单机或者很小的本地集群，假设网络不存在问题，出现问题手工修复。所以，损失分区容错§只保证CA相当于就是一个单体应用，根本不是分布式，其实在分布式出现之前都是这么搭系统，但是倘若这种系统的节点之一挂了，整个系统就直接宕掉了，不符合目前现实需求(高扩展容错)。分布式是要求单个节点故障(概率太高了)系统仍能完成运行。搭建分布式就是间接要求必须保证P，即P是现实，那C和A就无法同时做到，需要在这两者之间做平衡。</li>
+<li>像银行系统，是通过损失可用性(A)来保障CP，银行系统是内网，很少出现分区不可达故障状态，一旦出现，不可达的节点对应的ATM就没法使用，即变为不可用。同时如果数据在各分区未达到一致，ATM也是Loading状态即不可用。</li>
+<li>在互联网实践中，可用性又是极其重要的，因此大部分是通过损失一致性©来保障AP，当然也非完全牺牲一致性，使用弱一致性，即一定时间后一致的弱一致性，当数据还在同步时(WRITE之后)，使用上一次的数据。</li>
+</ul> 
+<p>BASE 理论</p> 
+<blockquote> 
+ <p>eBay 的架构师 Dan Pritchett 源于对大规模分布式系统的实践总结，在 ACM 上发表文章提出 BASE 理论，BASE 理论是对 CAP 理论的延伸，核心思想是即使无法做到强一致性（Strong Consistency，CAP 的一致性就是强一致性），但应用可以采用适合的方式达到最终一致性（Eventual Consitency）。</p> 
+</blockquote> 
+<ul>
+<li> <p><strong>基本可用(Basically Available)</strong>： 基本可用是指分布式系统在出现故障的时候，允许损失部分可用性，即保证核心可用。电商大促时，为了应对访问量激增，部分用户可能会被引导到降级页面，服务层也可能只提供降级服务。这就是损失部分可用性的体现。</p> </li>
+<li> <p><strong>软状态(Soft State)</strong>： 软状态是指允许系统存在中间状态，而该中间状态不会影响系统整体可用性。分布式存储中一般一份数据至少会有三个副本，允许不同节点间副本同步的延时就是软状态的体现。MySQL Replication 的异步复制也是一种体现。<br> ），但应用可以采用适合的方式达到最终一致性（Eventual Consitency）。</p> </li>
+<li> <p><strong>基本可用(Basically Available)</strong>： 基本可用是指分布式系统在出现故障的时候，允许损失部分可用性，即保证核心可用。电商大促时，为了应对访问量激增，部分用户可能会被引导到降级页面，服务层也可能只提供降级服务。这就是损失部分可用性的体现。</p> </li>
+<li> <p><strong>软状态(Soft State)</strong>： 软状态是指允许系统存在中间状态，而该中间状态不会影响系统整体可用性。分布式存储中一般一份数据至少会有三个副本，允许不同节点间副本同步的延时就是软状态的体现。MySQL Replication 的异步复制也是一种体现。</p> </li>
+<li> <p><strong>最终一致性(Eventual Consistency)</strong>： 最终一致性是指系统中的所有数据副本经过一定时间后，最终能够达到一致的状态。弱一致性和强一致性相反，最终一致性是弱一致性的一种特殊情况。</p> </li>
+</ul>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

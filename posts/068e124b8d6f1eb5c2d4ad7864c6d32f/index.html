@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【Linux】线程池|单例模式|STL、智能指针线程安全|读者写者问题 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Linux】线程池|单例模式|STL、智能指针线程安全|读者写者问题</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p></p> 
+<div class="toc"> 
+ <h3>文章目录</h3> 
+ <ul>
+<li><a href="#_1">线程池</a></li>
+<li><a href="#_15">线程池代码</a></li>
+<li><a href="#_388">线程池单例模式</a></li>
+<li><a href="#STL_561">STL,智能指针和线程安全</a></li>
+<li><a href="#_567">其他锁（了解）</a></li>
+<li><a href="#_577">读者写者问题（了解）</a></li>
+</ul> 
+</div> 
+<p></p> 
+<h1>
+<a id="_1"></a>线程池</h1> 
+<blockquote> 
+ <p>我们去处理任务时，一个任务对应一个创建一个线程进行处理，效率是比较低的。我们可以预先创建一批线程，任务队列里没有任务的时候，每个线程都休眠，当队里中有任务的时候，就可以环形线程进行处理了。唤醒线程的成本比创建整个线程的成本小，这就是线程池的逻辑思想。</p> 
+</blockquote> 
+<blockquote> 
+ <p><code>线程池</code>: <strong>一种线程使用模式。线程过多会带来调度开销，进而影响缓存局部性和整体性能。而线程池维护着多个线程，等待着监督管理者分配可并发执行的任务。这避免了在处理短时间任务时创建与销毁线程的代价。线程池不仅能够保证内核的充分利用，还能防止过分调度。可用线程数量应该取决于可用的并发处理器、处理器内核、内存、网络sockets等的数量。</strong></p> 
+</blockquote> 
+<p>线程池常见的应用场景如下：</p> 
+<blockquote> 
+ <p>需要大量的线程来完成任务，且完成任务的时间比较短。</p> 
+ <p>对性能要求苛刻的应用，比如要求服务器迅速响应客户请求。</p> 
+ <p>接受突发性的大量请求，但不至于使服务器因此产生大量线程的应用。</p> 
+</blockquote> 
+<h1>
+<a id="_15"></a>线程池代码</h1> 
+<p>整体框架结构：</p> 
+<p><img src="https://images2.imgbox.com/c9/e5/3uAPFSzO_o.png" alt="image-20230424194947899"></p> 
+<p><strong>Thread.hpp</strong>的简单封装线程，下面我们进行简单的验证</p> 
+<blockquote> 
+ <p>Thread类主要成员变量是线程名，函数，线程参数，参数ID以及对应编号<br> Thread类提供了一个无参构造，完成对成员变量name的赋值。</p> 
+ <p>同时，对外主要提供了start接口和join接口，对于join接口就是线程等待，而对于start接口就是创建线程的接口，在外部如果调用的话我们需要传入对应的函数以及线程对应的参数。</p> 
+</blockquote> 
+<pre><code class="prism language-c++">#pragma once
+#include &lt;pthread.h&gt;
+#include &lt;iostream&gt;
+#include &lt;cassert&gt;
+#include &lt;string&gt;
+#include &lt;functional&gt;
+namespace ThreadNs
+{
+    typedef std::function&lt;void*(void*)&gt; func_t;
+    const int num  =1024;
+    class Thread
+    {
+    private:
+        static void* start_routine(void*args)
+        {
+            Thread* _this = static_cast&lt;Thread*&gt;(args);
+            return _this-&gt;callback();
+        }
+    public:
+        Thread()
+        {
+            char namebuffer[num];
+            snprintf(namebuffer,sizeof namebuffer,"thread-%d",threadnum++);
+            name_ = namebuffer;
+        }
+
+        void start(func_t func,void*args = nullptr)
+        {
+            func_ = func;
+            args_ = args;
+            int n = pthread_create(&amp;tid_,nullptr,start_routine,this);
+            assert(n==0);
+            (void)n;
+        }
+
+        void join()
+        {
+            int n = pthread_join(tid_,nullptr);
+            assert(n==0);
+            (void)n;
+        }
+
+        std::string threadname()
+        {
+            return name_;
+        }
+
+        ~Thread()
+        {}
+
+        void* callback()
+        {
+            return func_(args_);
+        }
+    private:
+        std::string name_;
+        func_t func_;
+        void *args_;
+        pthread_t tid_;
+        static int threadnum;
+    };
+    int Thread::threadnum = 1;
+}
+//进行调用
+using namespace ThreadNs;
+void* handler(void*args)
+{
+    string ret = static_cast&lt;const char*&gt;(args);
+    while(true)
+    {
+        cout&lt;&lt;ret&lt;&lt;endl;
+        sleep(1);
+    }
+    return nullptr;
+}
+int main()
+{
+    Thread t1;
+    Thread t2;
+    t1.start(handler,(void*)"thread1");
+    t2.start(handler,(void*)"thread2");
+    t1.join();
+    t1.join();
+    return 0;
+}
+</code></pre> 
+<p><img src="https://images2.imgbox.com/3f/50/JXDicDPb_o.png" alt="image-20230424203114255"></p> 
+<p>对于任务队列，可以由多个线程进行访问，我们就需要加锁保护了，把之前写过的锁的小组件引入进来：</p> 
+<p><strong>LockGuard.hpp</strong></p> 
+<pre><code class="prism language-c++">#include &lt;iostream&gt;
+#include &lt;mutex&gt;
+class Mutex
+{
+public:
+    Mutex(pthread_mutex_t*lock_p=nullptr)
+    :lock_p_(lock_p)
+    {}
+    void lock()
+    {
+        if(lock_p_) pthread_mutex_lock(lock_p_);
+    }
+    void unlock()
+    {
+        if(lock_p_) pthread_mutex_unlock(lock_p_);
+    }
+    ~Mutex()
+    {}
+private:
+    pthread_mutex_t * lock_p_;
+};
+class LockGuard
+{
+public:
+    LockGuard(pthread_mutex_t*mutex)
+    :mutex_(mutex)
+    {
+        mutex_.lock();
+    }
+
+    ~LockGuard()
+    {
+        mutex_.unlock();
+    }
+private:
+    Mutex mutex_;
+};
+</code></pre> 
+<p>线程池代码如下：创建一批线程时，我们需要实现线程的运行函数static void*handlerTask,之所以是静态的，是因为我们要把这个运行函数传递给Thread类中的func_，不能有this指针，所以是静态成员函数。而没有this指针，我们无法访问ThreadPool里面的成员变量，所以需要封装接口供其调用。</p> 
+<p>ThreadPool.hpp</p> 
+<pre><code class="prism language-c++">#pragma once
+#include "Thread.hpp"
+#include "LockGuard.hpp"
+#include &lt;vector&gt;
+#include &lt;queue&gt;
+#include &lt;pthread.h&gt;
+#include &lt;mutex&gt;
+#include &lt;unistd.h&gt;
+using namespace ThreadNs;
+const int gnum = 3;
+template &lt;class T&gt;
+class ThreadPool;
+
+template &lt;class T&gt;
+class ThreadData
+{
+public:
+    ThreadPool&lt;T&gt; *threadpool;
+    std::string name;
+public:
+    ThreadData(ThreadPool&lt;T&gt; *tp, const std::string &amp;n) : threadpool(tp), name(n)
+    { }
+};
+template &lt;class T&gt;
+class ThreadPool
+{
+private:
+    static void *handlerTask(void *args)
+    {
+        ThreadData&lt;T&gt; *td = (ThreadData&lt;T&gt; *)args;
+        ThreadPool&lt;T&gt; *threadpool = static_cast&lt;ThreadPool&lt;T&gt; *&gt;(args);
+        while (true)
+        {
+            T t;
+            {
+                LockGuard lockguard(td-&gt;threadpool-&gt;mutex());
+                while(td-&gt;threadpool-&gt;isQueueEmpty())
+                {
+                    td-&gt;threadpool-&gt;threadWait();
+                }
+                t = td-&gt;threadpool-&gt;pop(); 
+            }
+            std::cout &lt;&lt; td-&gt;name &lt;&lt; " 获取了一个任务" &lt;&lt; t.toTaskString() &lt;&lt; "并处理完成，结果是: " &lt;&lt; t() &lt;&lt; std::endl;
+        }
+        delete td;
+        return nullptr;
+    }
+public:
+    void lockQueue() { pthread_mutex_lock(&amp;_mutex); }
+    void unlockQueue() { pthread_mutex_unlock(&amp;_mutex); }
+    bool isQueueEmpty() { return _task_queue.empty(); }
+    void threadWait() { pthread_cond_wait(&amp;_cond, &amp;_mutex); }
+    T pop()
+    {
+        T t = _task_queue.front();
+        _task_queue.pop();
+        return t;
+    }
+    
+    void Push(const T &amp;in)
+    {
+        LockGuard lockguard(&amp;_mutex);
+        _task_queue.push(in);
+        pthread_cond_signal(&amp;_cond);
+    }
+
+    pthread_mutex_t *mutex()
+    {
+        return &amp;_mutex;
+    }
+
+public:
+    ThreadPool(const int &amp;num = gnum) : _num(num)
+    {
+        pthread_mutex_init(&amp;_mutex, nullptr);
+        pthread_cond_init(&amp;_cond, nullptr);
+        for (int i = 0; i &lt; _num; i++)
+        {
+            _threads.push_back(new Thread());
+        }
+    }
+
+    void run()
+    {
+        for (const auto &amp;t : _threads)
+        {
+            ThreadData&lt;T&gt; *td = new ThreadData&lt;T&gt;(this, t-&gt;threadname());
+            t-&gt;start(handlerTask, td);
+            std::cout &lt;&lt; t-&gt;threadname() &lt;&lt; "start..." &lt;&lt; std::endl;
+        }
+    }
+
+    ~ThreadPool()
+    {
+        pthread_mutex_destroy(&amp;_mutex);
+        pthread_cond_destroy(&amp;_cond);
+        for (const auto &amp;t : _threads)
+            delete t;
+    }
+private:
+    int _num;
+    std::vector&lt;Thread *&gt; _threads;
+    std::queue&lt;T&gt; _task_queue;
+    pthread_mutex_t _mutex;
+    pthread_cond_t _cond;
+};
+</code></pre> 
+<p>我们将线程池进行了模板化，因此线程池当中存储的任务类型可以是任意的；现在我们想像之前处理各种数据的计算，那么先引入任务组件Task.hpp：</p> 
+<p>Task.hpp</p> 
+<pre><code class="prism language-c++">#pragma once
+#include &lt;iostream&gt;
+#include &lt;functional&gt;
+class Task
+{
+    using func_t = std::function&lt;int(int,int ,char)&gt;;
+public:
+    Task(){}
+
+    Task(int x,int y,char op,func_t func)
+    :_x(x),_y(y),_op(op),_callback(func)
+    {}
+
+    std::string operator()()
+    {
+        int result = _callback(_x,_y,_op);
+        char buffer[1024];
+        snprintf(buffer,sizeof buffer,"%d %c %d = %d",_x,_op,_y,result);
+        return buffer;
+    }
+
+    std::string toTaskString()
+    {
+        char buffer[1024];
+        snprintf(buffer,sizeof buffer,"%d %c %d = ?",_x,_op,_y);
+        return buffer;
+    }
+private:
+    int _x;
+    int _y;
+    char _op;
+    func_t _callback;
+};
+
+const std::string oper = "+-*/%";
+int mymath(int x,int y,char op)
+{
+    int result = 0;
+    switch(op)
+    {
+    case '+':
+        result = x+y;
+        break;
+    case '-':
+        result = x-y;
+        break;
+    case '*':
+        result = x*y;
+        break;
+    case '/':
+        if(y==0)
+        {
+            std::cerr&lt;&lt;"div zero error!"&lt;&lt;std::endl;
+            result = -1;
+        }
+        else
+        {
+            result = x/y;
+        }
+        break;
+    case '%':
+        if(y==0)
+        {
+            std::cerr&lt;&lt;"mod zero error!"&lt;&lt;std::endl;
+            result = -1;
+        }
+        else
+        {
+            result = x%y;
+        }
+        break;
+    default:
+        break;
+    }
+    return result;
+}
+</code></pre> 
+<p>main.cc</p> 
+<pre><code class="prism language-c++">#include "ThreadPool.hpp"
+#include "Thread.hpp"
+#include "Task.hpp"
+#include &lt;unistd.h&gt;
+#include &lt;ctime&gt;
+int main()
+{
+   ThreadPool&lt;Task&gt;* tp = new ThreadPool&lt;Task&gt;();
+   tp-&gt;run();
+   srand(time(0));
+   int x,y;
+   char op;
+   while(true)
+   {
+    x = rand()%10+1;
+    y = rand()%20+1;
+    op  =oper[rand()%oper.size()];
+    Task t(x,y,op,mymath);
+    tp-&gt;Push(t);
+    sleep(1);
+   }
+    return 0;
+}
+</code></pre> 
+<p><img src="https://images2.imgbox.com/d6/18/NxOBtKLc_o.png" alt="image-20230425171937402"></p> 
+<h1>
+<a id="_388"></a>线程池单例模式</h1> 
+<blockquote> 
+ <p>单例模式是一种创建型设计模式，它保证一个类只有一个实例存在，并且提供一个全局访问点来访问该实例。饿汉方式和懒汉方式是两种常见的单例模式的实现方式。单例模式的主要特点包括：</p> 
+ <p>只能有一个实例。<br> 全局访问点，方便访问该实例。<br> 在很多服务器开发场景中，经常需要让服务器加载很多的数据 （上百G） 到内存中，此时往往要用一个单例的类来管理这些数据。</p> 
+</blockquote> 
+<p>我们要做的第一步就是把<strong>构造函数私有</strong>，再把拷贝构造和赋值运算符重载delete：</p> 
+<p><img src="https://images2.imgbox.com/01/d1/qUuRKj5q_o.png" alt="image-20230425184056441"></p> 
+<p><strong>接下来就要在成员变量中定义一个静态指针，方便获取单例对象。</strong>:</p> 
+<p><img src="https://images2.imgbox.com/6f/46/aO642KUi_o.png" alt="image-20230425183045650"></p> 
+<p>在设置获取单例对象的函数的时候，注意要设置成静态成员函数，因为在获取对象前根本没有对象，无法调用非静态成员函数（无this指针）:</p> 
+<p><img src="https://images2.imgbox.com/05/42/YdvDxnun_o.png" alt="image-20230425183113446"></p> 
+<p>主函数进行调用：</p> 
+<p><img src="https://images2.imgbox.com/64/c2/KWH2tlod_o.png" alt="image-20230425183858039"></p> 
+<p><img src="https://images2.imgbox.com/d4/c0/LBYo6Xdn_o.png" alt="image-20230425184131497"></p> 
+<p><strong>不过也许会出现多个线程同时申请资源的场景，所以还需要一把锁来保护这块资源，而这把锁也得设置成静态，因为<code>GetSingle()</code>函数是静态的</strong></p> 
+<p><img src="https://images2.imgbox.com/d5/29/vE7mfY0p_o.png" alt="image-20230426000144946"></p> 
+<p>运行结果:</p> 
+<p><img src="https://images2.imgbox.com/64/a4/ST3g79B7_o.png" alt="image-20230426000321053"></p> 
+<p>线程池单例模式完整代码：</p> 
+<pre><code class="prism language-C++">#pragma once
+#include "Thread.hpp"
+#include "LockGuard.hpp"
+#include &lt;vector&gt;
+#include &lt;queue&gt;
+#include &lt;pthread.h&gt;
+#include &lt;mutex&gt;
+#include &lt;unistd.h&gt;
+using namespace ThreadNs;
+const int gnum = 3;
+template &lt;class T&gt;
+class ThreadPool;
+
+template &lt;class T&gt;
+class ThreadData
+{
+public:
+    ThreadPool&lt;T&gt; *threadpool;
+    std::string name;
+
+public:
+    ThreadData(ThreadPool&lt;T&gt; *tp, const std::string &amp;n) : threadpool(tp), name(n)
+    {
+    }
+};
+template &lt;class T&gt;
+class ThreadPool
+{
+private:
+    static void *handlerTask(void *args)
+    {
+        ThreadData&lt;T&gt; *td = (ThreadData&lt;T&gt; *)args;
+        ThreadPool&lt;T&gt; *threadpool = static_cast&lt;ThreadPool&lt;T&gt; *&gt;(args);
+        while (true)
+        {
+            T t;
+            {
+                // td-&gt;threadpool-&gt;lockQueue();
+                LockGuard lockguard(td-&gt;threadpool-&gt;mutex());
+
+                while (td-&gt;threadpool-&gt;isQueueEmpty())
+                {
+                    td-&gt;threadpool-&gt;threadWait();
+                }
+                t = td-&gt;threadpool-&gt;pop(); // pop的本质是将任务从公共队列中拿到当前线程独立的栈中
+                // td-&gt;threadpool-&gt;unlockQueue();
+            }
+            std::cout &lt;&lt; td-&gt;name &lt;&lt; " 获取了一个任务" &lt;&lt; t.toTaskString() &lt;&lt; "并处理完成，结果是: " &lt;&lt; t() &lt;&lt; std::endl;
+        }
+        delete td;
+        return nullptr;
+    }
+
+    ThreadPool(const int &amp;num = gnum) : _num(num)
+    {
+        pthread_mutex_init(&amp;_mutex, nullptr);
+        pthread_cond_init(&amp;_cond, nullptr);
+        for (int i = 0; i &lt; _num; i++)
+        {
+            _threads.push_back(new Thread());
+        }
+    }
+
+    void operator=(const ThreadPool &amp;) = delete;
+    ThreadPool(const ThreadPool &amp;) = delete;
+
+public:
+    void lockQueue() { pthread_mutex_lock(&amp;_mutex); }
+    void unlockQueue() { pthread_mutex_unlock(&amp;_mutex); }
+    bool isQueueEmpty() { return _task_queue.empty(); }
+    void threadWait() { pthread_cond_wait(&amp;_cond, &amp;_mutex); }
+    T pop()
+    {
+        T t = _task_queue.front();
+        _task_queue.pop();
+        return t;
+    }
+
+    pthread_mutex_t *mutex()
+    {
+        return &amp;_mutex;
+    }
+
+public:
+    void run()
+    {
+        for (const auto &amp;t : _threads)
+        {
+            ThreadData&lt;T&gt; *td = new ThreadData&lt;T&gt;(this, t-&gt;threadname());
+            t-&gt;start(handlerTask, td);
+            std::cout &lt;&lt; t-&gt;threadname() &lt;&lt; "start..." &lt;&lt; std::endl;
+        }
+    }
+
+    void Push(const T &amp;in)
+    {
+        LockGuard lockguard(&amp;_mutex);
+        _task_queue.push(in);
+        pthread_cond_signal(&amp;_cond);
+    }
+
+    ~ThreadPool()
+    {
+        pthread_mutex_destroy(&amp;_mutex);
+        pthread_cond_destroy(&amp;_cond);
+        for (const auto &amp;t : _threads)
+            delete t;
+    }
+    static ThreadPool&lt;T&gt; *getInstance()
+    {
+        if (nullptr == tp)
+        {
+            _lock.lock();
+            if (tp == nullptr)
+            {
+                tp = new ThreadPool&lt;T&gt;();
+            }
+            _lock.unlock();
+        }
+        return tp;
+    }
+private:
+    int _num;
+    std::vector&lt;Thread *&gt; _threads;
+    std::queue&lt;T&gt; _task_queue;
+    pthread_mutex_t _mutex;
+    pthread_cond_t _cond;
+    static ThreadPool&lt;T&gt; *tp;
+    static std::mutex _lock;
+};
+template &lt;class T&gt;
+ThreadPool&lt;T&gt; *ThreadPool&lt;T&gt;::tp = nullptr;
+template &lt;class T&gt;
+std::mutex ThreadPool&lt;T&gt;::_lock;
+</code></pre> 
+<h1>
+<a id="STL_561"></a>STL,智能指针和线程安全</h1> 
+<blockquote> 
+ <p><strong>STL的容器中不是线程安全的：STL 的设计初衷是将性能挖掘到极致, 而一旦涉及到加锁保证线程安全, 会对性能造成巨大的影响.而且对于不同的容器, 加锁方式的不同, 性能可能也不同。因此 STL 默认不是线程安全. 如果需要在多线程环境下使用, 往往需要调用者自行保证线程安全.</strong></p> 
+</blockquote> 
+<blockquote> 
+ <p><strong>对于 unique_ptr, 由于只是在当前代码块范围内生效, 因此不涉及线程安全问题.对于 shared_ptr, 多个对象需要共用一个引用计数变量, 所以会存在线程安全问题. 但是标准库实现的时候考虑到了这个问题, 基于原子操作(CAS)的方式保证 shared_ptr 能够高效, 原子的操作引用计数.</strong></p> 
+</blockquote> 
+<h1>
+<a id="_567"></a>其他锁（了解）</h1> 
+<blockquote> 
+ <p><code>悲观锁</code>：在每次取数据时，总是担心数据会被其他线程修改，所以会在取数据前先加锁（读锁，写锁，行锁等），当其他线程想要访问数据时，被阻塞挂起。</p> 
+ <p><code>乐观锁</code>：每次取数据时候，总是乐观的认为数据不会被其他线程修改，因此不上锁。但是在更新数据前，会判断其他数据在更新前有没有对数据进行修改。主要采用两种方式：版本号机制和CAS操作。</p> 
+ <p><code>CAS操作</code>：当需要更新数据时，判断当前内存值和之前取得的值是否相等。如果相等则用新值更新。若不等则失败，失败则重试，一般是一个自旋的过程，即不断重试</p> 
+ <p><code>自旋锁</code>：使用自旋锁时，当多线程发生竞争锁的情况时，加锁失败的线程会忙等待（这里的忙等待可以用 while 循环等待实现），直到它拿到锁。而互斥锁加锁失败后，线程会让出 CPU 资源给其他线程使用，然后该线程会被阻塞挂起。如果成功申请临界资源的线程，临界区代码执行时间过长，自旋的线程会长时间占用 CPU 资源，所以自旋的时间和临界区代码执行的时间是成正比的关系。如果临界区代码执行的时间很短，就不应该使用互斥锁，而应该选用自旋锁。因为互斥锁加锁失败，是需要发生上下文切换的，如果临界区执行的时间比较短，那可能上下文切换的时间会比临界区代码执行的时间还要长。</p> 
+</blockquote> 
+<h1>
+<a id="_577"></a>读者写者问题（了解）</h1> 
+<blockquote> 
+ <p>读写锁由读锁和写锁两部分构成，如果只读取共享资源用读锁加锁，如果要修改共享资源则用写锁加锁。</p> 
+ <p><img src="https://images2.imgbox.com/58/27/ZqA32MAR_o.png" alt="image-20230426092116804"></p> 
+ <p>如果写锁没被写线程持有，多个读线程能够并发持有锁，提高共享资源的访问效率，因为读锁用于读取共享资源，所以多个线程持有读锁也不会破坏共享资源的数据。</p> 
+ <p>一旦写锁被线程持有后，读线程获取锁的操作会被阻塞，而其他写线程的获取写锁的操作也会被阻塞</p> 
+ <p>注意：写独占，读共享，读锁优先级高</p> 
+</blockquote> 
+<p>读者写者问题和生产者消费者模型的本质区别就是<code>消费者会取走数据，而读者不会取走数据</code>。</p> 
+<p><strong>读写锁接口</strong></p> 
+<pre><code class="prism language-c++">//初始化读写锁
+pthread_rwlock_init(pthread_rwlock_t *restrict rwlock, const pthread_rwlockattr_t *restrict attr);
+
+
+//销毁读写锁
+pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
+
+
+//读加锁
+pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
+
+
+//写加锁
+pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock);
+
+
+//解锁
+pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+</code></pre>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

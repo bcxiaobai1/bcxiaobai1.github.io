@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>FFmpeg系列（五）—— 音频重采样 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">FFmpeg系列（五）—— 音频重采样</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul>
+<li><a href="#_3">为什么要重采样</a></li>
+<li><a href="#_9">完整代码</a></li>
+<li><a href="#_161">运行结果</a></li>
+</ul>
+</div>
+<p></p> 
+<h1>
+<a id="_3"></a>为什么要重采样</h1> 
+<blockquote> 
+ <p>从设备采集的音频数据与编码器要求的数据不一致<br> 扬声器要求的音频数据与要播放的音频数据不一致<br> 更方便运算（回音消除须使用单声道，需要先转换）</p> 
+</blockquote> 
+<p>比如说语音识别，需要很低的采样率就可以了，高了增加了数据量，毫无用处，这时候就需要进行音频重采样，重采样可以改变音频采样值或采样格式。</p> 
+<h1>
+<a id="_9"></a>完整代码</h1> 
+<p>代码参考了FFmpeg示例，利用 fill_samples() 函数生成正弦波音频数据，然后，实现将48000采样值转换成44100的功能。代码一开始做了最基本的初始化，然后分配空间，计算采样值，最后进行采样值的转换，将转换后的数据写入本地文件。代码中的关键函数是 swr_convert()，采样值的转换就是靠他完成。<br> 以下代码在Qt5.14.0中验证OK，代码如下：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">__cplusplus</span></span>
+<span class="token keyword">extern</span> <span class="token string">"C"</span>
+<span class="token punctuation">{<!-- --></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;libavutil/opt.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;libavutil/channel_layout.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;libavutil/samplefmt.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;libswresample/swresample.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">__cplusplus</span></span>
+<span class="token punctuation">}</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">IN_RATE</span>  <span class="token expression"><span class="token number">48000</span>  </span><span class="token comment">// 输入采样率</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">OUT_RATE</span> <span class="token expression"><span class="token number">44100</span>  </span><span class="token comment">// 输出采样率</span></span>
+
+<span class="token comment">// 获取采样格式</span>
+<span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">get_format_from_sample_fmt</span><span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token operator">*</span>fmt<span class="token punctuation">,</span>
+                                      <span class="token keyword">enum</span> <span class="token class-name">AVSampleFormat</span> sample_fmt<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">char</span> <span class="token operator">*</span>lettle_end <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token keyword">char</span> <span class="token operator">*</span>big_end    <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token keyword">switch</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">int</span><span class="token punctuation">)</span>sample_fmt<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">// 根据枚值获取音频编码格式字符串</span>
+        <span class="token keyword">case</span> AV_SAMPLE_FMT_U8<span class="token operator">:</span>  big_end <span class="token operator">=</span> <span class="token string">"u8"</span><span class="token punctuation">;</span>    lettle_end <span class="token operator">=</span> <span class="token string">"u8"</span><span class="token punctuation">;</span>    <span class="token keyword">break</span><span class="token punctuation">;</span> <span class="token comment">// 大端模式和小端模式</span>
+        <span class="token keyword">case</span> AV_SAMPLE_FMT_S16<span class="token operator">:</span> big_end <span class="token operator">=</span> <span class="token string">"s16be"</span><span class="token punctuation">;</span> lettle_end <span class="token operator">=</span> <span class="token string">"s16le"</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token keyword">case</span> AV_SAMPLE_FMT_S32<span class="token operator">:</span> big_end <span class="token operator">=</span> <span class="token string">"s32be"</span><span class="token punctuation">;</span> lettle_end <span class="token operator">=</span> <span class="token string">"s32le"</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token keyword">case</span> AV_SAMPLE_FMT_FLT<span class="token operator">:</span> big_end <span class="token operator">=</span> <span class="token string">"f32be"</span><span class="token punctuation">;</span> lettle_end <span class="token operator">=</span> <span class="token string">"f32le"</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token keyword">case</span> AV_SAMPLE_FMT_DBL<span class="token operator">:</span> big_end <span class="token operator">=</span> <span class="token string">"f64be"</span><span class="token punctuation">;</span> lettle_end <span class="token operator">=</span> <span class="token string">"f64le"</span><span class="token punctuation">;</span> <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token keyword">default</span><span class="token operator">:</span> <span class="token keyword">return</span> <span class="token function">AVERROR</span><span class="token punctuation">(</span>EINVAL<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token operator">*</span>fmt <span class="token operator">=</span> <span class="token function">AV_NE</span><span class="token punctuation">(</span>big_end<span class="token punctuation">,</span> lettle_end<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// 一般计算机都是小端模式，宏展开为 *fmt = lettle_end</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// 交错模式生成输入源</span>
+<span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">fill_samples</span><span class="token punctuation">(</span><span class="token keyword">double</span> <span class="token operator">*</span>dst<span class="token punctuation">,</span> <span class="token keyword">int</span> nb_samples<span class="token punctuation">,</span> <span class="token keyword">int</span> nb_channels<span class="token punctuation">,</span> <span class="token keyword">int</span> sample_rate<span class="token punctuation">,</span> <span class="token keyword">double</span> <span class="token operator">*</span>t<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> i<span class="token punctuation">,</span> j<span class="token punctuation">;</span>
+    <span class="token keyword">double</span> tincr <span class="token operator">=</span> <span class="token number">1.0</span> <span class="token operator">/</span> sample_rate<span class="token punctuation">,</span> <span class="token operator">*</span>dstp <span class="token operator">=</span> dst<span class="token punctuation">;</span>
+    <span class="token keyword">const</span> <span class="token keyword">double</span> c <span class="token operator">=</span> <span class="token number">2</span> <span class="token operator">*</span> M_PI <span class="token operator">*</span> <span class="token number">440.0</span><span class="token punctuation">;</span> <span class="token comment">// 440Hz</span>
+
+    <span class="token comment">// 产生440Hz重复通道的正弦信号</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> nb_samples<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token operator">*</span>dstp <span class="token operator">=</span> <span class="token function">sin</span><span class="token punctuation">(</span>c <span class="token operator">*</span> <span class="token operator">*</span>t<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>j <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> nb_channels<span class="token punctuation">;</span> j<span class="token operator">++</span><span class="token punctuation">)</span>
+            dstp<span class="token punctuation">[</span>j<span class="token punctuation">]</span> <span class="token operator">=</span> dstp<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+        dstp <span class="token operator">+=</span> nb_channels<span class="token punctuation">;</span>
+        <span class="token operator">*</span>t <span class="token operator">+=</span> tincr<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 输入参数</span>
+    <span class="token keyword">struct</span> <span class="token class-name">SwrContext</span>   <span class="token operator">*</span>swr_ctx        <span class="token operator">=</span> <span class="token function">swr_alloc</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>               <span class="token comment">// 重采样上下文</span>
+    <span class="token keyword">enum</span> <span class="token class-name">AVSampleFormat</span> src_sample_fmt  <span class="token operator">=</span> AV_SAMPLE_FMT_DBL<span class="token punctuation">;</span>         <span class="token comment">// 交错采样模式</span>
+    <span class="token keyword">enum</span> <span class="token class-name">AVSampleFormat</span> dst_sample_fmt  <span class="token operator">=</span> AV_SAMPLE_FMT_S16<span class="token punctuation">;</span>         <span class="token comment">// 有符号16位</span>
+    <span class="token keyword">uint8_t</span>             <span class="token operator">*</span><span class="token operator">*</span>src_data      <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>                      <span class="token comment">// 输入音频数据缓冲区</span>
+    <span class="token keyword">uint8_t</span>             <span class="token operator">*</span><span class="token operator">*</span>dst_data      <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>                      <span class="token comment">// 输出音频数据缓冲区</span>
+    <span class="token keyword">int</span>                 src_nb_channels <span class="token operator">=</span> <span class="token function">av_get_channel_layout_nb_channels</span><span class="token punctuation">(</span>AV_CH_LAYOUT_STEREO<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 输入通道数</span>
+    <span class="token keyword">int</span>                 dst_nb_channels <span class="token operator">=</span> <span class="token function">av_get_channel_layout_nb_channels</span><span class="token punctuation">(</span>AV_CH_LAYOUT_STEREO<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 输出通道数</span>
+    <span class="token keyword">int</span>                 src_linesize<span class="token punctuation">;</span>                                <span class="token comment">// 输入音频行数据大小，取决于声道数和采样格式是否是交错模式</span>
+    <span class="token keyword">int</span>                 dst_linesize<span class="token punctuation">;</span>                                <span class="token comment">// 输出音频行数据大小</span>
+    <span class="token keyword">int</span>                 src_nb_samples  <span class="token operator">=</span> <span class="token number">1024</span><span class="token punctuation">;</span>                      <span class="token comment">// 输入固定按1024个采样点</span>
+    <span class="token keyword">int</span>                 dst_nb_samples<span class="token punctuation">;</span>                              <span class="token comment">// 当前输出数据包的真实采样数量</span>
+    <span class="token keyword">int</span>                 max_dst_nb_samples<span class="token punctuation">;</span>                          <span class="token comment">// 最大的采样数量</span>
+    <span class="token keyword">int</span>                 dst_bufsize<span class="token punctuation">;</span>                                 <span class="token comment">// 当前数据包采样值大小</span>
+    <span class="token keyword">const</span> <span class="token keyword">char</span>          <span class="token operator">*</span>dst_filename   <span class="token operator">=</span> <span class="token string">"out.pcm"</span><span class="token punctuation">;</span>                 <span class="token comment">// 保存输出的pcm到本地，然后播放验证</span>
+    FILE                <span class="token operator">*</span>dst_file       <span class="token operator">=</span> <span class="token function">fopen</span><span class="token punctuation">(</span>dst_filename<span class="token punctuation">,</span> <span class="token string">"wb"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">const</span> <span class="token keyword">char</span>          <span class="token operator">*</span>fmt<span class="token punctuation">;</span>
+
+    <span class="token keyword">double</span>              t <span class="token operator">=</span> <span class="token number">0.0</span><span class="token punctuation">;</span>
+    <span class="token keyword">int</span>                 ret <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>dst_file<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token function">exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token punctuation">}</span> <span class="token comment">// 输出文件打开失败</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>swr_ctx<span class="token punctuation">)</span>  <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span> <span class="token comment">// 重采样上下文创建失败</span>
+
+    <span class="token comment">// 输入参数</span>
+    <span class="token function">av_opt_set_int</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> <span class="token string">"in_channel_layout"</span><span class="token punctuation">,</span>  AV_CH_LAYOUT_STEREO<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 输入立体声</span>
+    <span class="token function">av_opt_set_int</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> <span class="token string">"out_channel_layout"</span><span class="token punctuation">,</span> AV_CH_LAYOUT_STEREO<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 输出立体声</span>
+    <span class="token function">av_opt_set_int</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> <span class="token string">"in_sample_rate"</span><span class="token punctuation">,</span>     IN_RATE<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>             <span class="token comment">// 输入采样率48000</span>
+    <span class="token function">av_opt_set_int</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> <span class="token string">"out_sample_rate"</span><span class="token punctuation">,</span>    OUT_RATE<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>            <span class="token comment">// 输出采样率44100</span>
+    <span class="token function">av_opt_set_sample_fmt</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> <span class="token string">"in_sample_fmt"</span><span class="token punctuation">,</span>  src_sample_fmt<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">av_opt_set_sample_fmt</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> <span class="token string">"out_sample_fmt"</span><span class="token punctuation">,</span> dst_sample_fmt<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 初始化重采样</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">swr_init</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+    <span class="token comment">// 给输入源分配内存空间</span>
+    ret <span class="token operator">=</span> <span class="token function">av_samples_alloc_array_and_samples</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>src_data<span class="token punctuation">,</span> <span class="token operator">&amp;</span>src_linesize<span class="token punctuation">,</span> src_nb_channels<span class="token punctuation">,</span> src_nb_samples<span class="token punctuation">,</span> src_sample_fmt<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+    <span class="token comment">// 计算输出采样数量</span>
+    max_dst_nb_samples <span class="token operator">=</span> dst_nb_samples <span class="token operator">=</span> <span class="token function">av_rescale_rnd</span><span class="token punctuation">(</span>src_nb_samples<span class="token punctuation">,</span> OUT_RATE<span class="token punctuation">,</span> IN_RATE<span class="token punctuation">,</span> AV_ROUND_UP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 分配输出缓存内存</span>
+    ret <span class="token operator">=</span> <span class="token function">av_samples_alloc_array_and_samples</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dst_data<span class="token punctuation">,</span> <span class="token operator">&amp;</span>dst_linesize<span class="token punctuation">,</span> dst_nb_channels<span class="token punctuation">,</span> dst_nb_samples<span class="token punctuation">,</span> dst_sample_fmt<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+    <span class="token keyword">do</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">fill_samples</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">double</span> <span class="token operator">*</span><span class="token punctuation">)</span>src_data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> src_nb_samples<span class="token punctuation">,</span> src_nb_channels<span class="token punctuation">,</span> IN_RATE<span class="token punctuation">,</span> <span class="token operator">&amp;</span>t<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// 生成输入源</span>
+
+        <span class="token comment">// 计算采样数量</span>
+        <span class="token keyword">int64_t</span> delay <span class="token operator">=</span> <span class="token function">swr_get_delay</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> IN_RATE<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// swr_convert可能有没转换的数据，这里需要获取缓存</span>
+        <span class="token comment">// 计算新的采样数量 dst_nb_samples = (delay + src_nb_samples) * OUT_RATE / IN_RATE，结果向上取整</span>
+        dst_nb_samples <span class="token operator">=</span> <span class="token function">av_rescale_rnd</span><span class="token punctuation">(</span>delay <span class="token operator">+</span> src_nb_samples<span class="token punctuation">,</span> OUT_RATE<span class="token punctuation">,</span> IN_RATE<span class="token punctuation">,</span> AV_ROUND_UP<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>dst_nb_samples <span class="token operator">&gt;</span> max_dst_nb_samples<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>       <span class="token comment">// 采样数量不够大，重新分配</span>
+            <span class="token function">av_freep</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dst_data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            ret <span class="token operator">=</span> <span class="token function">av_samples_alloc</span><span class="token punctuation">(</span>dst_data<span class="token punctuation">,</span> <span class="token operator">&amp;</span>dst_linesize<span class="token punctuation">,</span> dst_nb_channels<span class="token punctuation">,</span> dst_nb_samples<span class="token punctuation">,</span> dst_sample_fmt<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>ret <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">break</span><span class="token punctuation">;</span> <span class="token punctuation">}</span>              <span class="token comment">// 空间分配失败</span>
+            max_dst_nb_samples <span class="token operator">=</span> dst_nb_samples<span class="token punctuation">;</span> <span class="token comment">// 更新最大采样数量</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">// 音频重采样</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>ret <span class="token operator">=</span> <span class="token function">swr_convert</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> dst_data<span class="token punctuation">,</span> dst_nb_samples<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">const</span> <span class="token keyword">uint8_t</span> <span class="token operator">*</span><span class="token operator">*</span><span class="token punctuation">)</span>src_data<span class="token punctuation">,</span> src_nb_samples<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>dst_bufsize <span class="token operator">=</span> <span class="token function">av_samples_get_buffer_size</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dst_linesize<span class="token punctuation">,</span> dst_nb_channels<span class="token punctuation">,</span> ret<span class="token punctuation">,</span> dst_sample_fmt<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+        <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"t:%f in:%d out:%dn"</span><span class="token punctuation">,</span> t<span class="token punctuation">,</span> src_nb_samples<span class="token punctuation">,</span> ret<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">fwrite</span><span class="token punctuation">(</span>dst_data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> dst_bufsize<span class="token punctuation">,</span> dst_file<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// 将pcm数据写入本地文件</span>
+    <span class="token punctuation">}</span> <span class="token keyword">while</span> <span class="token punctuation">(</span>t <span class="token operator">&lt;</span> <span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// ========== 刷新最后几个样本 ==========</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">swr_convert</span><span class="token punctuation">(</span>swr_ctx<span class="token punctuation">,</span> dst_data<span class="token punctuation">,</span> dst_nb_samples<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>dst_bufsize <span class="token operator">=</span> <span class="token function">av_samples_get_buffer_size</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dst_linesize<span class="token punctuation">,</span> dst_nb_channels<span class="token punctuation">,</span> ret<span class="token punctuation">,</span> dst_sample_fmt<span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+
+    <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"flush in:%d out:%dn"</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> ret<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// 最后有几个样本，非常小</span>
+    <span class="token function">fwrite</span><span class="token punctuation">(</span>dst_data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">,</span> dst_bufsize<span class="token punctuation">,</span> dst_file<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// 将最后一点pcm数据写入本地文件</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">get_format_from_sample_fmt</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>fmt<span class="token punctuation">,</span> dst_sample_fmt<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">goto</span> end<span class="token punctuation">;</span> <span class="token punctuation">}</span>
+    <span class="token function">fprintf</span><span class="token punctuation">(</span><span class="token constant">stderr</span><span class="token punctuation">,</span> <span class="token string">"ffplay -f %s -channel_layout %"</span>PRId64<span class="token string">" -channels %d -ar %d %sn"</span><span class="token punctuation">,</span>   <span class="token comment">// 转换成功，打印音频播放命令</span>
+            fmt<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span><span class="token punctuation">)</span>AV_CH_LAYOUT_STEREO<span class="token punctuation">,</span> dst_nb_channels<span class="token punctuation">,</span> OUT_RATE<span class="token punctuation">,</span> dst_filename<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+end<span class="token operator">:</span>  <span class="token comment">// 结束并释放空间</span>
+    <span class="token function">fclose</span><span class="token punctuation">(</span>dst_file<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>src_data<span class="token punctuation">)</span>
+        <span class="token function">av_freep</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>src_data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">av_freep</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>src_data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>dst_data<span class="token punctuation">)</span>
+        <span class="token function">av_freep</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dst_data<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">av_freep</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dst_data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token function">swr_free</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>swr_ctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<h1>
+<a id="_161"></a>运行结果</h1> 
+<p>编译运行后会在输出目录看到一个out.pcm文件，使用ffplay -f s16le -channel_layout 3 -channels 2 -ar 44100 out.pcm命令即可播放，声音为一个连续的但音调。<br> <img src="https://images2.imgbox.com/8e/32/rl7V1PPf_o.png" alt="在这里插入图片描述" width="480" height="380"></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

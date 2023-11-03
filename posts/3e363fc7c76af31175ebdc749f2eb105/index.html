@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>MySQL】- 04 MVCC实现原理 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MySQL】- 04 MVCC实现原理</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atelier-sulphurpool-light">
+                    
+                        
+                    
+                    <p></p> 
+<div class="toc"> 
+ <h3>MVCC的实现原理</h3> 
+ <ul>
+<li><a href="#_3">隐式字段</a></li>
+<li><a href="#undo_22">undo日志</a></li>
+<li><a href="#Read_View_73">Read View(读视图)</a></li>
+<li><a href="#_150">整体流程</a></li>
+<li><a href="#_178">例子</a></li>
+</ul> 
+</div> 
+<br> MVCC的目的就是多版本并发控制，在数据库中的实现，就是为了解决读写冲突，它的实现原理主要是依赖记录中的 3个隐式字段，undo日志 ，Read View 来实现的。所以我们先来看看这个三个point的概念 
+<p></p> 
+<h1>
+<a id="_3"></a>隐式字段</h1> 
+<ul><li> <p><code>MySQL</code>中会为每一行记录生成隐藏列，接下来就让我们了解一下这几个隐藏列吧。</p> <p>（1）DB_TRX_ID：事务ID，是根据事务产生时间顺序自动递增的，是独一无二的。如果某个事务执行过程中对该记录执行了增、删、改操作，那么<code>InnoDB</code>存储引擎就会记录下该条事务的id。</p> <p>（2）DB_ROLL_PTR：回滚指针，本质上就是一个指向记录对应的<code>undo log</code>的一个指针，大小为 7 个字节，<code>InnoDB</code> 便是通过这个指针找到之前版本的数据。该行记录上所有旧版本，在<code>undo log</code>中都通过链表的形式组织。</p> <p>（3）DB_ROW_ID：行标识（隐藏单调自增 <code>ID</code>），如果表没有主键，InnoDB 会自动生成一个隐藏主键，大小为 6 字节。如果数据表没有设置主键，会以它产生聚簇索引。</p> <p>（4）实际还有一个删除flag隐藏字段，既记录被更新或删除并不代表真的删除，而是删除flag变了。</p> </li></ul> 
+<p><img src="https://images2.imgbox.com/01/fa/2MxbVIzC_o.png" alt="请添加图片描述"></p> 
+<p>如上图，DB_ROW_ID是数据库默认为该行记录生成的唯一隐式主键，DB_TRX_ID是当前操作该记录的事务ID,而DB_ROLL_PTR是一个回滚指针，用于配合undo日志，指向上一个旧版本</p> 
+<h1>
+<a id="undo_22"></a>undo日志</h1> 
+<ul><li> <p>每当我们要对一条记录做改动时（这里的改动可以指INSERT、DELETE、UPDATE），都需要把回滚时所需的东西记录下来, 比如:</p> 
+  <ul>
+<li>Insert undo log ：插入一条记录时，至少要把这条记录的主键值记下来，之后回滚的时候只需要把这个主键值对应的记录删掉就好了。</li>
+<li>Delete undo log：删除一条记录时，至少要把这条记录中的内容都记下来，这样之后回滚时再把由这些内容组成的记录插入到表中就好了。</li>
+<li>Update undo log：修改一条记录时，至少要把修改这条记录前的旧值都记录下来，这样之后回滚时再把这条记录更新为旧值就好了。<br> <code>InnoDB</code>把这些为了回滚而记录的这些东西称之为<code>undo log</code>。这里需要注意的一点是，由于查询操作（<code>SELECT</code>）并不会修改任何用户记录，所以在查询操作执行时，并不需要记录相应的<code>undo log</code>。</li>
+</ul> <p>每次对记录进行改动都会记录一条undo日志，每条undo日志也都有一个<code>DB_ROLL_PTR</code>属性，可以将这些undo日志都连起来，串成一个链表，形成版本链。版本链的头节点就是当前记录最新的值。不仅在事务回滚时需要，在快照读时也需要；所以不能随便删除，只有在快速读或事务回滚不涉及该日志时，对应的日志才会被purge线程统一清除</p> </li></ul> 
+<blockquote> 
+ <p>purge</p> 
+ <ul>
+<li>从前面的分析可以看出，为了实现InnoDB的MVCC机制，更新或者删除操作都只是设置一下老记录的deleted_bit，并不真正将过时的记录删除。</li>
+<li>为了节省磁盘空间，InnoDB有专门的purge线程来清理deleted_bit为true的记录。为了不影响MVCC的正常工作，purge线程自己也维护了一个read view（这个read view相当于系统中最老活跃事务的read view）;如果某个记录的deleted_bit为true，并且DB_TRX_ID相对于purge线程的read view可见，那么这条记录一定是可以被安全清除的。</li>
+</ul> 
+</blockquote> 
+<p>对MVCC有帮助的实质是update undo log ，undo log实际上就是存在rollback segment中旧记录链，它的执行流程如下：</p> 
+<p>一、 比如一个有个事务插入persion表插入了一条新记录，记录如下，name为Jerry, age为24岁，隐式主键是1，事务ID和回滚指针，我们假设为NULL</p> 
+<p><img src="https://images2.imgbox.com/09/a4/HdcsGZe5_o.png" alt="在这里插入图片描述"></p> 
+<p>二、 现在来了一个事务1对该记录的name做出了修改，改为Tom</p> 
+<ul>
+<li> <p>在事务1修改该行(记录)数据时，数据库会先对该行加排他锁</p> </li>
+<li> <p>然后把该行数据拷贝到undo log中，作为旧记录，既在undo log中有当前行的拷贝副本</p> </li>
+<li> <p>拷贝完毕后，修改该行name为Tom，并且修改隐藏字段的事务ID为当前事务1的ID, 我们默认从1开始，之后递增，回滚指针指向拷贝到undo log的副本记录，既表示我的上一个版本就是它</p> </li>
+<li> <p>事务提交后，释放锁<br> <img src="https://images2.imgbox.com/4a/b3/m1LThDwi_o.png" alt="在这里插入图片描述"></p> </li>
+</ul> 
+<p>三、 又来了个事务2修改person表的同一个记录，将age修改为30岁</p> 
+<ul>
+<li> <p>在事务2修改该行数据时，数据库也先为该行加锁</p> </li>
+<li> <p>然后把该行数据拷贝到undo log中，作为旧记录，发现该行记录已经有undo log了，那么最新的旧数据作为链表的表头，插在该行记录的undo log最前面</p> </li>
+<li> <p>修改该行age为30岁，并且修改隐藏字段的事务ID为当前事务2的ID, 那就是2，回滚指针指向刚刚拷贝到undo log的副本记录</p> </li>
+<li> <p>事务提交，释放锁</p> </li>
+</ul> 
+<p><img src="https://images2.imgbox.com/ab/c7/mxJYJZUM_o.png" alt="在这里插入图片描述"></p> 
+<p>从上面，我们就可以看出，不同事务或者相同事务的对同一记录的修改，会导致该记录的undo log成为一条记录版本线性表，既链表，undo log的链首就是最新的旧记录，链尾就是最早的旧记录（当然就像之前说的该undo log的节点可能是会purge线程清除掉，向图中的第一条insert undo log，其实在事务提交之后可能就被删除丢失了，不过这里为了演示，所以还放在这里）</p> 
+<h1>
+<a id="Read_View_73"></a>Read View(读视图)</h1> 
+<p>在可重复读隔离级别下，我们可以把每一次普通的<code>select</code>查询（不加<code>for update</code>语句）当作一次快照读，而快照便是进行<code>select</code>的那一刻，生成的当前数据库系统中所有未提交的事务id数组（数组里最小的<code>id</code>为<code>min_id</code>）和已经创建的最大事务<code>id</code>（<code>max_id</code>）的集合，即我们所说的一致性视图<code>readview</code>。在进行快照读的过程中要根据一定的规则将版本链中每个版本的事务<code>id</code>与<code>readview</code>进行匹配查询我们需要的结果。</p> 
+<p>快照读是不会看到别的事务插入的数据的。因此，幻读在“当前读”下才会出现。快照读的实现是基于多版本并发控制，即<code>MVCC</code>，可以认为<code>MVCC</code>是行锁的一个变种，但它在很多情况下，避免了加锁操作，降低了开销；既然是基于多版本，即快照读可能读到的并不一定是数据的最新版本，而有可能是之前的历史版本。<code>MVCC</code>只在 <code>READ COMMITTED</code> 和 <code>REPEATABLE READ</code>两个隔离级别下工作，其他两个隔离级别不和<code>MVCC</code>不兼容。因为<code>READ UNCOMMITTED</code>总是读取最新的数据行，而不是符合当前事务版本的数据行，而<code>SERIALIZABLE</code> 则会对所有读取的行都加锁。事务的快照时间点（即下文中说到的<code>Read View</code>的生成时间）是以第一个<code>select</code>来确认的。所以即便事务先开始，但是<code>select</code>在后面的事务的<code>update</code>之类的语句后进行，那么它是可以获取前面的事务的对应的数据。</p> 
+<blockquote> 
+ <p>RC和RR隔离级别下的快照读和当前读：RC隔离级别下，快照读和当前读结果一样，都是读取已提交的最新；RR隔离级别下，当前读结果是其他事务已经提交的最新结果，快照读是读当前事务之前读到的结果。RR下创建快照读的时机决定了读到的版本。</p> 
+</blockquote> 
+<p>对于使用RC和RR隔离级别的事务来说，都必须保证读到已经提交了的事务修改过的记录，也就是说假如另一个事务已经修改了记录但是尚未提交，是不能直接读取最新版本的记录的。核心问题就是：需要判断一下版本链中的哪个版本是当前事务可见的。为此，<code>InnoDB</code>提出了一个<code>Read View</code>的概念。</p> 
+<p><code>Read View</code>就是事务进行快照读（普通<code>select</code>查询）操作的时候生产的一致性读视图，在该事务执行的快照读的那一刻，会生成数据库系统当前的一个快照，它由执行查询时所有未提交的事务id数组（数组里最小的id为<code>min_id</code>）和已经创建的最大事务id（<code>max_id</code>）组成，查询的数据结果需要跟<code>read view</code>做对比从而得到快照结果。</p> 
+<p><img src="https://images2.imgbox.com/85/0f/dJtLk5lH_o.jpg" alt="在这里插入图片描述"></p> 
+<p><strong>版本链比对规则：</strong></p> 
+<ol>
+<li>如果落在绿色部分（trx_id&lt;min_id），表示这个版本是已经提交的事务生成的，这个数据是可见的；</li>
+<li>如果落在红色部分（trx_id&gt;max_id），表示这个版本是由将来启动的事务生成的，是肯定不可见的；</li>
+<li>如果落在黄色部分（min_id&lt;=trx_id&lt;=max_id），那就包含两种情况：<br> a.若row的trx_id在数组中，表示这个版本是由还没提交的事务生成的，不可见；如果是自己的事务，则是可见的；<br> b.若row的trx_id不在数组中，表示这个版本是已经提交了的事务生成的，可见。</li>
+</ol> 
+<p>那么这个判断条件是什么呢？</p> 
+<pre><code class="prism language-c"><span class="token comment">/** Check whether the changes by id are visible.
+	@param[in]	id	transaction id to check against the view
+	@param[in]	name	table name
+	@return whether the view sees the modifications of id. */</span>
+	bool <span class="token function">changes_visible</span><span class="token punctuation">(</span>
+		<span class="token class-name">trx_id_t</span>		id<span class="token punctuation">,</span> <span class="token comment">//当前事务id</span>
+		<span class="token keyword">const</span> <span class="token class-name">table_name_t</span><span class="token operator">&amp;</span>	name<span class="token punctuation">)</span> <span class="token keyword">const</span>
+		<span class="token function">MY_ATTRIBUTE</span><span class="token punctuation">(</span><span class="token punctuation">(</span>warn_unused_result<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">ut_ad</span><span class="token punctuation">(</span>id <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>id <span class="token operator">&lt;</span> m_up_limit_id <span class="token operator">||</span> id <span class="token operator">==</span> m_creator_trx_id<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+			<span class="token keyword">return</span><span class="token punctuation">(</span>true<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+
+		<span class="token function">check_trx_id_sanity</span><span class="token punctuation">(</span>id<span class="token punctuation">,</span> name<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>id <span class="token operator">&gt;=</span> m_low_limit_id<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+			<span class="token keyword">return</span><span class="token punctuation">(</span>false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+		<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>m_ids<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+			<span class="token keyword">return</span><span class="token punctuation">(</span>true<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+
+		<span class="token keyword">const</span> <span class="token class-name">ids_t</span><span class="token operator">::</span>value_type<span class="token operator">*</span>	p <span class="token operator">=</span> m_ids<span class="token punctuation">.</span><span class="token function">data</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+		<span class="token keyword">return</span><span class="token punctuation">(</span><span class="token operator">!</span>std<span class="token operator">::</span><span class="token function">binary_search</span><span class="token punctuation">(</span>p<span class="token punctuation">,</span> p <span class="token operator">+</span> m_ids<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> id<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>如上，它是一段MySQL判断可见性的一段源码，即changes_visible方法，该方法展示了我们拿DB_TRX_ID去跟Read View某些属性进行怎么样的比较</p> 
+<p>在展示之前，我先简化一下Read View，我们可以把Read View简单的理解成有三个全局属性</p> 
+<blockquote> 
+ <p>m_ids(trx_list)<br> 一个数值列表，用来维护Read View生成时刻系统正活跃的事务ID<br> up_limit_id<br> 记录trx_list列表中事务ID最小的ID<br> low_limit_id<br> ReadView生成时刻系统尚未分配的下一个事务ID，也就是目前已出现过的事务ID的最大值+1</p> 
+</blockquote> 
+<ul>
+<li>首先比较DB_TRX_ID &lt; up_limit_id, 如果小于，则当前事务能看到DB_TRX_ID 所在的记录，如果大于等于进入下一个判断</li>
+<li>接下来判断 DB_TRX_ID 大于等于 low_limit_id , 如果大于等于则代表DB_TRX_ID 所在的记录在Read View生成后才出现的，那对当前事务肯定不可见，如果小于则进入下一个判断</li>
+<li>判断m_ids.empty()如果空则说明，你这个事务在Read View生成之前就已经Commit了，你修改的结果，我当前事务是能看见的</li>
+</ul> 
+<h1>
+<a id="_150"></a>整体流程</h1> 
+<p>我们在了解了隐式字段，undo log， 以及Read View的概念之后，就可以来看看MVCC实现的整体流程是怎么样了</p> 
+<p>整体的流程是怎么样的呢？我们可以模拟一下</p> 
+<ul>
+<li> <p>当事务2对某行数据执行了快照读，数据库为该行数据生成一个Read View读视图，假设当前事务ID为2，此时还有事务1和事务3在活跃中，事务4在事务2快照读前一刻提交更新了，所以Read View记录了系统当前活跃事务1，3的ID，维护在一个列表上，假设我们称为trx_list<br> <img src="https://images2.imgbox.com/93/7e/3ZR9p8zL_o.png" alt="在这里插入图片描述"></p> </li>
+<li> <p>Read View不仅仅会通过一个列表trx_list来维护事务2执行快照读那刻系统正活跃的事务ID，还会有两个属性up_limit_id（记录trx_list列表中事务ID最小的ID），low_limit_id(记录trx_list列表中事务ID最大的ID，也有人说快照读那刻系统尚未分配的下一个事务ID也就是目前已出现过的事务ID的最大值+1，我更倾向于后者；所以在这里例子中up_limit_id就是1，low_limit_id就是4 + 1 = 5，trx_list集合的值是1,3，Read View如下图<br> <img src="https://images2.imgbox.com/02/ff/BBiZGtMB_o.png" alt="在这里插入图片描述"></p> </li>
+<li> <p>我们的例子中，只有事务4修改过该行记录，并在事务2执行快照读前，就提交了事务，所以当前该行当前数据的undo log如下图所示；我们的事务2在快照读该行记录的时候，就会拿该行记录的DB_TRX_ID去跟up_limit_id,low_limit_id和活跃事务ID列表(trx_list)进行比较，判断当前事务2能看到该记录的版本是哪个。</p> </li>
+</ul> 
+<p><img src="https://images2.imgbox.com/51/89/erfqPjCR_o.png" alt="在这里插入图片描述"></p> 
+<ul>
+<li> <p>所以先拿该记录DB_TRX_ID字段记录的事务ID 4去跟Read View的的up_limit_id比较，看4是否小于up_limit_id(1)，所以不符合条件，继续判断 4 是否大于等于 low_limit_id(5)，也不符合条件，最后判断4是否处于trx_list中的活跃事务, 最后发现事务ID为4的事务不在当前活跃事务列表中, 符合可见性条件，所以事务4修改后提交的最新结果对事务2快照读时是可见的，所以事务2能读到的最新数据记录是事务4所提交的版本，而事务4提交的版本也是全局角度上最新的版本</p> <p><img src="https://images2.imgbox.com/46/da/V9DMyVg9_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-lgJv0w9D-1685702218501)(mdpic/3133209-be5885051c52fb6a.png)]"></p> </li>
+<li> <p>也正是Read View生成时机的不同，从而造成RC,RR级别下快照读的结果的不同</p> </li>
+</ul> 
+<h1>
+<a id="_178"></a>例子</h1> 
+<p>首先我们要准备两张表，一张<code>test</code>和一张<code>account</code>表，然后我们以<code>account</code>的<code>undo log</code>来画版本链，准备数据和原始记录图如下</p> 
+<pre><code class="prism language-java"><span class="token comment">//test表中数据</span>
+id<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span>c1<span class="token operator">=</span><span class="token char">'11'</span><span class="token punctuation">;</span>
+id<span class="token operator">=</span><span class="token number">5</span><span class="token punctuation">,</span>c1<span class="token operator">=</span><span class="token char">'22'</span><span class="token punctuation">;</span>
+<span class="token comment">//account表数据</span>
+id<span class="token operator">=</span><span class="token number">1</span>，name<span class="token operator">=</span>‘lilei’；
+</code></pre> 
+<p><img src="https://images2.imgbox.com/43/dc/HdEDJGlb_o.jpg" alt="在这里插入图片描述"></p> 
+<p>如下图，我们将按照里面的顺序执行<code>sql</code><br> <img src="https://images2.imgbox.com/6d/ba/k7peEzzx_o.jpg" alt="在这里插入图片描述"></p> 
+<p>当我们执行到第7行的<code>select</code>的语句时，会生成<code>readview[100,200],300</code>,版本链如图所示：<br> <img src="https://images2.imgbox.com/9d/7d/idzCTERh_o.jpg" alt="在这里插入图片描述"></p> 
+<p>此时我们查询到的数据为<code>lilei300</code>。我们首先要拿最新版本的数据<code>trx_id=300</code>来<code>readview</code>中匹配，落在黄色区间内，一看该数据已经提交了，所以是可见的。继续往下执行，当执行到第10行的<code>select</code>语句时，因为<code>trx_id=100</code>并未提交，所以版本链依然为<code>readview[100,200],300</code>，版本链如图所示：<br> <img src="https://images2.imgbox.com/4c/5b/4BeZ0vXa_o.jpg" alt="在这里插入图片描述"></p> 
+<p>此时我们查询到的数据为<code>lilei300</code>。我们按上边操作，从最新版本依次往下匹配，我们首先要拿最新版本的数据<code>trx_id=100</code>来<code>readview</code>中匹配，落在黄色区间内，一看该数据在未提交的数组中，且不是自己的事务，所以是不可见的；然后我们选择前一个版本的数据，结果同上；继续向上找，当找到<code>trx_id=300</code>的数据时，会落在黄色区间，且是提交的，所以数据可见。继续往下执行，当执行到第13行的<code>select</code>语句时，此时尽管<code>trx_id=100</code>已经提交了，因为是<code>InnoDB</code>的RR模式，所以<code>readview</code>不会更改，仍为<code>readview[100,200],300</code>,版本链如图所示：<br> <img src="https://images2.imgbox.com/92/97/69lAEpQb_o.jpg" alt="在这里插入图片描述"></p> 
+<p>此时我们查询到的数据为<code>lilei300</code>。原因同上边的步骤，不再赘述。</p> 
+<blockquote> 
+ <p>当执行<code>update</code>语句时，都是先读后写的，而这个读，是当前读，只能读当前的值，跟<code>readview</code>查找时的快照读区分开。</p> 
+</blockquote> 
+<p>刚才演示的是<code>InnoDB</code>下的RR模式，接下来我们简单说一下RC模式，上文中提到的RC模式的数据读都是读最新的即当前读，所以readview是实时生成的，执行语句如图所示：<br> <img src="https://images2.imgbox.com/96/b0/60VfOeLx_o.jpg" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-2m5mUftI-1685702218502)(mdpic/383a87fe-d5a8-47b7-bc0e-b4b5dd53ba22.jpg)]"></p> 
+<p>当我们执行到第13行的<code>select</code>的语句时，会生成<code>readview[200],300</code>，版本链还和之前一样，此时我们查询到的数据为<code>lilei2</code>。原因和上边讲的RR模式下的比对规则相同。</p> 
+<p>此处我们演示的是<code>update</code>的情况，对于删除的情况可以认为是<code>update</code>的特殊情况，会将版本链上最新的数据复制一份，然后将<code>trx_id</code>改成删除操作的<code>trx_id</code>，同时在该条记录的头信息（<code>record header</code>）里的（<code>deleted_flag</code>）标记位上写上<code>true</code>，来表示当前记录已经被删除，在查询时按照上边的规则查到对应的记录，如果<code>delete_flag</code>标记位为<code>true</code>，意味着记录已被删除，则不返回数据。</p> 
+<p>大家应该还关心一个问题，即<code>undo log</code>什么时候删除呢？系统会判断，没有比这个<code>undo log</code>更早的<code>read view</code>的时候，<code>undo log</code>会被删除。所以这里也就是为什么我们建议你尽量不要使用长事务的原因。长事务意味着系统里面会存在很老的事务视图。由于这些事务随时可能访问数据库里面的任何数据，所以这个事务提交之前，数据库里面它可能用到的回滚记录都必须保留，这就会导致大量占用存储空间。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

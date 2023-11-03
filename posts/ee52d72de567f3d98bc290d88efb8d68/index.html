@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Redis中的缓存穿透、雪崩、击穿的原因以及解决方案（详解） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis中的缓存穿透、雪崩、击穿的原因以及解决方案（详解）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h1 id="main-toc"> 一、概述</h1> 
+<blockquote> 
+ <p>① 缓存穿透：大量请求根本不存在的key（下文详解）</p> 
+ <p>② 缓存雪崩：redis中大量key集体过期（下文详解）</p> 
+ <p>③ 缓存击穿：redis中一个热点key过期（大量用户访问该热点key，但是热点key过期）</p> 
+ <p></p> 
+ <p><strong>穿透解决方案：</strong></p> 
+ <ul>
+<li>对空值进行缓存</li>
+<li>设置白名单</li>
+<li>使用布隆过滤器</li>
+<li>网警</li>
+</ul> 
+ <p></p> 
+ <p><strong>雪崩解决方案：</strong></p> 
+ <ul>
+<li>进行预先的热门词汇的设置，进行key时长的调整</li>
+<li>实时调整，监控哪些数据是热门数据，实时的调整key的过期时长</li>
+<li>使用锁机制</li>
+</ul> 
+ <p></p> 
+ <p><strong>击穿解决方案：</strong></p> 
+ <ul>
+<li>进行预先的热门词汇的设置，进行key时长的调整</li>
+<li>实时调整，监控哪些数据是热门数据，实时的调整key的过期时长</li>
+<li>使用锁机制(只有一个线程可以进行热点数据的重构)</li>
+</ul> 
+ <p><strong>下文进行详解</strong></p> 
+</blockquote> 
+<h3 id="%E6%A0%B9%E6%9C%AC%E5%8E%9F%E5%9B%A0%EF%BC%9ARedis%E5%91%BD%E4%B8%AD%E7%8E%87%E4%B8%8B%E9%99%8D%EF%BC%8C%E8%AF%B7%E6%B1%82%E7%9B%B4%E6%8E%A5%E6%89%93%E5%9C%A8DB%E4%B8%8A">三者出现的根本原因：Redis命中率下降，请求直接打在DB上</h3> 
+<blockquote> 
+ <p>        正常情况下，大量的资源请求都会被redis响应，在redis得不到响应的小部分请求才会去请求DB，这样DB的压力是非常小的，是可以正常工作的（如下图）</p> 
+</blockquote> 
+<p></p> 
+<p><img alt="" height="517" src="https://images2.imgbox.com/de/c0/w9zSKzx6_o.png" width="844"></p> 
+<blockquote> 
+ <p>        如果大量的请求在redis上得不到响应，那么就会导致这些请求会直接去访问DB，导致DB的压力瞬间变大而卡死或者宕机。如下图：</p> 
+ <p>① 大量的高并发的请求打在redis上</p> 
+ <p>② 这些请求发现redis上并没有需要请求的资源，redis命中率降低</p> 
+ <p>③ 因此这些大量的高并发请求转向DB（数据库服务器）请求对应的资源</p> 
+ <p>④ DB压力瞬间增大，直接将DB打垮，进而引发一系列“灾害”</p> 
+</blockquote> 
+<p> <img alt="" src="https://images2.imgbox.com/3f/94/3R88TOvy_o.png"></p> 
+<p>        那么为什么redis会没有需要访问的数据呢？通过分析大致可以总结为三种情况，也就对应着redis的雪崩、穿透和击穿（下文开始进行详解） </p> 
+<table border="1" cellpadding="1" cellspacing="1"><tbody>
+<tr>
+<td>问题名称</td>
+<td>缓存穿透</td>
+<td>缓存击穿</td>
+<td>缓存雪崩</td>
+</tr>
+<tr>
+<td>资源是否存在DB数据库服务器中</td>
+<td>×</td>
+<td>√</td>
+<td>√</td>
+</tr>
+<tr>
+<td>资源是否存在Redis中</td>
+<td>×</td>
+<td>×</td>
+<td> <p>×</p> </td>
+</tr>
+<tr>
+<td>redis没有对应资源的原因</td>
+<td>根本不存在该资源（DB也没有）</td>
+<td>某个热点key过期</td>
+<td>大部分key集体过期</td>
+</tr>
+<tr>
+<td>根本原因</td>
+<td colspan="3" rowspan="1"> <p>大量的高并发的请求打在Redis上，但是发现Redis中并没有请求的数据，redis的命令率降低，所以这些请求就只能直接打在DB（数据库服务器）上，在大量的高并发的请求下就会导致DB直接卡死、宕机</p> </td>
+</tr>
+</tbody></table> 
+<hr> 
+<h1 id="%E4%BA%8C%E3%80%81%E6%83%85%E6%99%AF%E5%88%86%E6%9E%90%20%EF%BC%88%E8%AF%A6%E8%A7%A3%EF%BC%89">二、情景分析 （详解）</h1> 
+<h3 id="%E7%BC%93%E5%AD%98%E7%A9%BF%E9%80%8F">缓存穿透</h3> 
+<p>缓存穿透产生的原因：请求根本不存在的资源（DB本身就不存在，Redis更是不存在）</p> 
+<p>举例（情景在线）：客户端发送大量的不可响应的请求（如下图）</p> 
+<p><img alt="" height="106" src="https://images2.imgbox.com/d1/b3/x3plYS1t_o.png" width="693"></p> 
+<blockquote> 
+ <p>        当大量的客户端发出类似于：http://localhost:8080/user/19833?id=-3872 的请求，就可能导致出现缓存穿透的情况。因为数据库DB中本身就没有id=-3872的用户的数据，所以Redis也没有对应的数据，那么这些请求在redis就得不到响应，就会直接打在DB上，导致DB压力过大而卡死情景在线或宕机。</p> 
+ <p>        缓存穿透很有可能是黑客攻击所为，黑客通过发送大量的高并发的无法响应的请求给服务器，由于请求的资源根本就不存在，DB就很容易被打垮了。</p> 
+</blockquote> 
+<p><strong>解决方式：</strong></p> 
+<ul><li>对空值进行缓存：</li></ul> 
+<blockquote> 
+ <p>        类似于上面的例子，虽然数据库中没有id=-3872的用户的数据，但是在redis中对他进行缓存（key=-3872，value=null），这样当请求到达redis的时候就会直接返回一个null的值给客户端，避免了大量无法访问的数据直接打在DB上</p> 
+</blockquote> 
+<ul><li>实时监控：</li></ul> 
+<blockquote> 
+ <p>        对redis进行实时监控，当发现redis中的命中率下降的时候进行原因的排查，配合运维人员对访问对象和访问数据进行分析查询，从而进行黑名单的设置限制服务（拒绝黑客攻击）</p> 
+</blockquote> 
+<ul><li>使用布隆过滤器</li></ul> 
+<blockquote> 
+ <p>        使用BitMap作为布隆过滤器，将目前所有可以访问到的资源通过简单的映射关系放入到布隆过滤器中（哈希计算），当一个请求来临的时候先进行布隆过滤器的判断，如果有那么才进行放行，否则就直接拦截</p> 
+</blockquote> 
+<ul><li>接口校验</li></ul> 
+<blockquote> 
+ <p>        类似于用户权限的拦截，对于id=-3872这些无效访问就直接拦截，不允许这些请求到达Redis、DB上。</p> 
+</blockquote> 
+<p><strong>注意事项：</strong></p> 
+<ol>
+<li>使用空值作为缓存的时候，key设置的过期时间不能太长，防止占用太多redis资源</li>
+<li>对空值缓存是一种被动的防御方式，当遇到黑客暴力请求很多不存在的数据就需要写入大量的null值到Redis中，可能导致Redis内存占用不足的情况</li>
+<li>使用布隆过滤器，可以在用户访问的时候判断该资源是否存在，不存在则直接拒绝访问</li>
+<li>布隆过滤器是有一定的误差，所以一般需要配合一些接口流量的限制（规定用户在一段时间内访问的频率）、权限校验、黑名单等来解决缓存穿透的问题</li>
+</ol> 
+<hr> 
+<h3 id="%E7%BC%93%E5%AD%98%E9%9B%AA%E5%B4%A9">缓存雪崩</h3> 
+<p>缓存雪崩产生的原因：redis中大量的key集体过期</p> 
+<p>举例：</p> 
+<blockquote> 
+ <p>        当redis中的大量key集体过期，可以理解为redis中的大部分数据都被清空了（失效了），那么这时候如果有大量并发的请求来到，那么redis就无法进行有效的响应（命中率急剧下降），请求就都打到DB上了，到时DB直接崩溃</p> 
+</blockquote> 
+<p><strong>解决方式：</strong></p> 
+<ul><li>将失效时间分散开</li></ul> 
+<pre><code class="language-java">通过使用自动生成随机数使得key的过期时间是随机的，防止集体过期</code></pre> 
+<ul><li> 使用多级架构</li></ul> 
+<pre><code class="language-java">使用nginx缓存+redis缓存+其他缓存，不同层使用不同的缓存，可靠性更强</code></pre> 
+<ul><li>设置缓存标记</li></ul> 
+<pre><code class="language-java">记录缓存数据是否过期，如果过期会触发通知另外的线程在后台去跟新实际的key</code></pre> 
+<ul><li>使用锁或者队列的方式</li></ul> 
+<pre><code class="language-java">如果查不到就加上排它锁，其他请求只能进行等待</code></pre> 
+<hr> 
+<h3>缓存击穿</h3> 
+<p>产生缓存雪崩的原因：redis中的某个热点key过期，但是此时有大量的用户访问该过期key</p> 
+<p>举例：</p> 
+<blockquote> 
+ <p>        类似于“某男明星塌房事件”上了热搜，这时候大量的“粉丝”都在访问该热点事件，但是可能优于某种原因，redis的这个热点key过期了，那么这时候大量高并发对于该key的请求就得不到redis的响应，那么就会将请求直接打在DB服务器上，导致整个DB瘫痪。</p> 
+</blockquote> 
+<p><strong>解决方案：</strong></p> 
+<ul><li>提前对热点数据进行设置</li></ul> 
+<pre><code class="language-java">类似于新闻、某博等软件都需要对热点数据进行预先设置在redis中</code></pre> 
+<ul><li>监控数据，适时调整</li></ul> 
+<pre><code class="language-java">监控哪些数据是热门数据，实时的调整key的过期时长</code></pre> 
+<ul><li>使用锁机制</li></ul> 
+<pre><code class="language-java">只有一个请求可以获取到互斥锁，然后到DB中将数据查询并返回到Redis，之后所有请求就可以从Redis中得到响应</code></pre> 
+<p> </p> 
+<hr> 
+<p></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>kubernetes学习二----1.27.1部署、安装 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">kubernetes学习二----1.27.1部署、安装</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>一、基本信息介绍</h1> 
+<p>kubernetes： 1.27.1<br> 系统：centos 7.9<br> etcd：3.5.7<br> containerd：1.6.20<br> runc：1.1.5<br> docker-ce：20.10.24（安装后显示的23.0.4，可能是合并了）<br> 建议内核升级到5.10</p> 
+<p>本次安装就只有一个master和一个node节点<br> master：192.168.180.89<br> node：192.168.180.201</p> 
+<p>网络插件：calico 3.25.1 （虽然目前是最新版本，官方文档没显示支持kubernetes1.27，但测试安装可以使用）</p> 
+<p>本次采用kubeadm方式安装。</p> 
+<h1>
+<a id="_17"></a>二、环境准备</h1> 
+<p>以下操作两个节点都要操作，建议使用ansible同时操作。</p> 
+<h2>
+<a id="1_19"></a>1、关闭防火墙</h2> 
+<pre><code class="prism language-shell">systemctl stop firewalld
+systemctl disable firewalld
+</code></pre> 
+<h2>
+<a id="2selinux_24"></a>2、关闭selinux</h2> 
+<pre><code class="prism language-shell"><span class="token function">sed</span> -i <span class="token string">'s/enforcing/disabled/'</span> /etc/selinux/config
+setenforce <span class="token number">0</span>
+</code></pre> 
+<h2>
+<a id="3swap_29"></a>3、关闭swap</h2> 
+<pre><code class="prism language-shell"><span class="token function">sed</span> -ri <span class="token string">'s/.*swap.*/#&amp;/'</span> /etc/fstab 
+swapoff -a 
+</code></pre> 
+<h2>
+<a id="4dns_34"></a>4、添加本地dns解析</h2> 
+<pre><code class="prism language-shell"><span class="token function">cat</span> <span class="token operator">&gt;&gt;</span> /etc/hosts <span class="token operator">&lt;&lt;</span> <span class="token string">EOF
+192.168.180.89 master01
+192.168.180.201 node01
+EOF</span>
+</code></pre> 
+<h2>
+<a id="5ipv4_41"></a>5、添加内核模块和开启ipv4转发、网桥参数</h2> 
+<p>（1）加载内核模块：</p> 
+<pre><code class="prism language-shell"><span class="token function">cat</span> <span class="token operator">&lt;&lt;</span><span class="token string">EOF<span class="token bash punctuation"> <span class="token operator">|</span> <span class="token function">sudo</span> <span class="token function">tee</span> /etc/modules-load.d/k8s.conf</span>
+overlay
+br_netfilter
+EOF</span>
+
+modprobe overlay
+modprobe br_netfilter
+</code></pre> 
+<p>（2）添加内核参数</p> 
+<pre><code class="prism language-shell"><span class="token function">vi</span> /etc/sysctl.conf
+<span class="token comment">#追加以下内容</span>
+
+net.ipv4.ip_forward <span class="token operator">=</span> <span class="token number">1</span>
+net.bridge.bridge-nf-call-ip6tables <span class="token operator">=</span> <span class="token number">1</span>
+net.bridge.bridge-nf-call-iptables <span class="token operator">=</span> <span class="token number">1</span>
+
+
+sysctl --system  <span class="token comment">#生效</span>
+</code></pre> 
+<p>有教程是在/etc/sysctl.d/k8s.conf自建文件添加，但没有上一步的加载内核模块，会导致网桥参数不能生效。不执行以上这两步，后面都有可能报错。也可以sysctl -f /etc/k8s.conf加载指定文件里面的参数。</p> 
+<h2>
+<a id="6_68"></a>6、时间同步</h2> 
+<pre><code class="prism language-shell">yum <span class="token function">install</span> ntp -y
+ntpdate ntp2.aliyun.com
+</code></pre> 
+<h1>
+<a id="dockercontainerd_73"></a>三、安装docker&amp;containerd</h1> 
+<p>kubernetes1.20版本后不在直接由docker daemon处理镜像操作，转为直接与containerd服务交互后，去调用runc去处理镜像操作。在此安装docker-ce的同时会自动安装containerd服务。<br> 建议先将yum基础源换成国内的，这里不演示。由于centos7的基础源都不是最新的docker-ce版本，所有还要添加一个专门的docker源(国内阿里云的源)来安装教新的版本。</p> 
+<pre><code class="prism language-shell"><span class="token function">wget</span> https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo -O /etc/yum.repos.d/docker-ce.repo
+
+yum makecache
+
+<span class="token comment">#安装指定版本的docker：</span>
+yum <span class="token function">install</span> docker-ce-20.10.24 -y
+</code></pre> 
+<p>docker镜像加速（这步不是必须的，因为后面基本都是国外的源或者自己手动下载的镜像）：</p> 
+<pre><code class="prism language-shell"><span class="token function">vi</span> /etc/docker/daemon.json
+<span class="token punctuation">{<!-- --></span>
+  <span class="token string">"registry-mirrors"</span><span class="token builtin class-name">:</span> <span class="token punctuation">[</span><span class="token string">"https://lgernt2z.mirror.aliyuncs.com"</span><span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h1>
+<a id="kubectlkubeadmkubelet_91"></a>四、安装kubectl、kubeadm、kubelet</h1> 
+<blockquote> 
+ <p>Kubelet：<br> 运行在cluster所有节点上，负责启动POD和容器<br> Kubeadm：<br> 用于初始化cluster的一个工具<br> Kubectl：<br> kubectl是kubenetes命令行工具，通过kubectl可以部署和管理应用，查看各种资源，创建，删除和更新组件</p> 
+</blockquote> 
+<p>直接安装是用的谷歌的源，我们更换为aliyun的源</p> 
+<pre><code class="prism language-shell"><span class="token function">cat</span> <span class="token operator">&gt;</span> /etc/yum.repos.d/kubernetes.repo <span class="token operator">&lt;&lt;</span> <span class="token string">EOF
+[kubernetes]
+name=Kubernetes
+baseurl=https://mirrors.aliyun.com/kubernetes/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=0
+repo_gpgcheck=0
+gpgkey=https://mirrors.aliyun.com/kubernetes/yum/doc/yum-key.gpg https://mirrors.aliyun.com/kubernetes/yum/doc/rpm-package-key.gpg
+EOF</span>
+
+yum makecache
+yum <span class="token function">install</span> kubelet-1.27.1 kubeadm-1.27.1 kubectl-1.27.1 -y
+</code></pre> 
+<p>检查下版本：<br> kubeadm version<br> kubectl version --client<br> kubelet --version</p> 
+<p>最后我们将相关服务设置成开机自启：</p> 
+<pre><code class="prism language-shell">systemctl <span class="token builtin class-name">enable</span> containerd
+systemctl <span class="token builtin class-name">enable</span> <span class="token function">docker</span>
+systemctl <span class="token builtin class-name">enable</span> kubelet
+</code></pre> 
+<h1>
+<a id="kubernetesmaster_125"></a>五、初始化kubernetes的master节点</h1> 
+<p>之前步骤需要在master和node上都执行，本步骤只在master执行。</p> 
+<h2>
+<a id="1_127"></a>（1）初始化</h2> 
+<pre><code class="prism language-shell">kubeadm init <span class="token punctuation"></span>
+--apiserver-advertise-address<span class="token operator">=</span><span class="token number">192.168</span>.180.89 <span class="token punctuation"></span>
+--control-plane-endpoint<span class="token operator">=</span>master01 <span class="token punctuation"></span>
+--image-repository  registry.aliyuncs.com/google_containers <span class="token punctuation"></span>
+--kubernetes-version v1.27.1  <span class="token punctuation"></span>
+--service-cidr<span class="token operator">=</span><span class="token number">10.10</span>.0.0/12  <span class="token punctuation"></span>
+--pod-network-cidr<span class="token operator">=</span><span class="token number">10.254</span>.0.0/16
+</code></pre> 
+<p>经测试，尽管我们指定了参数image-repository镜像仓库为aliyun，但初始化的时候仍然会去k8s.io拉取镜像，由于众所周知的原因拉取会失败，以及会出现cgroup相关的告警，我们需要修改相关配置。</p> 
+<h2>
+<a id="2containerd_138"></a>（2）修改containerd配置</h2> 
+<p>本步骤node节点也要同样的修改</p> 
+<pre><code class="prism language-shell"><span class="token function">cp</span> /etc/containerd/config.toml /etc/containerd/config.toml.bak
+<span class="token comment">#备份源文件</span>
+
+containerd config default <span class="token operator">&gt;</span> /etc/containerd/config.toml
+
+<span class="token function">vi</span> /etc/containerd/config.toml
+</code></pre> 
+<pre><code>找到SystemdCgroup = false这一行，将false改为true。
+找到包含sandbox_image这一行，将地址改为“registry.cn-hangzhou.aliyuncs.com/google_containers/pause:3.9”
+</code></pre> 
+<pre><code class="prism language-shell">systemctl restart containerd<span class="token comment">#重启生效修改后的配置</span>
+</code></pre> 
+<h2>
+<a id="3_154"></a>（3）再次执行初始化</h2> 
+<p>再次执行第一步之前，我们可以先手动拉取所需的镜像（非必须）</p> 
+<pre><code> #查看会拉取的镜像清单
+ kubeadm config images list
+ #手动提前拉取镜像，可以看到拉取过程及拉取情况
+ kubeadm config images pull
+</code></pre> 
+<pre><code class="prism language-shell">Your Kubernetes control-plane has initialized successfully<span class="token operator">!</span>
+</code></pre> 
+<p>出现上述语句说明初始化成功</p> 
+<p>将最后的语句保存下来，用来添加node节点：</p> 
+<pre><code class="prism language-shell">kubeadm <span class="token function">join</span> master01:6443 --token duccxz.6h3ljhxgyw05558s <span class="token punctuation"></span>
+        --discovery-token-ca-cert-hash sha256:1975d525e3ce447291a8630bdd105f04ea8e63881f4ac66f1e0e81f353ed6c7e
+</code></pre> 
+<p>如果忘记保存：kubeadm token create --print-join-command这个命令可以重新获取</p> 
+<h2>
+<a id="4_174"></a>（4）检查初始化情况</h2> 
+<pre><code class="prism language-shell">kubectl get pod -n kube-system
+</code></pre> 
+<p>如果出现：couldn’t get current server API group list: Get “http://localhost:8080/api?timeout=32s”: dial tcp 127.0.0.1:8080: connect: connection refused</p> 
+<p>需要执行下面操作<br> 方法1：</p> 
+<pre><code class="prism language-shell"><span class="token function">mkdir</span> -p <span class="token environment constant">$HOME</span>/.kube
+<span class="token function">sudo</span> <span class="token function">cp</span> -i /etc/kubernetes/admin.conf <span class="token environment constant">$HOME</span>/.kube/config
+<span class="token function">sudo</span> <span class="token function">chown</span> <span class="token variable"><span class="token variable">$(</span><span class="token function">id</span> -u<span class="token variable">)</span></span><span class="token builtin class-name">:</span><span class="token variable"><span class="token variable">$(</span><span class="token function">id</span> -g<span class="token variable">)</span></span> <span class="token environment constant">$HOME</span>/.kube/config
+</code></pre> 
+<p>方法2：</p> 
+<pre><code class="prism language-shell"><span class="token function">sudo</span> <span class="token function">vim</span> /etc/profile
+
+<span class="token builtin class-name">export</span> <span class="token assign-left variable">KUBECONFIG</span><span class="token operator">=</span>/etc/kubernetes/admin.conf
+
+<span class="token builtin class-name">source</span> /etc/profile
+</code></pre> 
+<p><img src="https://images2.imgbox.com/76/2c/V6zojlgU_o.png" alt="成功后显示，上面是安装calico和添加node后的情况"><br> 成功后显示，上面是安装calico和添加node后的情况，按步骤执行下来要少一些pod。</p> 
+<h2>
+<a id="5node_197"></a>（5）添加node节点</h2> 
+<pre><code class="prism language-shell">kubeadm <span class="token function">join</span> master01:6443 --token duccxz.6h3ljhxgyw05558s <span class="token punctuation"></span>
+        --discovery-token-ca-cert-hash sha256:1975d525e3ce447291a8630bdd105f04ea8e63881f4ac66f1e0e81f353ed6c7e
+</code></pre> 
+<p>在node节点上执行。</p> 
+<p>成功后返回master上执行：</p> 
+<pre><code class="prism language-shell">kubectl get nodes -A
+</code></pre> 
+<p><img src="https://images2.imgbox.com/11/c2/iAAyGFRc_o.png" alt="在这里插入图片描述"><br> 没安装网络插件之前，STATUS应该是not ready状态。我的已经安装了，所以是Ready状态。</p> 
+<h1>
+<a id="_210"></a>六、安装网络插件</h1> 
+<p>目前主流的网络插件是flannel和calico，这里只演示calico。<br> 本人多方查找并未找到calico或者flannel的国内源。并且本次是安装的最新版。<br> 基本目前找到的教程或者资源给到的calico.yaml文件都是来自https://raw.githubusercontent.com，国内无法打开。image虽然可以拉取，但是拉取速度非常慢，单个镜像本人网速环境拉取超过一个小时，故直接去calico的GitHub官方仓库下载了整个calico 3.25.1的安装包。地址如下：</p> 
+<pre><code>https://github.com/projectcalico/calico/releases
+国内是可以正常打开GitHub代码仓库的，虽然速度慢了点儿，但比直接拉取要快不少。
+</code></pre> 
+<p><img src="https://images2.imgbox.com/9d/39/p1b9rjrG_o.png" alt="下载完整包"><br> 这个包含了yaml和image，虽然是国外的资源和大小有1个G，但只下载了大约半个小时，已经算很快了。<br> 将release-v3.25.1.tgz包上传到master节点上。</p> 
+<pre><code class="prism language-shell"><span class="token function">tar</span> vxf release-v3.25.1.tgz
+<span class="token comment">#解压完后会有个release-v3.25.1的目录，下面有manifests和images</span>
+
+crictl images list
+<span class="token comment">#查看当前kubernetes环境下有哪些镜像</span>
+
+ctr namespace list
+<span class="token comment">#查看有哪些命名空间，默认导入镜像会到default这个命名空间</span>
+
+ctr --namespace<span class="token operator">=</span>k8s.io images <span class="token function">import</span> calico-kube-controllers.tar
+ctr --namespace<span class="token operator">=</span>k8s.io images <span class="token function">import</span> calico-node.tar
+ctr --namespace<span class="token operator">=</span>k8s.io images <span class="token function">import</span> calico-cni.tar
+<span class="token comment">#需要指定导入的命名空间为k8s.io，如果不在image目录下，镜像要写绝对路径</span>
+
+crictl image list
+<span class="token comment">#查看导入的镜像，见下图</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/7b/c1/lUDJ7E0y_o.png" alt="在这里插入图片描述"><br> 直接用yaml文件创建calico的pod。</p> 
+<pre><code class="prism language-shell">kubectl apply -f calico.yaml
+<span class="token comment">#这个文件在release-v3.25.1/manifests/calico.yaml,不在当前目录下，请写绝对路径</span>
+</code></pre> 
+<p>等待结束后，通过kubectl get pods -n kube-system查看calico的pod：<br> <img src="https://images2.imgbox.com/e0/bb/JdOEgz5d_o.png" alt="在这里插入图片描述"><br> coredns的pod也正常了。<br> 至此基本环境的安装结束。</p> 
+<h1>
+<a id="_248"></a>补充</h1> 
+<p>如果crictl执行出现类似：</p> 
+<pre><code class="prism language-shell">WARN<span class="token punctuation">[</span>0000<span class="token punctuation">]</span> image connect using default endpoints: <span class="token punctuation">[</span>unix:///var/run/dockershim.sock unix:///run/containerd/containerd.sock unix:///run/crio/crio.sock unix:///var/run/cri-dockerd.sock<span class="token punctuation">]</span>. As the default settings are now deprecated, you should <span class="token builtin class-name">set</span> the endpoint instead. 
+ERRO<span class="token punctuation">[</span>0002<span class="token punctuation">]</span> connect endpoint <span class="token string">'unix:///var/run/dockershim.sock'</span>, <span class="token function">make</span> sure you are running as root and the endpoint has been started: context deadline exceeded 
+</code></pre> 
+<p>这样的错误，可以执行下面语句进行修正</p> 
+<pre><code class="prism language-shell"><span class="token function">cat</span> <span class="token operator">&lt;&lt;</span>EOF<span class="token operator">&gt;</span> /etc/crictl.yaml 
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: <span class="token number">10</span>
+debug: <span class="token boolean">false</span>
+EOF
+
+</code></pre> 
+<p>其他：<br> yum search docker-ce只显示一个版本（或者查找其他安装包不显示全部可用版本），可以添加–showduplicates<br> 例如：yum search docker-ce --showduplicates</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

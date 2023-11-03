@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Redis分布式锁实现原理 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis分布式锁实现原理</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-github-gist">
+                    
+                        
+                    
+                    <p></p> 
+<div class="toc"> 
+ <h3>Redisson 分布式锁</h3> 
+ <ul><li>
+<ul>
+<li><a href="#_2">为什么需要分布式锁</a></li>
+<li><a href="#Redis_13">如何利用Redis实现锁机制</a></li>
+<li><a href="#Redisson_52">Redisson原理</a></li>
+<li><a href="#Redisson__140">Redisson 单机模式下的缺点</a></li>
+</ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2>
+<a id="_2"></a>为什么需要分布式锁</h2> 
+<p>在早期互联网的架构中，一个应用都是单机进行部署，这种情况下，利用JDK提供的锁机制即可解决共享数据在多线程场景下的线程安全问题，但随着技术的发展，分布式系统架构逐渐普及，在分布式架构中，由于一个应用会进行多机部署，服务器实例之间的JVM是互相独立的， 这时候利用JDK提供的锁在这种场景下是没办法共享的 ，所以需要依靠一个中间件实现在分布式的场景下对锁的共享，典型的如 **Redis **。</p> 
+<p><em>为什么是Redis</em></p> 
+<ul>
+<li>由于Redis中的数据是存放在内存中，读写速度很快，没有磁盘的IO，所以加锁和释放锁的速度会很快，性能很高。</li>
+<li>Redis对客户端的请求都是单进程单线程进行处理的，也就意味着串行化去执行的，所以Redis的单个命令是支持原子性的，即使对于多个Redis指令，Redis也提供了将多个指令合并在一个Lua脚本中一起执行，从而保证多条指令的原子性操作。</li>
+</ul> 
+<p>分布式锁的加锁和解锁的要求必须是原子性的，而Redis就可以很好的支持这一特性。</p> 
+<h2>
+<a id="Redis_13"></a>如何利用Redis实现锁机制</h2> 
+<p>用一句话概括的说，其实Redis实现锁机制其实就是在Redis中设置一个key-value，当key存在时，即上锁，删除key即解锁。<br> 当然要想实现一个很健壮的锁机制，这其中还有很多细节不容忽视，所以下面，我们一步一步的跟着思路去思考如何使用Redis实现一个分布式的锁：</p> 
+<ol>
+<li> <p>加锁保证互斥性，同一时间只能有一个客户端加锁成功。</p> 
+  <ul>
+<li> <p>通过Redis的<code>setnx</code>命令实现，<code>setnx</code>即 set if not exists，当key不存在时才能设置成功</p> <pre><code class="prism language-shell">SETNX key value
+     summary: Set the value of a key, only <span class="token keyword">if</span> the key does not exist
+     since: <span class="token number">1.0</span>.0
+     group: string
+</code></pre> </li>
+<li> <p>(推荐)通过<code>set key value PX 3000 NX</code>，PX指过期时间，NX即not exists，效果等同<code>setnx</code>，但是由于 <code>setnx</code> 不支持设置过期时间，所以需要拆分成两个两个命令<code>setnx key value</code> 和 <code>expire key 3</code>，要保证原子性还需要将两个命令合并为一个lua脚本。</p> <pre><code class="prism language-shell">SET key value <span class="token punctuation">[</span>EX seconds<span class="token operator">|</span>PX milliseconds<span class="token operator">|</span>EXAT timestamp<span class="token operator">|</span>PXAT milliseconds-timestamp<span class="token operator">|</span>KEEPTTL<span class="token punctuation">]</span> <span class="token punctuation">[</span>NX<span class="token operator">|</span>XX<span class="token punctuation">]</span> <span class="token punctuation">[</span>GET<span class="token punctuation">]</span>
+  summary: Set the string value of a key
+  since: <span class="token number">1.0</span>.0
+  group: string
+</code></pre> </li>
+</ul> <p>前面也提到，由于Redis是单线程的，所以当大量请求过来时，这些请求是串行化执行的，所以一定只有一个请求才能设置成功，从而保证了加锁的互斥性。</p> </li>
+<li> <p>防止死锁<br> 当客户端加锁之后，在释放锁之前如果Redis发生了宕机，那么Redis中的锁就无法自动释放，最终产生死锁，所以为了避免死锁，我们还需要给这个锁的key设置一个合理的过期时间，当锁占用的时间超过指定的过期时间，则自动删除该锁对应的key释放锁，让其他客户端能够有机会去争抢这个锁。</p> </li>
+<li> <p>锁过期提前释放<br> 上一步由于为了避免死锁，所以在加锁时，指定了锁的有效期，但是这个有效期也是估算出来的，如果实际业务处理时间超过了锁的有效期，锁会被提前释放，就会导致其他客户端获得了锁，从而导致锁机制的失效。<br> 所以为了解决该问题，就需要一个机制去对锁进行续期，防止在加锁的业务还未处理完之前，被提前释放，我们可以利用一个子线程，在锁有效期到期之前，定期的去的给锁进行续期，即：增加key的过期时间。</p> </li>
+<li> <p>释放锁<br> 释放锁，只需要将对应的锁的key从redis中删除即可，但是这里需要注意的是，在释放锁之前，必须判断只有是当前线程占用的锁才可以进行释放，所以锁的key对应的value我们就可以存放当前的客户端的身份标识，在释放锁之前，比对一下当前释放锁的客户端是否是当前加锁的客户端，如果匹配成功则可以正常删除对应的key释放锁，否则就不释放锁。</p> </li>
+</ol> 
+<p>综合以上的对Redis实现锁的思路分析，其实市面上已经有了成熟的开源框架的实现，就是今天的主角 <code>Redisson</code>，<code>Redisson</code> 不仅实现了基于Redis实现加锁，解锁，还提供了防死锁，锁续期，以及可重入的锁的功能，可以说能够满足大多数的场景了，下面我们就看下Redisson底层是如何实现Redis分布式锁的。</p> 
+<h2>
+<a id="Redisson_52"></a>Redisson原理</h2> 
+<p>Redisson提供<code>RLock</code>的接口，继承了JUC包下的<code>java.util.concurrent.locks.Lock</code>， 所以加锁的方式和JDK提供的<code>ReentrantLock</code>加锁方式很类似。<br> 我们先来看一段利用Redisson加锁的代码：</p> 
+<pre><code class="prism language-java">        <span class="token comment">// 获取锁对象</span>
+        <span class="token class-name">RLock</span> lock <span class="token operator">=</span> redissonClient<span class="token punctuation">.</span><span class="token function">getLock</span><span class="token punctuation">(</span><span class="token string">"myLock"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 加锁， 5 代表锁过期自动释放的时间，单位为 秒</span>
+            <span class="token keyword">boolean</span> locked <span class="token operator">=</span> lock<span class="token punctuation">.</span><span class="token function">tryLock</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span>SECONDS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>locked<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 处理业务逻辑</span>
+            <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 未获取锁的逻辑</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 只有持有锁的线程才能释放锁</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>lock<span class="token punctuation">.</span><span class="token function">isLocked</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> lock<span class="token punctuation">.</span><span class="token function">isHeldByCurrentThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                lock<span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+</code></pre> 
+<ol>
+<li> <p>获取锁对象 <code>RLock lock = redissonClient.getLock("myLock");</code></p> <p>这里<code>myLock</code>就是指定Redis中锁的<strong>唯一标识</strong>，关于key值需要根据实际业务来确定，一定要保证唯一性，而且key值也决定了锁粒度的大小。</p> </li>
+<li> <p>加锁</p> <p>Redisson常用的加锁方式如：lock，tryLock，方式的区别如下：</p> 
+  <ul>
+<li> <p>lock方式，无返回值，如果锁已经被其他客户端持有，会利用Redis中的PUB/SUB机制，订阅Redisson解锁消息，并且当前线程会进行await阻塞，当监听到解锁消息，阻塞的客户端会被唤醒进行锁争夺。</p> <p><img src="https://images2.imgbox.com/e1/f9/3i67PLrW_o.png" alt="在这里插入图片描述"></p> </li>
+<li> <p>tryLock 方式是有返回值的，当加锁失败会返回一个false，交由调用方决定后续的操作。</p> </li>
+</ul> <p>对于以上两种加锁方式，最终都会调用下面这段Lua脚本的代码进行加锁操作：</p> </li>
+</ol> 
+<p><img src="https://images2.imgbox.com/e6/65/ccDxfEV3_o.png" alt="在这里插入图片描述"></p> 
+<p>对于上述的Lua脚本解读如下：</p> 
+<p>a. 第一步通过 <code>exists key </code>去判断锁的key是否存在.</p> 
+<p>b. 第二步，如果第一步中的判断返回0，表示 key 不存在，这时候可以加锁，利用<code>hset key value</code> 设置<code>key</code>的<code>value</code>，即<code>ARGV[2]</code>.</p> 
+<pre><code>  &gt; hset 代表这个key对应的value是一个hash类型，类似于HashMap，其中field代表客户端，value是重入次数。
+  &gt;
+  &gt; ARGV[2] 代表了加锁客户端的唯一标识，由UUID和线程id组成，可以理解为某个客户端的某个线程加锁。
+</code></pre> 
+<p>c. 第三步设置key的存活时间<code>internalLockLeaseTime</code>，这里 <code>ARGV[1]</code> 代表的是锁 key 的默认生存时间，默认 30 秒。</p> 
+<p>如果a步骤中的<code>exists key</code>判断key已经存在，即<code>exists KEYS[1]</code> 返回1，则利用<code>hexists key field</code> 判断当前的客户端ID（即ARG[2]）在锁的key对应的hash数据结构中是否存在</p> 
+<ul>
+<li>存在表明是当前客户端持有的锁，这时候就相当于锁重入，就利用<code>hincrby key field increment</code>去对锁重入进行 + 1，并通过<code>pexpire key millseconds</code>设置过期时间。</li>
+<li>不存在则表明当前持有锁是另外一个客户端，所以直接退出第二个if判断</li>
+</ul> 
+<p>如果上述两个if条件都未满足，则<code>pttl key </code>返回当前锁的key的剩余存活时间。</p> 
+<ol start="3">
+<li> <p>从上述描述可以看出，锁的key其实可以设置过期时间的，key一旦过期，redis就会清除这个key，如果当业务处理的时间超出了锁的有效期，这时候锁就会被其他客户端获取成功，会造成锁失效，所以在Redisson中还存在一个WatchDog的机制去对去定期（默认10秒）去给锁续期，即Redisson会开启定时任务<code>TimerTask</code>去定时对锁的有效期进行延长。<br> 这里需要注意的是，<strong>WatchDog机制只有在我们未手工指定对应的锁过期时间<code>leaseTime</code>才会生效</strong></p> <p><img src="https://images2.imgbox.com/fb/aa/uYmhWIEF_o.png" alt="在这里插入图片描述"></p> </li>
+<li> <p>unlock 释放锁，释放锁的时候需要判断当前的客户端（<code>UUID + threadId</code>）是否持有锁，只有持有锁的客户端才能释放锁。</p> <p><img src="https://images2.imgbox.com/39/5b/JdDGcYYe_o.png" alt="在这里插入图片描述"></p> <p>unlock 其实最终也是通过Lua脚本进行解锁：</p> <p>a. 通过<code>hexists lockKey clientId</code>判断是否当前客户端持有锁，如果不是，则直接返回</p> <p>b. 如果是当前客户端持有锁，则对锁的重入次数<code>counter</code>进行-1，如果-1之后重入次数依旧大于0，说明锁被重入，需等待重入次数为0才可以解锁，这时候重新设置锁key的有效期。</p> <p>c. 如果重入次数已经为0，则开始释放锁，即<code>del lockKey</code>，并且发布一个锁释放的消息到channel中，通知其他等待锁的客户端进行加锁操作。</p> </li>
+</ol> 
+<hr> 
+<p>以上就是Redisson分布式锁的实现原理。</p> 
+<h2>
+<a id="Redisson__140"></a>Redisson 单机模式下的缺点</h2> 
+<p>事实上这类锁最大的缺点就是它加锁时只作用在一个Redis节点上，如果Redis挂了，那么就会产生单点故障的问题，<br> 即使Redis通过sentinel哨兵机制保证高可用，当master节点发生故障后，可以故障转移，slaver升级为master，<br> 但由于主从之间的数据同步是异步的， 如果在发生主从切换的时候，key 还没来得及同步到slaver上，那么就会出现锁丢失的情况：</p> 
+<pre><code>  1. 在Redis的master节点上拿到了锁；
+  2. 但是这个加锁的key还没有同步到slave节点；
+  3. master故障，发生故障转移，slave节点升级为master节点；
+  4. 导致锁丢失
+</code></pre> 
+<p>所以Redis对于这种场景提供<code>RedLock</code>红锁，即对主节点master的Redis进行集群，多个master实例间互相独立，需要对N个实例进行上锁，这里假设有5个Redis集群，当获取锁的时候，当且仅当大多数的节点（即 N/2 + 1）都设置锁成功，整个获取锁的过程才算成功，如果没有满足该条件，就需要在向所有的Redis实例发送释放锁命令即可，不用关心之前有没有从Redis实例成功获取到锁.</p> 
+<blockquote> 
+ <p>这里顺手推荐一篇比较好的文章 https://segmentfault.com/a/1190000041172633</p> 
+</blockquote>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

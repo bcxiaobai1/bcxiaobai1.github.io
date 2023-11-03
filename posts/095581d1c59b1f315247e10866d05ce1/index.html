@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>CAP理论与MongoDB一致性，可用性的一些思考 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">CAP理论与MongoDB一致性，可用性的一些思考</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p><strong>正文</strong></p> 
+<p>　 </p> 
+<p>　　大约在五六年前，第一次接触到了当时已经是hot topic的NoSql。不过那个时候学的用的都是mysql，Nosql对于我而言还是新事物，并没有真正使用，只是不明觉厉。但是印象深刻的是这么一张图片（后来google到图片来自<a href="http://blog.nahurst.com/visual-guide-to-nosql-systems" title="这里">这里</a>）：</p> 
+<p>　　</p> 
+<p class="img-center"><img alt="" height="249" src="https://images2.imgbox.com/6b/97/Vj6Ziurq_o.png" width="415"></p> 
+<p>    这张图片是讲数据库（包括传统的关系型数据库和NOSQL）与CAP理论的关系。由于并NoSql并没有实践经验，也没有去深入了解，对于CAP理论更是一知半解。因此，为什么某一款数据库被划分到哪一个阵营，并不清楚。</p> 
+<p>    工作之后对MongoDB使用得比较多，有了一定的了解，前段时间又看到了这张图，于是想搞清楚，MongoDB是不是真的属于CP阵营，又是为什么？怀疑这个问题的初衷是因为，MongoDB的经典（官方推荐）部署架构中都会使用replica set，而replica set通过冗余和自动failover提供高可用性（Availability），那么为什么上图中说MongoDB牺牲了Avalability呢？而我在MongoDB的官方文档中搜索“CAP”，并没有搜索到任何内容。于是我想自己搞清楚这个疑问，给自己一个答案。</p> 
+<p>　　本文先阐明什么是CAP理论，以及关于CAP理论的一些文章，然后讨论MongoDB在一致性与可用性之间的折中与权衡。</p> 
+<p></p> 
+<p><a name="_label_0"></a></p> 
+<h1>CAP理论</h1> 
+<p></p> 
+<p>对CAP理论我只知道这三个单词的意思，其解释也是来自网上的一些文章，并不一定准确。所以首先得追根溯源，搞清楚这个理论的起源和准确的解释。我觉得最好的开始就是<a href="https://en.wikipedia.org/wiki/CAP_theorem" title="wikipedia">wikipedia</a>，从上面可以看到比较准确的介绍，更为重要的是可以看到很多有用的链接，比如CAP理论的出处，发展演变过程。</p> 
+<p></p> 
+<p>　　CAP理论是说对于分布式数据存储，最多只能同时满足一致性（C，Consistency）、可用性（A， Availability）、分区容错性（P，Partition Tolerance）中的两者。</p> 
+<p>　　一致性，是指对于每一次读操作，要么都能够读到最新写入的数据，要么错误。</p> 
+<p>　　可用性，是指对于每一次请求，都能够得到一个及时的、非错的响应，但是不保证请求的结果是基于最新写入的数据。</p> 
+<p>　　分区容错性，是指由于节点之间的网络问题，即使一些消息对包或者延迟，整个系统能继续提供服务（提供一致性或者可用性）。</p> 
+<p></p> 
+<p>　　一致性、可用性都是使用非常宽泛的术语，在不同的语义环境下具体所指是不一样的，比如在<a href="https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed" title="cap-twelve-years-later-how-the-rules-have-changed">cap-twelve-years-later-how-the-rules-have-changed</a>一文中Brewer就指出“CAP中的一致性与ACID中的一致性并不是同一个问题”，因此后文中除非特别说明，所提到的一致性、可用性都是指在CAP理论中的定义。只有明确了大家都是在同样的上下文环境，讨论才有意义。</p> 
+<p>    </p> 
+<p>　　对于分布式系统，网络分区（network partition）这种情况是难以避免的，节点间的数据复制一定存在延迟，如果需要保证一致性（对所有读请求都能够读到最新写入的数据），那么势必在一定时间内是不可用的（不能读取），即牺牲了可用性，反之亦然。</p> 
+<p>　　按照维基百科上的描述，CAP之间的相互关系大约起源于1998年，Brewer在2000年的PODC（<a href="https://en.wikipedia.org/wiki/Symposium_on_Principles_of_Distributed_Computing" title="Symposium on Principles of Distributed Computing">Symposium on Principles of Distributed Computing</a>）上展示了CAP猜想[3]，在2002年，由另外两名科学家Seth Gilbert、Nancy Lynch证明了Brewer的猜想，从而从猜想变成了定理[4]。</p> 
+<p>　　</p> 
+<p><a name="_label_1"></a></p> 
+<h2>CAP理论起源</h2> 
+<p>　　在<a href="https://people.eecs.berkeley.edu/~brewer/cs262b-2004/PODC-keynote.pdf" title="Towards Robust Distributed Systems">Towards Robust Distributed Systems</a> 中，CAP理论的提出者Brewer指出：在分布式系统中，计算是相对容易的，真正困难的是状态的维护。那么对于分布式存储或者说数据共享系统，数据的一致性保证也是比较困难的。对于传统的关系型数据库，优先考虑的是一致性而不是可用性，因此提出了事务的ACID特性。而对于许多分布式存储系统，则是更看重可用性而不是一致性，一致性通过BASE（Basically Available, Soft state, Eventual consistency）来保证。下面这张图展示了ACID与BASE的区别：</p> 
+<p>　　</p> 
+<p class="img-center"><img alt="" height="391" src="https://images2.imgbox.com/cf/3b/SCZjtOPR_o.png" width="621"></p> 
+<p>　　简而言之：BASE通过最终一致性来尽量保证服务的可用性。注意图中最后一句话“But I think it‘s a spectrum”，就是说ACID BASE只是一个度的问题，并不是对立的两个极端。</p> 
+<p>　　</p> 
+<p>　　2002年，在<a href="http://dl.acm.org/citation.cfm?id=564601&amp;CFID=609557487&amp;CFTOKEN=15997970" title="Brewer's conjecture and the feasibility of consistent, available, partition-tolerant web services">Brewer's conjecture and the feasibility of consistent, available, partition-tolerant web services</a>中，两位作者通过异步网络模型论证了CAP猜想，从而将Brewer的猜想升级成了理论（theorem）。但实话说，我也没有把文章读得很明白。</p> 
+<p>　　</p> 
+<p>　　2009年的这篇文章<a href="http://www.julianbrowne.com/article/viewer/brewers-cap-theorem" title="brewers-cap-theorem">brewers-cap-theorem</a>，作者给出了一个比较简单的证明：</p> 
+<p>　　</p> 
+<p class="img-center"><img alt="" height="243" src="https://images2.imgbox.com/bb/a2/SzFDIJB5_o.png" width="207"></p> 
+<p>　　如上图所示，N1，N2两个节点存储同一份数据V，当前的状态是V0。在节点N1上运行的是安全可靠的写算法A，在节点N2运行的是同样可靠的读算法B，即N1节点负责写操作，N2节点负责读操作。N1节点写入的数据也会自动向N2同步，同步的消息称之为M。如果N1，N2之间出现分区，那么就没法保证消息M在一定的时间内到达N2。</p> 
+<p>　　从事务的角度来看这各问题</p> 
+<p>　　</p> 
+<p class="img-center"><img alt="" height="168" src="https://images2.imgbox.com/77/82/6ZZg49Tu_o.png" width="630"></p> 
+<p> 　　α这个事务由操作α1， α2组成，其中α1是写数据，α2是读数据。如果是单点，那么很容易保证α2能读到α1写入的数据。如果是分布式的情况的情况，除非能控制 α2的发生时间，否则无法保证 α2能读到 α1写入的数据，但任何的控制（比如阻塞，数据集中化等）要么破坏了分区容错性，要么损失了可用性。</p> 
+<p>　　另外，这边文章指出很多情况下 availability比consistency重要，比如对于facebook google这样的网站，短暂的不可用就会带来巨大的损失。</p> 
+<p>　　</p> 
+<p>　　2010年的这篇文章<a href="http://www.royans.net/wp/2010/02/14/brewers-cap-theorem-on-distributed-systems/" title="brewers-cap-theorem-on-distributed-systems/">brewers-cap-theorem-on-distributed-systems/</a>，用了三个例子来阐述CAP，分别是example1：单点的mysql；example2：两个mysql，但不同的mysql存储不同的数据子集（类似sharding）；example3：两个mysql，对A的一个insert操作，需要在B上执行成功才认为操作完成（类似复制集）。作者认为在example1和example2上 都能保证强一致性，但不能保证可用性；在example3这个例子，由于分区（partition）的存在，就需要在一致性与可用性之间权衡。</p> 
+<p>　　于我看来，讨论CAP理论最好是在“分布式存储系统”这个大前提下，可用性也不是说整体服务的可用性，而是分布式系统中某个子节点的可用性。因此感觉上文的例子并不是很恰当。</p> 
+<p><a name="_label_2"></a></p> 
+<h2>CAP理论发展</h2> 
+<p> 　  到了2012年，CAP理论的发明人 Brewer就CAP理论再次撰文<a href="https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed" title='《CAP Twelve Years Later: How the "Rules" Have Changed》'>《CAP Twelve Years Later: How the "Rules" Have Changed》</a>，这篇文章比较长，但思路清晰，高屋建瓴，非常值得一读。网上也有对用的中文译文<a href="http://www.infoq.com/cn/articles/cap-twelve-years-later-how-the-rules-have-changed" title='《CAP理论十二年回顾："规则"变了》'>《CAP理论十二年回顾："规则"变了》</a>，翻译还不错。</p> 
+<p>　　文章中，最主要的观点是CAP理论并不是说三者不需选择两者。首先，虽然只要是分布式系统，就可能存在分区，但分区出现的概率是很小的（否则就需要去优化网络或者硬件），CAP在大多数时候允许完美的C和A；只有在分区存在的时间段内，才需要在C与A之间权衡。其次，一致性和可用性都是一个度的问题，不是0或者1的问题，可用性可以在0%到100%之间连续变化，一致性分为很多级别（比如在casandra，可以设置<a href="http://cassandra.apache.org/doc/latest/architecture/dynamo.html?highlight=consistency#tunable-consistency" title="consistency level">consistency level</a>）。因此，当代CAP实践的目标应该是针对具体的应用，在合理范围内最大化数据一致性和可用性的效力。</p> 
+<p></p> 
+<p>　　文章中还指出，分区是一个相对的概念，当超过了预定的通信时限，即系统如果不能在时限内达成数据一致性，就意味着发生了分区的情况，必须就当前操作在C和A之间做出选择。</p> 
+<blockquote> 
+ <p>　　从收入目标以及合约规定来讲，系统<strong>可用性是首要目标</strong>，因而我们常规会使用缓存或者事后校核更新日志来优化系统的可用性。因此，当设计师选择可用性的时候，因为需要在分区结束后恢复被破坏的不变性约。</p> 
+ <p>　　实践中，大部分团体认为（位于单一地点的）数据中心内部是没有分区的，因此在单一数据中心之内可以选择CA；CAP理论出现之前，系统都默认这样的设计思路，包括传统数据库在内。</p> 
+ <p>　　分区期间，独立且能自我保证一致性的节点子集合可以继续执行操作，只是无法保证全局范围的不变性约束不受破坏。数据分片（sharding）就是这样的例子，设计师预先将数据划分到不同的分区节点，分区期间单个数据分片多半可以继续操作。相反，如果被分区的是内在关系密切的状态，或者有某些全局性的不变性约束非保持不可，那么最好的情况是只有分区一侧可以进行操作，最坏情况是操作完全不能进行。</p> 
+</blockquote> 
+<p>　　上面摘录中下选线部分跟MongoDB的sharding情况就很相似，MongoDB的sharded cluste模式下，shard之间在正常情况下，是无需相互通信的。</p> 
+<p></p> 
+<p>　　在13年的文章中《<a href="https://dzone.com/articles/better-explaining-cap-theorem" title="better-explaining-cap-theorem">better-explaining-cap-theorem</a>》，作者指出“it is really just A vs C！”，因为</p> 
+<p>　　（1）可用性一般是在不同的机器之间通过数据的复制来实现</p> 
+<p>　　（2）一致性需要在允许读操作之间同时更新几个节点</p> 
+<p>　　（3）temporary partion，即几点之间的通信延迟是可能发生了，此时就需要在A 和 C之间权衡。但只有在发生分区的时候才需要考虑权衡。</p> 
+<p>　　在分布式系统中，网络分区一定会发生，因此“it is really just A vs C！”</p> 
+<p></p> 
+<p><a name="_label_3"></a></p> 
+<h1>MongoDB与CAP        </h1> 
+<p></p> 
+<p>在《通过一步步创建sharded cluster来认识MongoDB》一文中，对MongoDB的特性做了一些介绍，包括高性能、高可用、可扩展（水平伸缩），其中，MongoDB的高可用性依赖于replica set的复制与自动failover。对MongoDB数据库的使用有三种模式：standalone，replica set， shareded cluster，在前文中详细介绍了shared cluster的搭建过程。</p> 
+<p>　　standalone就是单个mongod，应用程序直接连接到这个Mongod，在这种情况下无分区容错性可言，也一定是强一致性的。对于sharded cluster，每一个shard也都推荐是一个replica set。MongoDB中的shards维护的是独立的数据子集，因此shards之间出现了分区影响不大（在chunk迁移的过程可能还是有影响），因此也主要考虑的是shard内部replica set的分区影响。所以，本文中讨论MongoDB的一致性、可用性问题，针对的也是MongoDB的replica set。</p> 
+<p>　　对于replica set，只有一个primary节点，接受写请求和读请求，其他的secondary节点接受读请求。这是一个单写、多读的情况，比多读、多写的情况还是简化了许多。后文为了讨论，也是假设replica set由三个基点组成，一个primary，两个secondary，且所有节点都持久化数据（data-bearing）</p> 
+<p>　　MongoDB关于一致性、可用性的权衡，取决于三者：write-concern、read-concern、read-preference。下面主要是MongoDB3.2版本的情况，因为read-concern是在MongoDB3.2版本中才引入的。</p> 
+<p><a name="_label_4"></a></p> 
+<h2>write-concern：</h2> 
+<p>　　write concern表示对于写操作，MongoDB在什么情况下给予客户端响应。包括下面三个字段：</p> 
+<blockquote> 
+ <p>　　{ w: &lt;value&gt;, j: &lt;boolean&gt;, wtimeout: &lt;number&gt; }</p> 
+</blockquote> 
+<p>　　w: 表示当写请求在value个MongoDB实例处理之后才向客户端返回。取值范围：</p> 
+<p>　　　　1：默认值，表示数据写入到standalone的MongoDB或者replica set的primary之后返回</p> 
+<p>　　　　0：不用写入就直接向客户端返回，性能高，但可能丢数据。不过可以配合j：True来增加数据的可持久性（durability）</p> 
+<p>　　　　&gt;1: 只有在replica set环境下才有用，如果value大于的replica set中节点的数目，那么可能导致阻塞</p> 
+<p>　　　　‘majority’： 当数据写入到replica set的大多数节点之后向客户端返回，对于这种情况，一般是配合read-concern使用：</p> 
+<blockquote> 
+ <p>　　　　After the write operation returns with a <code>w: "majority"</code> acknowledgement to the client, the client can read the result of that write with a <a href="https://docs.mongodb.com/manual/reference/read-concern/#readconcern.%22majority%22" title='"majority"'>"majority"</a> readConcern</p> 
+</blockquote> 
+<p>　　j：表示当写请求在写入journal之后才向客户端返回，默认为False。两点注意：</p> 
+<p>　　　　如果在对于未开启journaling的MongoDB实例使用j:True，会报错</p> 
+<p>　　　　在MongoDB3.2及之后，对于w&gt;1, 需要所有实例都写到journal之后才返回</p> 
+<p>　　wtimeout：表示写入的超时时间，即在指定的时间（number），如果还不能向客户端返回（w大于1的情况），那么返回错误</p> 
+<p>　　　　默认为0，相当于没有设置该选项</p> 
+<p></p> 
+<p>　　在MongoDB3.4中，加入了<a href="https://docs.mongodb.com/manual/reference/replica-configuration/#rsconf.writeConcernMajorityJournalDefault" title="writeConcernMajorityJournalDefault">writeConcernMajorityJournalDefault</a>.这么一个选项，使得w，j在不同的组合下情况下不同:</p> 
+<p>　　</p> 
+<p class="img-center"><img alt="" height="307" src="https://images2.imgbox.com/37/45/YCgEijvT_o.png" width="721"></p> 
+<p><a name="_label_5"></a></p> 
+<h2>read-reference:</h2> 
+<p>　　在<a href="http://www.cnblogs.com/xybaby/p/6832296.html" title="前文">前文</a>已经讲解过，一个replica set由一个primary和多个secondary组成。primary接受写操作，因此数据一定是最新的，secondary通过oplog来同步写操作，因此数据有一定的延迟。对于时效性不是很敏感的查询业务，可以从secondary节点查询，以减轻集群的压力。</p> 
+<p>　　</p> 
+<p class="img-center"><img alt="" height="480" src="https://images2.imgbox.com/63/25/Il4M11rb_o.png" width="800"></p> 
+<p></p> 
+<p>　　MongoDB指出在不同的情况下选用不同的read-reference，非常灵活。MongoDB driver支持一下几种read-reference：</p> 
+<p>　　primary：默认模式，一切读操作都路由到replica set的primary节点</p> 
+<p>　　primaryPreferred：正常情况下都是路由到primary节点，只有当primary节点不可用（failover）的时候，才路由到secondary节点。</p> 
+<p>　　secondary：一切读操作都路由到replica set的secondary节点</p> 
+<p>　　secondaryPreferred：正常情况下都是路由到secondary节点，只有当secondary节点不可用的时候，才路由到primary节点。</p> 
+<p>　　nearest：从延时最小的节点读取数据，不管是primary还是secondary。对于分布式应用且MongoDB是多数据中心部署，nearest能保证最好的data locality。</p> 
+<p></p> 
+<p>　　如果使用secondary或者secondaryPreferred，那么需要意识到：</p> 
+<p>　　(1) 因为延时，读取到的数据可能不是最新的，而且不同的secondary返回的数据还可能不一样；</p> 
+<p>　　(2) 对于默认开启了balancer的sharded collection，由于还未结束或者异常终止的chunk迁移，secondary返回的可能是有缺失或者多余的数据</p> 
+<p>　　(3) 在有多个secondary节点的情况下，选择哪一个secondary节点呢，简单来说是“closest”即平均延时最小的节点，具体参加<a href="https://docs.mongodb.com/manual/core/read-preference-mechanics/" title="Server Selection Algorithm">Server Selection Algorithm</a> </p> 
+<p><a name="_label_6"></a></p> 
+<h2>read-concern:</h2> 
+<p>　　read concern是在MongoDB3.2中才加入的新特性，表示对于replica set（包括sharded cluster中使用复制集的shard）返回什么样的数据。不同的存储引擎对read-concern的支持情况也是不一样的</p> 
+<p>　　read concern有以下三个level：</p> 
+<p>　　local：默认值，返回当前节点的最新数据，当前节点取决于read reference。</p> 
+<p>　　majority：返回的是已经被确认写入到多数节点的最新数据。该选项的使用需要以下条件： WiredTiger存储引擎，且使用election <a href="https://docs.mongodb.com/manual/reference/replica-configuration/#rsconf.protocolVersion" title="protocol version 1">protocol version 1</a>；启动MongoDB实例的时候指定 <code><a href="https://docs.mongodb.com/manual/reference/program/mongod/#cmdoption-enablemajorityreadconcern" title="--enableMajorityReadConcern">--enableMajorityReadConcern</a>选项。</code></p> 
+<p>　　linearizable：3.4版本中引入，这里略过了，感兴趣的读者参考文档。</p> 
+<p></p> 
+<p>　　在文章中有这么一句话：</p> 
+<blockquote> 
+ <p>Regardless of the <a href="https://docs.mongodb.com/manual/reference/glossary/#term-read-concern" title="read concern">read concern</a> level, the most recent data on a node may not reflect the most recent version of the data in the system.</p> 
+</blockquote> 
+<p>　　就是说，即便使用了read concern：majority， 返回的也不一定是最新的数据，这个和NWR理论并不是一回事。究其根本原因，在于<strong>最终返回的数值只来源于一个MongoDB节点</strong>，该节点的选择取决于read reference。</p> 
+<p>　　在<a href="http://mongoing.com/archives/3403" title="这篇文章">这篇文章</a>中，对readconcern的引入的意义以及实现有详细介绍，在这里只引用核心部分：</p> 
+<blockquote> 
+ <p><code>readConcern</code> 的初衷在于解决『脏读』的问题，比如用户从 MongoDB 的 primary 上读取了某一条数据，但这条数据并没有同步到大多数节点，然后 primary 就故障了，重新恢复后 这个primary 节点会将未同步到大多数节点的数据回滚掉，导致用户读到了『脏数据』。</p> 
+ <p>当指定 readConcern 级别为 majority 时，能保证用户读到的数据『已经写入到大多数节点』，而这样的数据肯定不会发生回滚，避免了脏读的问题。</p> 
+</blockquote> 
+<p><a name="_label_7"></a></p> 
+<h2> 一致性 or 可用性？</h2> 
+<p>　　回顾一下CAP理论中对一致性 可用性的问题：<br> 　　一致性，是指对于每一次读操作，要么都能够读到最新写入的数据，要么错误。<br> 　　可用性，是指对于每一次请求，都能够得到一个及时的、非错的响应，但是不保证请求的结果是基于最新写入的数据。<br><br> 　　前面也提到，本文对一致性 可用性的讨论是基于replica set的，是否是shared cluster并不影响。另外，讨论是基于单个客户端的情况，如果是多个客户端，似乎是隔离性的问题，不属于CAP理论范畴。基于对write concern、read concern、read reference的理解，我们可以得出以下结论。</p> 
+<ul>
+<li>默认情况（w：1、readconcern：local）如果read preference为primary，那么是可以读到最新的数据，强一致性；但如果此时primary故障，那么这个时候会返回错误，可用性得不到保证</li>
+<li>默认情况（w：1、readconcern：local）如果read preference为secondary（secondaryPreferred、primaryPreferred），虽然可能读到过时的数据，但能够立刻得到数据，可用性比较好</li>
+<li>writeconern：majority保证写入的数据不会被回滚; readconcern：majority保证读到的一定是不会被回滚的数据</li>
+<li>若（w：1、readconcern；majority）即使是从primary读取，也不能保证一定返回最新的数据，因此是弱一致性</li>
+<li>若（w: majority、readcocern：majority），如果是从primary读取，那么一定能读到最新的数据，且这个数据一定不会被回滚，但此时写可用性就差一些；如果是从secondary读取，不能保证读到最新的数据，弱一致性。</li>
+</ul> 
+<p><br> 　　回过来来看，MongoDB所说的高可用性是更普世意义上的可用性：通过数据的复制和自动failover，即使发生物理故障，整个集群还是能够在短时间内回复，继续工作，何况恢复也是自动的。在这个意义上，确实是高可用的。</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

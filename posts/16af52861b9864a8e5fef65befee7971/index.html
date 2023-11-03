@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Solidity 合约安全，常见漏洞（第三篇） - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Solidity 合约安全，常见漏洞（第三篇）</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h2>
+<a id="Solidity__0"></a>Solidity 合约安全，常见漏洞（第三篇）</h2> 
+<h3>
+<a id="ERC20__2"></a>ERC20 代币问题</h3> 
+<p>如果你只处理受信任的 ERC20 代币，这些问题大多不适用。然而，当与任意的或部分不受信任的 ERC20 代币交互时，就有一些需要注意的地方。</p> 
+<h4>
+<a id="ERC20_6"></a>ERC20：转账扣费</h4> 
+<p>当与不信任的代币打交道时，你不应该认为你的余额一定会增加那么多。一个 ERC20 代币有可能这样实现它的转账函数，如下所示：</p> 
+<pre><code class="prism language-solidity">contract ERC20 {
+
+  // internally called by transfer() and transferFrom()
+  // balance and approval checks happen in the caller
+  function _transfer(address from, address to, uint256 amount) internal returns (bool) {
+    fee = amount * 100 / 99;
+
+    balanceOf[from] -= to;
+    balanceOf[to] += (amount - fee);
+
+    balanceOf[TREASURY] += fee;
+
+    emit Transfer(msg.sender, to, (amount - fee));
+    return true;
+  }
+}
+</code></pre> 
+<p>这种代币对每笔交易都会征收 1%的税。因此，如果一个智能合约与该代币进行如下交互，我们将得到意想不到的回退或资产被盗。</p> 
+<pre><code class="prism language-solidity">contract Stake {
+
+  mapping(address =&gt; uint256) public balancesInContract;
+
+  function stake(uint256 amount) public {
+    token.transferFrom(msg.sender, address(this), amount);
+    balancesInContract[msg.sender] += amount; //  这是错误的
+  }
+
+  function unstake() public {
+    uint256 toSend = balancesInContract[msg.sender];
+    delete balancesInContract[msg.sender];
+
+    // this could revert because toSend is 1% greater than
+    // the amount in the contract. Otherwise, 1% will be "stolen"// from other depositors.
+    token.transfer(msg.sender, toSend);
+  }
+}
+</code></pre> 
+<h4>
+<a id="ERC20_rebase__52"></a>ERC20: rebase 的代币</h4> 
+<p>Rebasing 代币由 <a href="https://www.olympusdao.finance/">Olympus DAO</a> 的 sOhm 代币 和 <a href="https://www.ampleforth.org/">Ampleforth</a> 的 AMPL 代币所推广。Coingecko 维护了一个 Rebasing ERC20 代币的<a href="https://www.coingecko.com/en/categories/rebase-tokens">列表</a>。<br> 当一个代币回溯时，总发行量会发生变化，每个人的余额会根据回溯的方向而增加或减少。<br> 在处理 rebase 代币时，以下代码可能会被破坏：</p> 
+<pre><code class="prism language-solidity">contract WillBreak {
+  mapping(address =&gt; uint256) public balanceHeld;
+  IERC20 private rebasingToken
+
+  function deposit(uint256 amount) external {
+    balanceHeld[msg.sender] = amount;
+    rebasingToken.transferFrom(msg.sender, address(this), amount);
+  }
+
+  function withdraw() external {
+    amount = balanceHeld[msg.sender];
+    delete balanceHeld[msg.sender];
+
+    // 错误, amount 也许会超出转出范围
+    rebasingToken.transfer(msg.sender, amount);
+  }
+}
+</code></pre> 
+<p>许多合约的解决方案是简单地不允许 rebase 代币。然而，我们可以修改上面的代码，在将账户余额转给接受者之前检查 balanceOf(address(this))。那么，即使余额发生变化，它仍然可以工作。</p> 
+<h4>
+<a id="ERC20_ERC777__ERC20__80"></a>ERC20: ERC777 在 ERC20 上的包裹</h4> 
+<p>ERC20，如果按照标准实现，ERC20 代币没有转账钩子（hook），因此 transfer 和 transferFrom 不会有重入问题。<br> 带有转账钩子的代币有应用优势，这就是为什么所有的 NFT 标准都实现了它们，以及为什么 ERC777 被最终确定。然而，这已经引起了足够的混乱，以至于 Openzeppelin <a href="https://github.com/OpenZeppelin/openzeppelin-contracts/pull/4066">废止</a>了 ERC777 库。<br> 如果你只想让你的协议与那些行为像 ERC20 代币但有转账 hook 的代币兼容，那么这只是一个简单的问题，把 transfer 和 transferFrom 函数当作它们会向接收者进行一个函数调用即可。<br> 这种 ERC777 的重入发生在 Uniswap 身上（如果你好奇，Openzeppelin 在<a href="https://blog.openzeppelin.com/exploiting-uniswap-from-reentrancy-to-actual-profit/">这里</a>记录了这个漏洞）。</p> 
+<h4>
+<a id="ERC20__ERC20__true_87"></a>ERC20: 不是所有的 ERC20 代币转账都会返回 true</h4> 
+<p>ERC20 规范规定，<a href="https://www.rareskills.io/post/erc20-snapshot">ERC20 代币</a>在转账成功时必须返回 true。因为大多数 ERC20 的实现不可能失败，除非授权不足或转账的金额太多，大多数开发者已经习惯于忽略 ERC20 代币的返回值，并假设一个失败的 trasfer 将被回退。<br> 坦率地说，如果你只与一个你知道其行为的受信任的 ERC20 代币打交道，这并不重要。但在处理任意的 ERC20 代币时，必须考虑到这种行为上的差异。<br> 在许多合约中都有一个隐含的期望，即失败的转账应该总是回退，而不是返回错误，因为大多数 ERC20 代币没有返回错误的机制，所以这导致了很多混乱。<br> 使这个问题更加复杂的是，一些 ERC20 代币并不遵循返回 true 的协议，特别是 Tether。一些代币在转账失败后会回退，这将导致回退的结果冒泡到调用者。因此，一些库包裹了 ERC20 代币的转账调用，以回退恢复并返回一个布尔值。下面是一些实现方法：<br> 参考：<a href="https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/utils/SafeERC20.sol">Openzeppelin SafeTransfer</a> 及 <a href="https://github.com/Vectorized/solady/blob/main/src/utils/SafeTransferLib.sol">Solady SafeTransfer</a> （大大地提高了 Gas 效率）</p> 
+<h4>
+<a id="ERC20__95"></a>ERC20: 地址投毒</h4> 
+<p>这不是一个智能合约的漏洞，但为了完整起见，我们在这里提到它。<br> 转账零代币是 ERC20 规范所允许的。这可能会导致前端应用程序的混乱，并可能欺骗用户，让他们错误的以为他们最近将代币发送给了某地址。<a href="https://metamask.io/">Metamask</a>在这个<a href="https://twitter.com/MetaMaskSupport/status/1613255316870729728">线程</a>中有更多关于这个问题的内容。</p> 
+<h4>
+<a id="ERC20__100"></a>ERC20: 查看代码，规避跑路</h4> 
+<p>(在 web3 术语中，“rugged"意味着’'跑路”, 直译是"从你脚下拉出地毯" 。)<br> 没有什么能阻止有人在 ERC20 代币上添加函数，让他们随意创建、转账和销毁代币–或自毁或升级。所以从根本上说，ERC20 代币的 “无需信任” 程度是有限制的。</p> 
+<h3>
+<a id="_105"></a>借贷协议中的逻辑错误</h3> 
+<p>当考虑到基于 DeFi 协议的借贷如何被破坏时，考虑在软件层面传播的 bug 并影响商业逻辑层面是很有帮助的。形成和完成一个债券合约有很多步骤。这里有一些需要考虑的攻击向量。</p> 
+<h4>
+<a id="_109"></a>贷款人损失的方式</h4> 
+<ul>
+<li>使到期本金减少（可能为零）而不进行任何支付的漏洞。</li>
+<li>当贷款没有偿还或抵押物降到阈值以下时，买方的抵押物不能被清算。</li>
+<li>如果协议有一个转移债务所有权的机制，这可能是一个从贷款人那里偷取债券的方式。</li>
+<li>贷款本金或付款的到期日被不适当地移到以后的日期。</li>
+</ul> 
+<h4>
+<a id="_116"></a>借款人损失的方式</h4> 
+<ul>
+<li>偿还本金时没有减少本金债务的 bug。</li>
+<li>一个 bug 或 gas 攻击使用户无法进行支付。</li>
+<li>本金或利率被非法提高。</li>
+<li>预言机的操纵导致抵押物贬值。</li>
+<li>贷款本金或付款的到期日被不适当地移到一个较早的日期。</li>
+</ul> 
+<p>如果抵押品从协议中被抽走，那么贷款人和借款人都会损失，因为借款人没有动力去偿还贷款，而借款人则会损失本金。<br> 正如上面所看到的，DeFi 协议被 "黑 "的范围比从协议中抽走一堆钱（通常成为新闻的那类事件）要多得多。</p> 
+<h3>
+<a id="staking_127"></a>抵押（staking）协议中的漏洞</h3> 
+<p>成为新闻的那种黑客是抵押协议被黑掉数百万美元，但这并不是唯一要面对的问题，抵押协议可能面临的问题有：</p> 
+<ul>
+<li>奖励能否延迟支付，或过早地被索取？</li>
+<li>奖励能否被不适当地减少或增加？在更糟糕的情况下，能否阻止用户获得任何奖励？</li>
+<li>人们能否索取不属于他们的本金或奖励，在最坏的情况下，会耗尽协议所有资金？</li>
+<li>存放的资产会不会被卡在协议中（部分或全部），或被不适当地延迟提取？</li>
+<li>相反，如果质押需要时间承诺，用户是否可以在承诺时间之前提取？</li>
+<li>如果支付的是不同的资产或货币，其价值是否可以在相关的智能合约范围内被操纵？如果协议 mint 自己的代币来奖励流动性提供者或质押者，这一点是相关的。</li>
+<li>如果存在预期和披露出的本金损失的风险因素，这种风险是否可以被不适当地操纵？</li>
+<li>协议的关键参数是否有管理、中心化或治理风险？</li>
+</ul> 
+<p>需要关注的关键是代码中涉及 "资金退出 "部分的代码。<br> 还有一个 "资金入口 "的漏洞也要寻找。</p> 
+<ul><li>有权参与协议中的资产抵押的用户能否被不适当地阻止？</li></ul> 
+<p>用户收到的奖励有一个隐含的风险回报和一个预期的资金时间价值。明确这些假设是什么，以及协议会怎样偏离预期是很有帮助的。</p> 
+<h3>
+<a id="_147"></a>未检查的返回值</h3> 
+<p>有两种方法来调用外部智能合约：1）用接口定义调用函数；2）使用.call 方法。如下图所示：</p> 
+<pre><code class="prism language-solidity">contract A {
+  uint256 public x;
+
+  function setx(uint256 _x) external {
+    require(_x &gt; 10, "x must be bigger than 10");
+    x = _x;
+  }
+}
+
+interface IA {
+  function setx(uint256 _x) external;
+}
+
+contract B {
+  function setXV1(IA a, uint256 _x) external {
+    a.setx(_x);
+  }
+
+  function setXV2(address a, uint256 _x) external {
+    (bool success, ) =
+    a.call(abi.encodeWithSignature("setx(uint256)", _x));
+    // success is not checked!
+  }
+}
+</code></pre> 
+<p>在合约 B 中，如果 _x 小于 10，setXV2 会默默地失败。当一个函数通过.call 方法被调用时，被调用者可以回退，但父函数不会回退。必须检查返回成功的值，并且代码行为必须相应地分支。</p> 
+<h3>
+<a id="msgvalue__180"></a>msg.value 在一个循环中</h3> 
+<p>在循环中使用 msg.value 是很危险的，因为这可能会让发起者 重复使用 msg.value。<br> 这种情况可能会出现在 payable 的 multicalls 中。Multicalls 使用户能够提交一个交易列表，以避免重复支付 21,000 的 Gas 交易费。然而，msg.value 在通过函数循环执行时被 “重复使用”，有可能使用户双花。<br> 这就是<a href="https://peckshield.medium.com/opyn-hacks-root-cause-analysis-c65f3fe249db">Opyn Hack</a>的根本原因。</p> 
+<h3>
+<a id="_186"></a>私有变量</h3> 
+<p>私有变量在区块链上仍然是可见的，所以敏感信息不应该被存储在那里。如果它们不能被访问，验证者如何能够处理取决于其值的交易？私有变量不能从外部的 Solidity 合约中读取，但它们可以使用以太坊客户端在链外读取。<br> 要读取一个变量，你需要知道它的存储槽。在下面的例子中，myPrivateVar 的存储槽是 0。</p> 
+<pre><code class="prism language-solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+contract PrivateVarExample {
+  uint256 private myPrivateVar;
+
+  constructor(uint256 _initialValue) {
+    myPrivateVar = _initialValue;
+  }
+}
+</code></pre> 
+<p>下面是读取已部署的智能合约的私有变量的 javascript 代码</p> 
+<pre><code class="prism language-solidity">const Web3 = require("web3");
+const PRIVATE_VAR_EXAMPLE_ADDRESS = "0x123..."; // Replace with your contract address
+
+async function readPrivateVar() {
+  const web3 = new Web3("http://localhost:8545"); // Replace with your provider's URL
+
+  // Read storage slot 0 (where 'myPrivateVar' is stored)
+  const storageSlot = 0;
+  const privateVarValue = await web3.eth.getStorageAt(
+    PRIVATE_VAR_EXAMPLE_ADDRESS,
+    storageSlot
+  );
+
+  console.log("Value of private variable 'myPrivateVar':",
+              web3.utils.hexToNumberString(privateVarValue));
+}
+
+readPrivateVar();
+</code></pre> 
+<h3>
+<a id="_226"></a>不安全的代理调用</h3> 
+<p>委托调用（Delegatecall）不应该被用于不受信任的合约，因为它把所有的控制权都交给了委托接受者。在这个例子中，不受信任的合约偷走了合约中所有的以太币。</p> 
+<pre><code class="prism language-solidity">contract UntrustedDelegateCall {
+  constructor() payable {
+    require(msg.value == 1 ether);
+  }
+
+  function doDelegateCall(address _delegate, bytes calldata data) public {
+    (bool ok, ) = _delegate.delegatecall(data);
+    require(ok, "delegatecall failed");
+  }
+
+}
+
+contract StealEther {
+  function steal() public {
+    // you could also selfdestruct here
+    // if you really wanted to be mean
+    (bool ok,) =
+    tx.origin.call{value: address(this).balance}("");
+    require(ok);
+  }
+
+  function attack(address victim) public {
+    UntrustedDelegateCall(victim).doDelegateCall(
+      address(this),
+      abi.encodeWithSignature("steal()"));
+  }
+}
+</code></pre> 
+<h3>
+<a id="_bug_260"></a>升级与代理有关的 bug</h3> 
+<p>我们无法在一个章节中对这个话题进行公正的解释。大多数升级错误通常可以通过使用 Openzeppelin 的<a href="https://docs.openzeppelin.com/upgrades-plugins/1.x/">hardhat 插件</a>和阅读它所保护的问题来避免出错。<br> 作为一个快速的总结，以下是与智能合约升级有关的问题：</p> 
+<ul>
+<li>自毁（self-destruct）和委托调用（delegatecall）不应该在执行合约中使用。</li>
+<li>必须注意在升级过程中，存储变量不能相互覆盖</li>
+<li>在执行合约中应避免调用外部库，因为不可能预测它们会如何影响存储访问。</li>
+<li>部署者决不能忽视调用初始化函数</li>
+<li>在基类合约中没有包括间隙（gap）变量，以防止在基类合约中加入新的变量时发生存储碰撞（这由 hardhat 插件自动处理）。</li>
+<li>不可变（immutable）变量中的值在升级时不会被保留</li>
+<li>非常不鼓励在构造函数中做任何事情，因为未来的升级必须执行相同的构造函数逻辑以保持兼容性。</li>
+</ul>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

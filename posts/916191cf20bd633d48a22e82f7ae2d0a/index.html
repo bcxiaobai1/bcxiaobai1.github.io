@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Zookeeper选主过程，理论和源码结合，还看不懂给你发红包 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Zookeeper选主过程，理论和源码结合，还看不懂给你发红包</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <p></p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul><li>
+<ul>
+<li><a href="#_1">前言</a></li>
+<li><a href="#1_6">1、节点角色</a></li>
+<li><a href="#2_15">2、选举过程</a></li>
+<li>
+<ul>
+<li><a href="#21__16">2.1 胜出的条件</a></li>
+<li><a href="#22__19">2.2 比较的规则</a></li>
+</ul>
+   </li>
+<li><a href="#3_30">3、代码逻辑综述</a></li>
+<li><a href="#4_42">4、源码分析</a></li>
+<li><a href="#_266">结语</a></li>
+</ul>
+ </li></ul>
+</div>
+<p></p> 
+<h2>
+<a id="_1"></a>前言</h2> 
+<p>Zookeeper作为Dubbo生态的默认注册中心，得到了非常的普遍的应用，虽然后来阿里又出了nacos，但是不可否认的是ZK仍然是一款非常优秀的开源产品，非常优秀的注册中心备选方案。</p> 
+<p>ZK有很多特性，本篇文章主要介绍ZK的选主过程（后宫佳丽三千，我就独宠你一人）</p> 
+<h2>
+<a id="1_6"></a>1、节点角色</h2> 
+<p>要说选主的过程，我们首先得了解ZK到底有哪些节点，这些节点充当得角色是什么？<br> ZK本身得节点主要分为三类：<br> <font color="green"><br> Leader：主要是负责数据的写入，如果超过半数同意，那么就广播进行写入；<br> Follower：主要负责查询请求并将写入请求发送给leader，参与选举和写入投票；<br> Observe：也是负责查询请求并将写入请求发送给leader，不参加投票，只被动接收结果<br> </font></p> 
+<h2>
+<a id="2_15"></a>2、选举过程</h2> 
+<h3>
+<a id="21__16"></a>2.1 胜出的条件</h3> 
+<p>获取半数投票以上的节点成为leader节点。</p> 
+<h3>
+<a id="22__19"></a>2.2 比较的规则</h3> 
+<p>万事万物都有一个准则，好的比较坏的，坏的比较更坏的，世上本没有痛苦，痛苦都是自己寻找的结果，海燕你可长点心吧，哎呀跑偏了。</p> 
+<p>ZK比较的时候有三个指标或者三个维度：<br> <font color="green"><br> （1）任期<br> （2）事务ID（ZK中的事务ID）<br> （3）节点编号（集群中每个节点的编号）<br> </font><br> 根据以上三个指标就可以说出最终的结论了：选择任期大的，任期一样选择事务ID大的，前两个都一样，选择节点编号大的。<br> <font color="red">就这么简单？</font>是的。规则就是这么简单，但是源码还是有那么一丢丢的绕。</p> 
+<h2>
+<a id="3_30"></a>3、代码逻辑综述</h2> 
+<p>源码看着相对比较枯燥，但是作为一个手艺人，怎么能不去了解怎么做的呢，我们先来梳理一下代码的流程，方便更好的看第四部分内容。</p> 
+<ol>
+<li>节点先投自己一票，并进行广播</li>
+<li>节点内部循环进行消息接收</li>
+<li>收到消息后<br> 如果消息为空，就进行重新发送消息或者建立连接<br> 如果消息不为空，且消息接收者和投票的leader都是合法节点就进行下边步骤。</li>
+<li>如果节点为looking节点<br> 根据当前节点的投票和接收到的投票进行比较来决定是否需要再次发送投票并且记录投票的结果</li>
+<li>每次都判断记录的票数，如果过半就进行节点状态的设置</li>
+</ol> 
+<h2>
+<a id="4_42"></a>4、源码分析</h2> 
+<p>选主的逻辑是在lookForLeader开始的，像金字塔的第一块砖一样，我们先看ZK选主的第一块砖lookForLeader，第一次看源码得时候一定要把握主线，忽略从线，等主线完全理清楚了之后才去处理从线，要不会陷入迷宫之中。</p> 
+<p>下边就是主要的投票代码，看里边的注释：</p> 
+<pre><code class="prism language-java">
+<span class="token keyword">public</span> <span class="token class-name">Vote</span> <span class="token function">lookForLeader</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">InterruptedException</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">//省略代码</span>
+	
+	<span class="token keyword">synchronized</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//1、投票轮数加一</span>
+		logicalclock<span class="token punctuation">.</span><span class="token function">incrementAndGet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">//2、更新提议或者叫投票，三个参数：当前节点的id、ZK的最大事务id、任期</span>
+		<span class="token function">updateProposal</span><span class="token punctuation">(</span><span class="token function">getInitId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">getInitLastLoggedZxid</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">getPeerEpoch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	LOG<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"New election. My id = {}, proposed zxid=0x{}"</span><span class="token punctuation">,</span>self<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span><span class="token class-name">Long</span><span class="token punctuation">.</span><span class="token function">toHexString</span><span class="token punctuation">(</span>proposedZxid<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//发送通知</span>
+	<span class="token function">sendNotifications</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token comment">//省略后边代码      </span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>更新投票或者投票的方法为：</p> 
+<pre><code class="prism language-java"><span class="token keyword">synchronized</span> <span class="token keyword">void</span> <span class="token function">updateProposal</span><span class="token punctuation">(</span><span class="token keyword">long</span> leader<span class="token punctuation">,</span> <span class="token keyword">long</span> zxid<span class="token punctuation">,</span> <span class="token keyword">long</span> epoch<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        proposedLeader <span class="token operator">=</span> leader<span class="token punctuation">;</span>
+        proposedZxid <span class="token operator">=</span> zxid<span class="token punctuation">;</span>
+        proposedEpoch <span class="token operator">=</span> epoch<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>发送通知的方法为：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">sendNotifications</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">long</span> sid <span class="token operator">:</span> self<span class="token punctuation">.</span><span class="token function">getCurrentAndNextConfigVoters</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token class-name">QuorumVerifier</span> qv <span class="token operator">=</span> self<span class="token punctuation">.</span><span class="token function">getQuorumVerifier</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+          <span class="token comment">//初始化待发送通知或者投票的报文、对象</span>
+          <span class="token class-name">ToSend</span> notmsg <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ToSend</span><span class="token punctuation">(</span>
+              <span class="token class-name">ToSend</span><span class="token punctuation">.</span>mType<span class="token punctuation">.</span>notification<span class="token punctuation">,</span>
+              proposedLeader<span class="token punctuation">,</span> <span class="token comment">//投的leader</span>
+              proposedZxid<span class="token punctuation">,</span>  <span class="token comment">//事务ID</span>
+              logicalclock<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token comment">//投票或者选举的轮数</span>
+              <span class="token class-name">QuorumPeer<span class="token punctuation">.</span>ServerState</span><span class="token punctuation">.</span>LOOKING<span class="token punctuation">,</span>
+              sid<span class="token punctuation">,</span>
+              proposedEpoch<span class="token punctuation">,</span> <span class="token comment">//任期</span>
+              qv<span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getBytes</span><span class="token punctuation">(</span>UTF_8<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+          sendqueue<span class="token punctuation">.</span><span class="token function">offer</span><span class="token punctuation">(</span>notmsg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>待到山花烂漫时，她在丛中笑，消息都已经发完了，肯定就到了接收到选票的时候应该怎么操作了，接收选票的代码也是在lookForLeader中：</p> 
+<pre><code class="prism language-java"><span class="token comment">//在服务没有停止并且当前节点的状态是LOOKING时进行while循环</span>
+<span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span><span class="token function">getPeerState</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token class-name">ServerState</span><span class="token punctuation">.</span>LOOKING<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span><span class="token operator">!</span>stop<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//200毫秒内有数据就立马取出            </span>
+	<span class="token class-name">Notification</span> n <span class="token operator">=</span> recvqueue<span class="token punctuation">.</span><span class="token function">poll</span><span class="token punctuation">(</span>notTimeout<span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span>MILLISECONDS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//当取出的数据为空的时候</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//判断是否所有的投票都已经发送，如果发送完毕就重新发送</span>
+	    <span class="token keyword">if</span> <span class="token punctuation">(</span>manager<span class="token punctuation">.</span><span class="token function">haveDelivered</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	         <span class="token function">sendNotifications</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token comment">//如果没有发送完毕就建立连接     </span>
+	    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+	         manager<span class="token punctuation">.</span><span class="token function">connectAll</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token punctuation">}</span>
+	     notTimeout <span class="token operator">=</span> <span class="token class-name">Math</span><span class="token punctuation">.</span><span class="token function">min</span><span class="token punctuation">(</span>notTimeout <span class="token operator">&lt;&lt;</span> <span class="token number">1</span><span class="token punctuation">,</span> maxNotificationInterval<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	     <span class="token comment">//self.getQuorumVerifier().revalidateVoteset(voteSet, notTimeout != minNotificationInterval)</span>
+	     <span class="token comment">//上面一行代码默认返回false，所以下边的if判断永远不可能进入，当没有收到选票时就等待200ms后继续循环，即空转一轮。</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>self<span class="token punctuation">.</span><span class="token function">getQuorumVerifier</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">instanceof</span> <span class="token class-name">QuorumOracleMaj</span>
+	             <span class="token operator">&amp;&amp;</span> self<span class="token punctuation">.</span><span class="token function">getQuorumVerifier</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">revalidateVoteset</span><span class="token punctuation">(</span>voteSet<span class="token punctuation">,</span> notTimeout <span class="token operator">!=</span> minNotificationInterval<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	         <span class="token function">setPeerState</span><span class="token punctuation">(</span>proposedLeader<span class="token punctuation">,</span> voteSet<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	         <span class="token class-name">Vote</span> endVote <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Vote</span><span class="token punctuation">(</span>proposedLeader<span class="token punctuation">,</span> proposedZxid<span class="token punctuation">,</span> logicalclock<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> proposedEpoch<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	         <span class="token function">leaveInstance</span><span class="token punctuation">(</span>endVote<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	         <span class="token keyword">return</span> endVote<span class="token punctuation">;</span>
+	     <span class="token punctuation">}</span>
+	
+	     LOG<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Notification time out: {} ms"</span><span class="token punctuation">,</span> notTimeout<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//当接收到的消息不为空，并且是接收者和待选leader都是有效节点时进入当前逻辑</span>
+	 <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">validVoter</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>sid<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token function">validVoter</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>leader<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	    <span class="token comment">//先查看投票节点的状态</span>
+	     <span class="token keyword">switch</span> <span class="token punctuation">(</span>n<span class="token punctuation">.</span>state<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	     <span class="token keyword">case</span> LOOKING<span class="token operator">:</span>
+	        
+	     <span class="token keyword">case</span> OBSERVING<span class="token operator">:</span>
+	         
+	     <span class="token keyword">case</span> FOLLOWING<span class="token operator">:</span>
+	         
+	     <span class="token keyword">case</span> LEADING<span class="token operator">:</span>
+	         
+	     <span class="token keyword">default</span><span class="token operator">:</span>
+	         LOG<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"Notification state unrecognized: {} (n.state), {}(n.sid)"</span><span class="token punctuation">,</span> n<span class="token punctuation">.</span>state<span class="token punctuation">,</span> n<span class="token punctuation">.</span>sid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	         <span class="token keyword">break</span><span class="token punctuation">;</span>
+	     <span class="token punctuation">}</span>
+	 <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+	     <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">validVoter</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>leader<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	         LOG<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"Ignoring notification for non-cluster member sid {} from sid {}"</span><span class="token punctuation">,</span> n<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> n<span class="token punctuation">.</span>sid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	     <span class="token punctuation">}</span>
+	     <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">validVoter</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>sid<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	         LOG<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"Ignoring notification for sid {} from non-quorum member sid {}"</span><span class="token punctuation">,</span> n<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> n<span class="token punctuation">.</span>sid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	     <span class="token punctuation">}</span>
+	 <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>接上代码继续讨论，校验发送投票节点的状态，我们从本文的第一章节知道Observe节点是不参与投票的，只是转发写请求和被动接收数据，负责查询请求，所以从代码中我们也可以看出来：</p> 
+<pre><code class="prism language-java"><span class="token keyword">case</span> OBSERVING<span class="token operator">:</span>
+	LOG<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"Notification from observer: {}"</span><span class="token punctuation">,</span> n<span class="token punctuation">.</span>sid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">break</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>当发送投票的节点状态是<font color="green">FOLLOWING</font>和<font color="green">LEADING</font>时，代表发送节点已经选举完成，所以处理方法的逻辑都是一样滴，这部分限于篇幅太长，暂时就不深入讨论了，感兴趣的朋友可以私信我或者加我微信号<font color="green">M_P_E_D</font>进行交流和沟通,请备注<font color="green">CSDN</font></p> 
+<pre><code class="prism language-java"><span class="token keyword">case</span> FOLLOWING<span class="token operator">:</span>
+   <span class="token class-name">Vote</span> resultFN <span class="token operator">=</span> <span class="token function">receivedFollowingNotification</span><span class="token punctuation">(</span>recvset<span class="token punctuation">,</span> outofelection<span class="token punctuation">,</span> voteSet<span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token keyword">if</span> <span class="token punctuation">(</span>resultFN <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token keyword">break</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token keyword">return</span> resultFN<span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+<span class="token keyword">case</span> LEADING<span class="token operator">:</span>
+   <span class="token class-name">Vote</span> resultLN <span class="token operator">=</span> <span class="token function">receivedLeadingNotification</span><span class="token punctuation">(</span>recvset<span class="token punctuation">,</span> outofelection<span class="token punctuation">,</span> voteSet<span class="token punctuation">,</span> n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token keyword">if</span> <span class="token punctuation">(</span>resultLN <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token keyword">break</span><span class="token punctuation">;</span>
+   <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+       <span class="token keyword">return</span> resultLN<span class="token punctuation">;</span>
+   <span class="token punctuation">}</span>
+</code></pre> 
+<p>终于到重头戏了，咱们看看LOOKING状态时的代码：<br> 我们先把totalOrderPredicate方法放前边，这个其实就是选举leader的规则的实现。</p> 
+<pre><code class="prism language-java"><span class="token keyword">protected</span> <span class="token keyword">boolean</span> <span class="token function">totalOrderPredicate</span><span class="token punctuation">(</span><span class="token keyword">long</span> newId<span class="token punctuation">,</span> <span class="token keyword">long</span> newZxid<span class="token punctuation">,</span> <span class="token keyword">long</span> newEpoch<span class="token punctuation">,</span> <span class="token keyword">long</span> curId<span class="token punctuation">,</span> <span class="token keyword">long</span> curZxid<span class="token punctuation">,</span> <span class="token keyword">long</span> curEpoch<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>self<span class="token punctuation">.</span><span class="token function">getQuorumVerifier</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getWeight</span><span class="token punctuation">(</span>newId<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>newEpoch <span class="token operator">&gt;</span> curEpoch<span class="token punctuation">)</span>
+                <span class="token operator">||</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>newEpoch <span class="token operator">==</span> curEpoch<span class="token punctuation">)</span>
+                    <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>newZxid <span class="token operator">&gt;</span> curZxid<span class="token punctuation">)</span>
+                        <span class="token operator">||</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>newZxid <span class="token operator">==</span> curZxid<span class="token punctuation">)</span>
+                            <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>newId <span class="token operator">&gt;</span> curId<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">case</span> LOOKING<span class="token operator">:</span>
+	<span class="token comment">//当前节点事务id为-1或者发送节点的事务id为-1时，忽略通知   </span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">getInitLastLoggedZxid</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         LOG<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"Ignoring notification as our zxid is -1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token keyword">break</span><span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span>n<span class="token punctuation">.</span>zxid <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         LOG<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"Ignoring notification from member with -1 zxid {}"</span><span class="token punctuation">,</span> n<span class="token punctuation">.</span>sid<span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token keyword">break</span><span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+     <span class="token comment">//如果发送节点的轮数大于当前节点的轮数 ，证明当前投票落后了</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span>n<span class="token punctuation">.</span>electionEpoch <span class="token operator">&gt;</span> logicalclock<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+     	 <span class="token comment">//就把当前节点的投票轮数设置成和发送节点轮数一样</span>
+         logicalclock<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>electionEpoch<span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token comment">//并且清空收到的选票，落后之后选票就无效了</span>
+         recvset<span class="token punctuation">.</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token comment">/**
+         *这里是关键：
+         *如果发送节点的选举的leader，按照规则比较后胜出
+         *就把当前节点的选票修改成和发送节点一样的，
+         *反之则把当前节点的选票保留，然后发送通知
+         */</span>
+         <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">totalOrderPredicate</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> n<span class="token punctuation">.</span>zxid<span class="token punctuation">,</span> n<span class="token punctuation">.</span>peerEpoch<span class="token punctuation">,</span> <span class="token function">getInitId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">getInitLastLoggedZxid</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">getPeerEpoch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+             <span class="token function">updateProposal</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> n<span class="token punctuation">.</span>zxid<span class="token punctuation">,</span> n<span class="token punctuation">.</span>peerEpoch<span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+             <span class="token function">updateProposal</span><span class="token punctuation">(</span><span class="token function">getInitId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">getInitLastLoggedZxid</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">getPeerEpoch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token punctuation">}</span>
+         <span class="token function">sendNotifications</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token comment">//如果当前节点的选举轮数比发送的大，证明接收到的选票无效    </span>
+     <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>n<span class="token punctuation">.</span>electionEpoch <span class="token operator">&lt;</span> logicalclock<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+             LOG<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span>
+                 <span class="token string">"Notification election epoch is smaller than logicalclock. n.electionEpoch = 0x{}, logicalclock=0x{}"</span><span class="token punctuation">,</span>
+                 <span class="token class-name">Long</span><span class="token punctuation">.</span><span class="token function">toHexString</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>electionEpoch<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                 <span class="token class-name">Long</span><span class="token punctuation">.</span><span class="token function">toHexString</span><span class="token punctuation">(</span>logicalclock<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token keyword">break</span><span class="token punctuation">;</span>
+     <span class="token comment">//如果选举轮数一样，就比较发送节点的选票和当前节点的选票</span>
+     <span class="token comment">//按照规则发送节点的选择的leader胜出，就修改当前节点的选票为</span>
+     <span class="token comment">//发送节点一样，然后发送通知    </span>
+     <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">totalOrderPredicate</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> n<span class="token punctuation">.</span>zxid<span class="token punctuation">,</span> n<span class="token punctuation">.</span>peerEpoch<span class="token punctuation">,</span> proposedLeader<span class="token punctuation">,</span> proposedZxid<span class="token punctuation">,</span> proposedEpoch<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+         <span class="token function">updateProposal</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> n<span class="token punctuation">.</span>zxid<span class="token punctuation">,</span> n<span class="token punctuation">.</span>peerEpoch<span class="token punctuation">)</span><span class="token punctuation">;</span>
+         <span class="token function">sendNotifications</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+     <span class="token punctuation">}</span>
+     <span class="token comment">//该发的通知发送了，该比较的都比较清楚了，</span>
+     <span class="token comment">//但是注意上边的代码，只有在选票不一致的时候才再次</span>
+     <span class="token comment">//进行投票，如果一样的话就不再进行投票了。</span>
+     <span class="token comment">//下边是把投票信息记录下来，为什么？因为要比较HALF，过半就选出</span>
+     <span class="token comment">//leader了，别一直忙活呀</span>
+     recvset<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>sid<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">Vote</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> n<span class="token punctuation">.</span>zxid<span class="token punctuation">,</span> n<span class="token punctuation">.</span>electionEpoch<span class="token punctuation">,</span> n<span class="token punctuation">.</span>peerEpoch<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token comment">//该方法的作用是选的leader的一样的节点加在一样，为了比较是否过半</span>
+     voteSet <span class="token operator">=</span> <span class="token function">getVoteTracker</span><span class="token punctuation">(</span>recvset<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">Vote</span><span class="token punctuation">(</span>proposedLeader<span class="token punctuation">,</span> proposedZxid<span class="token punctuation">,</span> logicalclock<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> proposedEpoch<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	 <span class="token comment">//该方法就是比较选择同样leader的节点是否过半，如果过半就进入</span>
+	 <span class="token comment">//进行状态设置</span>
+     <span class="token keyword">if</span> <span class="token punctuation">(</span>voteSet<span class="token punctuation">.</span><span class="token function">hasAllQuorums</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+         <span class="token comment">//这块并没有立马设置，而是又等了一轮（200ms），然后在这个200ms</span>
+         <span class="token comment">//内又接收到新的投票，并且新投票的选择的leader节点胜出，那么就</span>
+         <span class="token comment">//把这张投票放进队列中，进行下次循环，并跳出当前的计票或者选主流程</span>
+         <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>n <span class="token operator">=</span> recvqueue<span class="token punctuation">.</span><span class="token function">poll</span><span class="token punctuation">(</span>finalizeWait<span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span>MILLISECONDS<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+             <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">totalOrderPredicate</span><span class="token punctuation">(</span>n<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> n<span class="token punctuation">.</span>zxid<span class="token punctuation">,</span> n<span class="token punctuation">.</span>peerEpoch<span class="token punctuation">,</span> proposedLeader<span class="token punctuation">,</span> proposedZxid<span class="token punctuation">,</span> proposedEpoch<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 recvqueue<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>n<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                 <span class="token keyword">break</span><span class="token punctuation">;</span>
+             <span class="token punctuation">}</span>
+         <span class="token punctuation">}</span>
+
+         <span class="token comment">//如果200ms后没有收到新的投票，那么就进行节点状态的设置，</span>
+         <span class="token comment">//proposedLeader与当前节点id一样，当前节点就是leader，否则依据</span>
+         <span class="token comment">//是否为PARTICIPANT来判读为fllow或者observe节点</span>
+         <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+             <span class="token function">setPeerState</span><span class="token punctuation">(</span>proposedLeader<span class="token punctuation">,</span> voteSet<span class="token punctuation">)</span><span class="token punctuation">;</span>
+             <span class="token class-name">Vote</span> endVote <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Vote</span><span class="token punctuation">(</span>proposedLeader<span class="token punctuation">,</span> proposedZxid<span class="token punctuation">,</span> logicalclock<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> proposedEpoch<span class="token punctuation">)</span><span class="token punctuation">;</span>
+             <span class="token function">leaveInstance</span><span class="token punctuation">(</span>endVote<span class="token punctuation">)</span><span class="token punctuation">;</span>
+             <span class="token keyword">return</span> endVote<span class="token punctuation">;</span>
+         <span class="token punctuation">}</span>
+     <span class="token punctuation">}</span>
+     <span class="token keyword">break</span><span class="token punctuation">;</span>
+</code></pre> 
+<h2>
+<a id="_266"></a>结语</h2> 
+<p><font color="green">道阻且长，行则将至，行而不辍，未来可期，加油。</font></p> 
+<p>原创不易，肝了3夜才写完，如果你觉得文章不错，对你的进步有那么一点帮助，那么就给个小心心，如果觉得文章非常对你的胃口，那么欢迎你关注我，或者关注个人的微信公众号，咱们一起打怪升级。<br> <img src="https://images2.imgbox.com/cd/0a/T7UxTyQ7_o.png" alt="在这里插入图片描述"></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【Unity】WebSocket通信 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Unity】WebSocket通信</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h2 id="1%20%E5%89%8D%E8%A8%80">1 前言</h2> 
+<p>        Unity客户端常用的与服务器通信的方式有socket、http、webSocket。本文主要实现一个简单的WebSocket通信案例，包含客户端、服务器，实现了两端的通信以及客户端向服务器发送关闭连接请求的功能。实现上没有使用Unity相关插件，使用的就是.Net本身的WebSocket。</p> 
+<h2 id="2%20WebSocket%E7%AE%80%E4%BB%8B">2 WebSocket简介</h2> 
+<p>        WebSocket是一种基于TCP的应用层网络协议，客户端与服务器经过一次 HTTP 握手，两者之间便可以建立持久性的连接，进而使得客户端与服务器之间能够进行双向实时通信(全双工通信)。PS：网上有更详细的信息，这里就不展开了。</p> 
+<h2 id="3%20%E4%BB%A3%E7%A0%81">3 代码</h2> 
+<p>        代码分客户端代码、服务器代码。客户端为Unity客户端，服务器是VS控制台程序。首先运行服务器代码，之后再运行客户端代码，完成连接后，在客户端输入框中输入内容，之后点击“发送信息”按钮，向服务器发送信息，点击“断开连接”按钮，向服务器发送断开连接请求，在服务器命令行窗口内输入内容按下回车即可向客户端发送信息。<br>         PS：先运行客户端再运行服务器也行，但客户端请求连接短时间内得不到回复便会抛出异常，手速得快。所以最好先运行服务器提前开启监听。</p> 
+<h3 id="3.1%20%E5%AE%A2%E6%88%B7%E7%AB%AF%E4%BB%A3%E7%A0%81">3.1 客户端代码</h3> 
+<p>GameStart.cs</p> 
+<pre><code class="language-cs">using UnityEngine;
+
+public class GameStart : MonoBehaviour
+{
+    //发送的消息变量
+    private string msg = null;
+
+    void Start()
+    {
+        //连接服务器。
+        NetManager.M_Instance.Connect("ws://127.0.0.1:8888");   //本机地址
+    }
+
+    //绘制UI
+    private void OnGUI()
+    {
+        //绘制输入框，以及获取输入框中的内容
+        //PS：第二参数必须是msg，否则在我们输入后，虽然msg可以获得到输入内容，但马上就被第二参数在下一帧重新覆盖。
+        msg = GUI.TextField(new Rect(10, 10, 100, 20), msg);
+
+        //绘制按钮，以及按下发送信息按钮，发送信息
+        if (GUI.Button(new Rect(120, 10, 80, 20), "发送信息") &amp;&amp; msg != null)
+        {
+            NetManager.M_Instance.Send(msg);
+        }
+
+        //绘制按钮，以及按下断开连接按钮，发送断开连接请求
+        if (GUI.Button(new Rect(210, 10, 80, 20), "断开连接"))
+        {
+            Debug.Log("向服务器请求断开连接......");
+            NetManager.M_Instance.CloseClientWebSocket();
+        }
+        
+    }
+}</code></pre> 
+<p>NetManager.cs（单例，不需要挂到游戏对象上）</p> 
+<pre><code class="language-cs">using System;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading;
+using UnityEngine;
+
+public class NetManager
+{
+    #region 实现单例的代码
+    //变量
+    private volatile static NetManager m_instance;          //单例本身。使用volatile关键字修饰，禁止优化，确保多线程访问时访问到的数据都是最新的
+    private static object m_locker = new object();          //线程锁。当多线程访问时，同一时刻仅允许一个线程访问
+
+    //属性
+    public static NetManager M_Instance
+    {
+        get
+        {
+            //线程锁。防止同时判断为null时同时创建对象
+            lock (m_locker)
+            {
+                //如果不存在对象则创建对象
+                if (m_instance == null)
+                {
+                    m_instance = new NetManager();
+                }
+            }
+            return m_instance;
+        }
+    }
+    #endregion
+
+    //私有化构造
+    private NetManager() { }
+
+    //客户端webSocket
+    private ClientWebSocket m_clientWebSocket;
+    //处理接收数据的线程
+    private Thread m_dataReceiveThread;
+    //线程持续执行的标识符
+    private bool m_isDoThread;
+
+
+    /// &lt;summary&gt;
+    /// ClientWebSocket，与服务器建立连接。
+    /// &lt;/summary&gt;
+    /// &lt;param name="uriStr"&gt;&lt;/param&gt;
+    public void Connect(string uriStr)
+    {
+        try
+        {
+            //创建ClientWebSocket
+            m_clientWebSocket = new ClientWebSocket();
+
+            //初始化标识符
+            m_isDoThread = true;
+
+            //创建线程
+            m_dataReceiveThread = new Thread(ReceiveData);  //创建数据接收线程  
+            m_dataReceiveThread.IsBackground = true;        //设置为后台可以运行，主线程关闭时，此线程也会关闭（实际在Unity中并没什么用，还是要手动关闭）
+
+            //设置请求头部
+            //m_clientWebSocket.Options.SetRequestHeader("headerName", "hearValue");
+
+            //开始连接
+            var task = m_clientWebSocket.ConnectAsync(new Uri(uriStr), CancellationToken.None);
+            task.Wait();    //等待
+
+            //启动数据接收线程
+            m_dataReceiveThread.Start(m_clientWebSocket);
+
+            //输出提示
+            if (m_clientWebSocket.State == WebSocketState.Open)
+            {
+                Debug.Log("连接服务器完毕。");
+            }
+        }
+        catch (WebSocketException ex)
+        {
+            Debug.LogError("连接出错：" + ex.Message);
+            Debug.LogError("WebSokcet状态：" + m_clientWebSocket.State);
+            //关闭连接
+            //函数内可能需要考虑WebSokcet状态不是WebSocketState.Open时如何关闭连接的情况。目前没有处理这种情况。
+            //比如正在连接时出现了异常，当前状态还是Connecting状态，那么该如何停止呢？
+            //虽然我有了解到ClientWebSocket包含的Abort()、Dispose()方法，但并未出现过这种异常情况所以也没继续深入下去，放在这里当个参考吧。
+            CloseClientWebSocket();
+        }
+
+    }
+
+    /// &lt;summary&gt;
+    /// 持续接收服务器的信息。
+    /// &lt;/summary&gt;
+    /// &lt;param name="socket"&gt;&lt;/param&gt;
+    private void ReceiveData(object socket)
+    {
+        //类型转换
+        ClientWebSocket socketClient = (ClientWebSocket)socket;
+        //持续接收信息
+        while (m_isDoThread)
+        {
+            //接收数据
+            string data = Receive(socketClient);
+            //数据处理（可以和服务器一样使用事件（委托）来处理）
+            if (data != null)
+            {
+                Debug.Log("接收的服务器消息：" + data);
+            }
+        }
+        Debug.Log("接收信息线程结束。");
+    }
+
+    /// &lt;summary&gt;
+    /// 接收服务器信息。
+    /// &lt;/summary&gt;
+    /// &lt;param name="socket"&gt;&lt;/param&gt;
+    /// &lt;returns&gt;&lt;/returns&gt;
+    private string Receive(ClientWebSocket socket)
+    {
+        try
+        {
+            //接收消息时，对WebSocketState是有要求的，所以加上if判断（如果不是这两种状态，会报出异常）
+            if (socket != null &amp;&amp; (socket.State == WebSocketState.Open || socket.State == WebSocketState.CloseSent))
+            {
+                byte[] arrry = new byte[1024];  //注意长度，如果服务器发送消息过长，这也需要跟着调整
+                ArraySegment&lt;byte&gt; buffer = new ArraySegment&lt;byte&gt;(arrry);  //实例化一个ArraySegment结构体
+                //接收数据
+                var task = socket.ReceiveAsync(buffer, CancellationToken.None);
+                task.Wait();//等待
+
+                //仅作状态展示。在客户端发送关闭消息后，服务器会回复确认信息，在收到确认信息后状态便是CloseReceived，这里打印输出。
+                Debug.Log("socekt当前状态：" + socket.State);
+
+                //如果是结束消息确认，则返回null，不再解析信息
+                if (socket.State == WebSocketState.CloseReceived || task.Result.MessageType == WebSocketMessageType.Close)
+                {
+                    return null;
+                }
+                //将接收数据转为string类型，并返回。注意只解析我们接收到的字节数目（task.Result.Count）
+                return Encoding.UTF8.GetString(buffer.Array, 0, task.Result.Count);
+            }
+            else
+            {
+                return null;
+            }
+        }
+        catch (WebSocketException ex)
+        {
+            Debug.LogError("接收服务器信息错误：" + ex.Message);
+            CloseClientWebSocket();
+            return null;
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// 发送消息
+    /// &lt;/summary&gt;
+    /// &lt;param name="content"&gt;&lt;/param&gt;
+    public void Send(string content)
+    {
+        try
+        {
+            //发送消息时，对WebSocketState是有要求的，加上if判断（如果不是这两种状态，会报出异常）
+            if (m_clientWebSocket != null &amp;&amp; (m_clientWebSocket.State == WebSocketState.Open || m_clientWebSocket.State == WebSocketState.CloseReceived))
+            {
+                ArraySegment&lt;byte&gt; array = new ArraySegment&lt;byte&gt;(Encoding.UTF8.GetBytes(content)); //创建内容的字节编码数组并实例化一个ArraySegment结构体
+                var task = m_clientWebSocket.SendAsync(array, WebSocketMessageType.Binary, true, CancellationToken.None);  //发送
+                task.Wait();  //等待
+
+                Debug.Log("发送了一个消息到服务器。");
+            }
+        }
+        catch (WebSocketException ex)
+        {
+            Debug.LogError("向服务器发送信息错误：" + ex.Message);
+            CloseClientWebSocket();
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// 关闭ClientWebSocket。
+    /// &lt;/summary&gt;
+    public void CloseClientWebSocket()
+    {
+        //关闭Socket
+        if (m_clientWebSocket != null &amp;&amp; m_clientWebSocket.State == WebSocketState.Open)
+        {
+            var task = m_clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
+            Debug.Log("如果打印过快，↓下面↓这个socket状态可能为Open，出现Open就多试几次，我们想看的是CloseSent状态。");
+            Debug.Log("socekt当前状态：" + m_clientWebSocket.State);
+            task.Wait();
+            Debug.Log("socekt当前状态：" + m_clientWebSocket.State);
+            Debug.Log("连接已断开。");
+        }
+        //关闭线程
+        if (m_dataReceiveThread != null &amp;&amp; m_dataReceiveThread.IsAlive)
+        {
+            m_isDoThread = false;   //别想Abort()了，unity中的线程关闭建议使用bool来控制线程结束。
+            m_dataReceiveThread = null;
+        }
+    }
+}</code></pre> 
+<h3> 3.2 服务器代码</h3> 
+<p>Program.cs</p> 
+<pre><code class="language-cs">using System;
+using System.Threading.Tasks;
+
+internal class Program
+{
+    //创建一个WebSocketService
+    private static WebSocketService m_serviceSocket;
+    static void Main(string[] args)
+    {
+        //开启后台线程，监听客户端连接
+        Task.Run(() =&gt;
+        {
+            m_serviceSocket = new WebSocketService();           //实例化一个WebSocketService
+            m_serviceSocket.m_DataReceive += HandleDataRecive;    //监听消息事件，处理函数，当有接收到客户端消息时会调用此处理函数来处理
+            m_serviceSocket.Listening();                        //开始监听
+        });
+
+        //持续接收键盘输入，为了能多次向客户端发消息，同时起到不关闭控制台程序的作用
+        while (true)
+        {
+            //输入内容，发送消息到客户端
+            string msg = Console.ReadLine();
+            m_serviceSocket.Send(msg);
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// 消息事件处理函数
+    /// &lt;/summary&gt;
+    /// &lt;param name="sender"&gt;&lt;/param&gt;
+    /// &lt;param name="e"&gt;&lt;/param&gt;
+    private static void HandleDataRecive(object sender, string e)
+    {
+        Console.WriteLine("接收的客户端消息：" + e);
+    }
+}</code></pre> 
+<p>WebSocketService.cs</p> 
+<pre><code class="language-cs">using System;
+using System.Net;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+internal class WebSocketService
+{
+    HttpListener m_httpListener;                //监听者
+    private WebSocket m_webSocket;              //socket
+    public event EventHandler&lt;string&gt; m_DataReceive;  //事件（委托），消息处理函数添加到这里。
+    private bool m_isDoThread;              //线程持续执行标识符
+
+    public void Listening()
+    {
+        Console.WriteLine("正在监听...");
+        //监听Ip、端口
+        m_httpListener = new HttpListener();
+        m_httpListener.Prefixes.Add("http://127.0.0.1:8888/");  //监听本机地址
+        m_httpListener.Start();
+        var httpListenContext = m_httpListener.GetContext();    //这里就等待客户端连接了。
+        var webSocketContext = httpListenContext.AcceptWebSocketAsync(null);
+        m_webSocket = webSocketContext.Result.WebSocket;
+        //初始化标识符
+        m_isDoThread = true;
+        //开启后台线程，持续接收客户端消息
+        Task.Run(() =&gt;
+        {
+            while (m_isDoThread)
+            {
+                //接收消息
+                string msg = Receive(m_webSocket);
+                if (msg != null)
+                {
+                    m_DataReceive?.Invoke(m_webSocket, msg);  //数据处理
+                }
+            }
+            Console.WriteLine("接收信息线程结束。");
+        });
+        Console.WriteLine("连接建立成功！");
+    }
+
+    /// &lt;summary&gt;
+    /// 发送信息
+    /// &lt;/summary&gt;
+    /// &lt;param name="content"&gt;发送的内容&lt;/param&gt;
+    public void Send(string content)
+    {
+        //同客户端，WebSocketState要求
+        if (m_webSocket != null &amp;&amp; (m_webSocket.State == WebSocketState.Open || m_webSocket.State == WebSocketState.CloseReceived))
+        {
+            ArraySegment&lt;byte&gt; array = new ArraySegment&lt;byte&gt;(Encoding.UTF8.GetBytes(content)); //创建数组，并存储发送内容字节编码
+            var task = m_webSocket.SendAsync(array, WebSocketMessageType.Binary, true, CancellationToken.None);  //发送   
+            task.Wait();          //等待
+            Console.WriteLine("发送了一个消息到客户端。");
+        }
+    }
+
+    /// &lt;summary&gt;
+    /// 接收信息
+    /// &lt;/summary&gt;
+    /// &lt;param name="webSocket"&gt;&lt;/param&gt;
+    /// &lt;returns&gt;&lt;/returns&gt;
+    private string Receive(WebSocket webSocket)
+    {
+        //同客户端，WebSocketState要求
+        if (webSocket != null &amp;&amp; (webSocket.State == WebSocketState.Open || webSocket.State == WebSocketState.CloseSent))
+        {
+            //接收消息
+            byte[] arrry = new byte[1024];  //大小根据情况调整
+            ArraySegment&lt;byte&gt; buffer = new ArraySegment&lt;byte&gt;(arrry);
+            var task = webSocket.ReceiveAsync(buffer, CancellationToken.None);
+            task.Wait();
+
+            Console.WriteLine("当前socket状态：" + webSocket.State);
+            //当收到关闭连接的请求时（关闭确认）
+            if (webSocket.State == WebSocketState.CloseReceived || task.Result.MessageType == WebSocketMessageType.Close)
+            {
+                webSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Acknowledge Close frame", CancellationToken.None);//关闭确认
+                Console.WriteLine("当前socket状态：" + webSocket.State);
+                Console.WriteLine("连接已断开。");
+                //关闭线程
+                m_isDoThread = false;
+
+                return null;
+            }
+            //将接收数据转为string类型，并返回。注意只解析我们接收到的字节数目（task.Result.Count）
+            return Encoding.UTF8.GetString(buffer.Array, 0, task.Result.Count);
+        }
+        else
+        {
+            return null;
+        }
+    }
+}</code></pre> 
+<h2>4 演示</h2> 
+<p>通信、断开连接： </p> 
+<p><img alt="" height="771" src="https://images2.imgbox.com/aa/33/VZx9Sghq_o.gif" width="1200"></p> 
+<p>socket状态变化截图：</p> 
+<p><img alt="" height="648" src="https://images2.imgbox.com/2a/56/Chcy2vp4_o.png" width="1200"></p> 
+<h2>5 webSocket状态变化</h2> 
+<p>        这里说一下客户端在发送断开连接请求时，客户端与服务器socket的状态变化，在代码中socket状态变化时都会有打印出来。<br>         状态变化：客户端使用CloseAsync申请关闭，客户端socket转为CloseSent状态；服务器接收到请求后，服务器socket转为CloseReceived状态；服务器执行CloseOutputAsync确认关闭，自己转为Closed状态；客户端受到确认转为CloseReceived，经过一小段时间（非常短）转为Closed状态。</p> 
+<h2>6 结束语</h2> 
+<p>        开始在找Unity WebSocket通信这方面资料时，发现大多数的方案都是使用插件，插件的确很方便，用起来也比较舒服，但我个人还是倾向于使用非插件的方法，所以就研究了下。所提供的代码只是实现了简单的通信与控制，演示了相关API，在具体到项目中时肯定还要根据需要进行修改补充。</p> 
+<p>        列举目前代码中可优化的部分内容（想要真正应用到项目，那么要完善和考虑的东西非常多，这里只列举几个）：</p> 
+<ol>
+<li>发送和关闭方法处于主线程中（异常抛出时，关闭方法在非主线程中执行，直接调用在主线程），当task.Wait()时便会阻塞主线程，当时间等待过长时就会出现卡死主线程的情况，所以可以考虑创建两个新线程来处理发送、关闭，就像接收消息线程一样，发送线程负责整个客户端的消息发送，关闭线程负责客户端断开连接请求，避免可能出现的卡死主线程的情况。</li>
+<li>在CloseClientWebSocket()方法中还应该考虑到连接到一半时出错该如何关闭socket的处理情况，但目前并未遇到这种情况，所以也没有针对这种情况进行处理。我是在查阅资料时看到有人出现过这种错误，但后来再找那篇文章时找不到了.......所以目前就先这样吧，以后有机会再更新。更具体的内容在代码注释中有说明。</li>
+<li>关于catch抛出的异常的问题，在代码中我catch的是WebSocketException，但到具体项目中要根据情况再修改，如服务器不监听的情况下客户端连接超时时会抛出异常，但使用WebSocketException我们就catch不到抛出的异常，使用Exception才可以catch到，那如果我们想捕获此异常并提示连接超时之类信息时就需要将WebSocketException修改为Exception了。</li>
+<li>使用事件（委托）来处理接收到的消息时，最好单独开个线程来处理消息，接收消息的线程只负责接收并存储消息，而处理则由另一个线程负责（也可以多个线程处理），当然，也可以直接使用主线程来处理消息。这样做是为了减少接收线程的任务量，让其可以更专注于接收与存储，及时接收数据。</li>
+<li>代码中接收数据每次都会new一个新数组，接收数据不频繁时无所谓，但如果过于频繁，最好把数组放到外面只new一个，之后每次接收之前Clear一下，以Clear替换new操作，这样性能上会好些。</li>
+<li>断线重连。</li>
+<li>心跳包。</li>
+</ol>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

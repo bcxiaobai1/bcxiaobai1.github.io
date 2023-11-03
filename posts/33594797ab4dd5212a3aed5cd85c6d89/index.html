@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>GnosisSafeProxy合约学习 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">GnosisSafeProxy合约学习</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="GnosisSafeProxy__0"></a>GnosisSafeProxy 学习</h1> 
+<blockquote> 
+ <p>GnosisSafe是以太坊区块链上最流行的多签钱包！它的最初版本叫 <code>MultiSigWallet</code>，现在新的钱包叫<code>Gnosis Safe</code>，意味着它不仅仅是钱包了。它自己的介绍为:以太坊上的最可信的数字资产管理平台（The most trusted platform to manage digital assets on Ethereum）。</p> 
+</blockquote> 
+<p><code>Gnosis Safe Contracts</code>的核心合约采用了代理/实现这种模式，并且为了方便大家创建，使用了ProxyFractory合约来进行代理合约的创建（当然创建代理合约之前必须创建实现合约）。</p> 
+<p>这里什么是代理/实现模式就不再讲了，不清楚的读者可以自行阅读相关文章。</p> 
+<h2>
+<a id="11_GnosisSafeProxysol__10"></a>1.1 GnosisSafeProxy.sol 合约源码</h2> 
+<p>既然是代理/实现合约，那么我们平常交互的对象就是代理合约了，虽然逻辑在实现合约里面。相对其它而言，代理合约是非常简单的，和<code>openzeppelin</code>的代理合约也很相似，我们先看本合约源码。</p> 
+<pre><code class="prism language-solidity">// SPDX-License-Identifier: LGPL-3.0-only
+pragma solidity &gt;=0.7.0 &lt;0.9.0;
+
+/// @title IProxy - Helper interface to access masterCopy of the Proxy on-chain
+/// @author Richard Meissner - &lt;richard@gnosis.io&gt;
+interface IProxy {
+    function masterCopy() external view returns (address);
+}
+
+/// @title GnosisSafeProxy - Generic proxy contract allows to execute all transactions applying the code of a master contract.
+/// @author Stefan George - &lt;stefan@gnosis.io&gt;
+/// @author Richard Meissner - &lt;richard@gnosis.io&gt;
+contract GnosisSafeProxy {
+    // singleton always needs to be first declared variable, to ensure that it is at the same location in the contracts to which calls are delegated.
+    // To reduce deployment costs this variable is internal and needs to be retrieved via `getStorageAt`
+    address internal singleton;
+
+    /// @dev Constructor function sets address of singleton contract.
+    /// @param _singleton Singleton address.
+    constructor(address _singleton) {
+        require(_singleton != address(0), "Invalid singleton address provided");
+        singleton = _singleton;
+    }
+
+    /// @dev Fallback function forwards all transactions and returns all received return data.
+    fallback() external payable {
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            let _singleton := and(sload(0), 0xffffffffffffffffffffffffffffffffffffffff)
+            // 0xa619486e == keccak("masterCopy()"). The value is right padded to 32-bytes with 0s
+            if eq(calldataload(0), 0xa619486e00000000000000000000000000000000000000000000000000000000) {
+                mstore(0, _singleton)
+                return(0, 0x20)
+            }
+            calldatacopy(0, 0, calldatasize())
+            let success := delegatecall(gas(), _singleton, 0, calldatasize(), 0, 0)
+            returndatacopy(0, 0, returndatasize())
+            if eq(success, 0) {
+                revert(0, returndatasize())
+            }
+            return(0, returndatasize())
+        }
+    }
+}
+</code></pre> 
+<h2>
+<a id="12__63"></a>1.2 源码学习</h2> 
+<p><font size="5" color="red">注意：阅读注释很重要，魔鬼细节全在注释里。</font></p> 
+<p>我们现在开始学习，直接跳过版权声明和<code>pragma</code>声明部分。</p> 
+<ul>
+<li> <p><code>IProxy</code> 定义了一个代理合约需要实现的接口，它仅有一个函数<code>masterCopy()</code>，功能为返回其实现合约地址。</p> </li>
+<li> <p><code>contract GnosisSafeProxy</code> 代理合约定义。注意注释中提到，它会根据<code>master</code>合约中的代码来执行所有交易（其实这里有一个例外，就是<code>masterCopy</code>函数本身。注意，合约定义并没有<code>is IProxy</code>，也就是不需要显式实现<code>masterCopy</code>函数。这是因为为了节省<code>gas</code>，该函数统一通过<code>fallback</code>函数来实现，所以不需要显式定义合约必须实现<code>IProxy</code>接口。</p> </li>
+<li> <p><code>singleton</code> 字面意思类似Java中单例，也就是唯一实现<code>master</code>。注意，它是合约中的第一个状态变量，所以存储在插槽0。实现合约中的相同的状态变量必须和代理合约中保持插槽顺序一致（否则会引起插槽冲突），也就是说实现合约的第一个状态变量必须也是<code>singleton</code>。这个我们以后学习到实现合约时再做验证。</p> </li>
+<li> <p>注释中提到它是内部可见性，是为了节省gas。它可以通过<code>getStorageAt</code>也就是直接读取插槽位置获取，当然了，本合约中可以通过<code>IProxy</code>定义的接口函数<code>masterCopy</code>获取，当然，它内部也是通过读取插槽0实现的。</p> </li>
+<li> <p>构造器参数是实现合约地址，验证了它不能为0地址，这个很简单，当然我们可以进一步验证其它必须为合约地址。</p> </li>
+<li> <p><code>fallback</code> 函数。我们知道，调用一个合约时，如果合约匹配不到相应的函数，则会调用<code>fallback</code>函数（如果有定义）。代理/实现模式利用了这一特点，在<code>fallback</code> 函数里将所有的调用转为调用实现合约中相应的逻辑，再返回相应结果。因为本合约未定义<code>receive</code>函数，所以接收ETH也是执行的本函数。</p> </li>
+<li> <p>本列中的<code>fallback</code>函数和<code>openzeppelin</code>合约中的略有不同，首先，它判断了调用是否为<code>masterCopy</code>函数，如果是的话，直接返回<code>singleton</code>地址，因此变相实现了<code>IProxy</code>。如果不是调用的<code>masterCopy</code>函数，则委托调用实现合约的相关逻辑。我们来简单学习一下它的代码。</p> <p>需要注意的是，在内嵌汇编中，所有的<code>EVM dialect</code>涉及的数据类型都是uint256类型，没有其它类型。接下来的文档中如果没有特殊说明，所有的<code>word</code>均指32字节（256位）。EVM中的操作一般是以一个word为单位的。</p> 
+  <ol>
+<li> <p><code>let _singleton := and(sload(0), 0xffffffffffffffffffffffffffffffffffffffff)</code> 这行代码先读取插槽0的数据（32字节，256位），然后和40个<code>F</code>按位与操作，重置前面未使用的数据位为0。这是一个良好的习惯，我们不能假定前面未使用的数据位一定为0，虽然本例中的确为0。最后的结果得到 <code>singleton</code>地址，注意前面提到过，其不是地址类型，而是<code>uint256</code>。</p> </li>
+<li> <pre><code class="prism language-solidity">if eq(calldataload(0), 0xa619486e00000000000000000000000000000000000000000000000000000000) {
+    mstore(0, _singleton)
+    return(0, 0x20)
+}
+</code></pre> <p>判断调用是否为<code>masterCopy</code>。注意，虽然我们平常调用合约时，类似<code>masterCopy</code>这样的没有参数的函数调用它的数据只有8位<code>0xa619486e</code>（函数选择器），但是<code>calldataload</code>读取的是calldata中的<code>0</code>地址开始的一个word内容，它是256位的，不足的话会被右边补0。所以<code>if</code>语句中相比较的是补0后的函数选择器，那么补了多少个0呢？由于uint256是64个16进制长度，函数选择器的长度是8，所以补了 <code>64 - 8 = 56</code> 个0.</p> <p>如果比较相等，则把<code>singleton</code>地址保存到内存中0地址开始的字节中去，然后返回该地址。注意<code>return(0, 0x20)</code>返回内存中0地址开始的一个word，第一个参数0代表开始地址，第二个参数<code>0x20</code>代表返回内容的长度（字节数）。<code>0x20 = 32</code> 也就是一个word（32字节），刚好是上一步压入内存的地址。</p> </li>
+<li> <p>如果不是<code>masterCopy</code>函数，则执行逻辑和<code>openzeppelin</code>中相关函数一致，我们来看代码：</p> <pre><code class="prism language-solidity">calldatacopy(0, 0, calldatasize())
+let success := delegatecall(gas(), _singleton, 0, calldatasize(), 0, 0)
+returndatacopy(0, 0, returndatasize())
+if eq(success, 0) {
+    revert(0, returndatasize())
+}
+return(0, returndatasize())
+</code></pre> <p>第一行将所有的<code>calldata</code>数据复制到内存中（从calldata的0地址开始，复制到内存中的0地址开始位置）。</p> <p>第二行进行委托调用，对应的参数按顺序分别为剩余的<code>gas</code>，实现合约地址，内存中开始地址，数据大小，output开始位置 ,output大小（最后两项一般为0）。 因为上一步复制了<code>calldata</code>到内存0位置，所以这里我们是从0地址开始的，大小刚好就是<code>calldatasize</code>。</p> <p>第三行将返回值复制到了内存中从0地址开始的位置（多次利用了零地址开头的内存）。</p> <p>4-6行判断如果返回值是0（代表delegatecall失败），则将返回值<code>revert</code>（这里一般是出错原因）。第一个参数0代表内存开始位置 ，第二个参数代表数据大小–字节数。</p> <p>第7行如果调用成功，则将返回值<code>return</code>。（第一个参数0代表内存开始位置 ，第二个参数代表数据大小–字节数）</p> </li>
+<li> <p>我们可以对比一下<code>openzeppelin</code>中相关代码<code>_delegate</code>函数，基本是类似的：</p> <pre><code class="prism language-solidity">function _delegate(address implementation) internal virtual {
+    assembly {
+        // Copy msg.data. We take full control of memory in this inline assembly
+        // block because it will not return to Solidity code. We overwrite the
+        // Solidity scratch pad at memory position 0.
+        calldatacopy(0, 0, calldatasize())
+
+        // Call the implementation.
+        // out and outsize are 0 because we don't know the size yet.
+        let result := delegatecall(gas(), implementation, 0, calldatasize(), 0, 0)
+
+        // Copy the returned data.
+        returndatacopy(0, 0, returndatasize())
+
+        switch result
+        // delegatecall returns 0 on error.
+        case 0 {
+            revert(0, returndatasize())
+        }
+        default {
+            return(0, returndatasize())
+        }
+    }
+}
+</code></pre> <p>Gnosis的代码和这个相比，仅是多了一个<code>masterCopy</code>的调用判断及返回。</p> </li>
+<li> <p>知识拓展。我们知道，在Solidity中，有自由内存指针，并且还有<code>scratch</code>。我们平常并不是从内存中零地址开始操作的，通常是从自由内存指针指向的地址开始操作的，一般为<code>0x80</code>（前四个word已经被占用）。但是这里<code>openzeppelin</code>的注释解释的很清楚，它并没有采用Solidity的内存控制，而是自己完全控制，因为它不涉及到Solidity代码（内嵌汇编是<code>Yul</code>代码），因此是不冲突的。同时它还解释了我们将<code>delegatecall</code>最后两个参数设置为0的原因是我们无法知道返回值大小。</p> </li>
+</ol> <p>好了，<code>GnosisSafeProxy.sol</code> 就算学习结束了，它只是一个简单的代理合约。和标准的代理合约相比，它多了一个<code>masterCopy</code>函数的调用判断。</p> <p>为什么没有把它单独列为一个函数呢？根据注释猜想应该是为了节省<code>gas</code>。</p> <p>相对而言，<code>openzeppelin</code>模板中的<code>TransparentUpgradeableProxy </code>合约专门提供了一个函数<code>implementation</code>用来返回实现合约的地址。 另外， <code>TransparentUpgradeableProxy</code>中的实现合约一般不是插槽位置0的状态变量，例如实现了<code>eip-1967</code></p> <p>的<code>ERC1967Upgrade</code>合约，它的实现插槽是根据<code>"eip1967.proxy.implementation" </code>计算的哈希值减去1 得到的，虽然这样会存在哈希碰撞的可能，但仅存于理论上。</p> <p>采用相同插槽位置（从0开始）来保存相同状态变量的代理/实现模式还有CompoundV2版本的合约，大家有兴趣的可以自己去看一下相关源码。</p> <p>拓展一点：<br> <code>openzeppelin</code>在它自己的访问提到了为什么会有<code>TransparentUpgradeableProxy</code>.是因为本合约这种最简单的代理实现模式可能存在函数选择器冲突。如果实现合约恰好有一个函数的选择器和<code>masterCopy</code>相同（利用编程语言可以构造一个），那么在调用这个函数时其实是会调用<code>masterCopy</code>，从而得到的一个错误的结果。但是我们这里的实现合约是固定的，所以不会存在这个问题。大家有兴趣的可以参考：<br> <a href="https://docs.openzeppelin.com/contracts/4.x/api/proxy#TransparentUpgradeableProxy">https://docs.openzeppelin.com/contracts/4.x/api/proxy#TransparentUpgradeableProxy</a></p> </li>
+</ul>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Magisk内部实现原理 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Magisk内部实现原理</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p><img src="https://images2.imgbox.com/51/d9/IqWgyxau_o.png" alt="在这里插入图片描述"></p> 
+<p>Android10以后，Android系统限制了System分区的修改，结果就是，即使你i是自己编译的Android系统，即使是有做高的root权限，你依然无法挂载System分区并对其内容进行修改,尽管网上有各种帖子说可以使用<code>mount -o rw,remount /</code>,但这并没有解决开发者的实际问题。这意味着传统的万能root出现局限性，为了解决这个问题Magisk的作者<code>Top John Wu</code>在<a href="https://twitter.com/topjohnwu/status/1169720663201988611">推文中</a>确认了这一问题，并<a href="https://twitter.com/topjohnwu/status/1170404633371525120">确认了</a>导致该问题的原因是谷歌在Android10以后引入了<code>EXT4 共享块</code>，而这个共享块和其他分区的区别在于根本没有可用空间的概念，所以也就没办法挂在为可读写。为了解决这个问题，Magisk团队发现可以重定向文件读取时的文件路径来实现修改的目的，这似乎和我们Hook有相似之处，而这个，被<code>Top John Wu</code>称为Systemless（无System分区）而由此概念引申出来的Root方案，也叫做systemless root。。</p> 
+<h1>
+<a id="Magisk_4"></a>Magisk文件结构</h1> 
+<p>Magisk系统包含上层的控制App以及下层的可执二进制文件以及一些相关配置或者数据文件。我们从底层往上层看会更容易明白Magisk的功能构成和架构思维。</p> 
+<p>首先，Magisk 会挂载一个tmpfs目录来存放一些临时数据。在Android11以下，这个目录时sbin，从 Android 11 开始，/sbin文件夹可能不存在，那么 Magisk 会在/dev下随机创建一个文件夹并将其作为Magisk的Root文件夹。</p> 
+<blockquote> 
+ <p>放在sbin或者dev下的原因是：/sbin或/dev目录非su权限不可读，因此第三方APP无法检测。</p> 
+</blockquote> 
+<p>我们可以通过在adb shell下使用<code>magisk --path</code>打印当前Magisk使用的目录：</p> 
+<h2>
+<a id="magisk_14"></a>找到magisk目录</h2> 
+<pre><code class="prism language-bash">blueline:/ <span class="token comment"># magisk --path</span>
+/dev/bNpnxq
+</code></pre> 
+<h2>
+<a id="_20"></a>文件列表</h2> 
+<p>接下来我们看下这个目录下都有什么文件，以及如何解读这些文件；</p> 
+<pre><code class="prism language-bash">blueline:/dev/bNpnxq <span class="token comment"># ls -al</span>
+total <span class="token number">720</span>
+drwx------  <span class="token number">3</span> root    root       <span class="token number">200</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 <span class="token builtin class-name">.</span>
+drwxr-xr-x <span class="token number">24</span> root    root      <span class="token number">6200</span> <span class="token number">2022</span>-12-25 01:40 <span class="token punctuation">..</span>
+drwxr-xr-x  <span class="token number">8</span> root    root       <span class="token number">180</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 .magisk
+lrwxrwxrwx  <span class="token number">1</span> root    root        <span class="token number">10</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 magisk -<span class="token operator">&gt;</span> ./magisk64
+-rwxr-xr-x  <span class="token number">1</span> root    root    <span class="token number">154452</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 magisk32
+-rwxr-xr-x  <span class="token number">1</span> root    root    <span class="token number">247168</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 magisk64
+-rwxr-xr-x  <span class="token number">1</span> u0_a206 u0_a206 <span class="token number">328240</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 magiskpolicy
+lrwxrwxrwx  <span class="token number">1</span> root    root         <span class="token number">8</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 resetprop -<span class="token operator">&gt;</span> ./magisk
+lrwxrwxrwx  <span class="token number">1</span> root    root         <span class="token number">8</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 <span class="token function">su</span> -<span class="token operator">&gt;</span> ./magisk
+lrwxrwxrwx  <span class="token number">1</span> root    root        <span class="token number">14</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 supolicy -<span class="token operator">&gt;</span> ./magiskpolicy
+</code></pre> 
+<p>可以看到除了magiskpolicy以外，其他都属于root用户组。</p> 
+<p>下面的注释说得很清楚了，直接看代码就好了。</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 想要获取 Magisk 正在使用的当前Base文件夹，请使用命令 `magisk --path`。</span>
+<span class="token comment"># 像 magisk、magiskinit 这样的二进制文件和所有指向小程序的符号链接都直接存储在这个路径中。 </span>
+<span class="token comment"># 这意味着当这是 /sbin 时，这些二进制文件将直接位于 PATH 中。</span>
+<span class="token assign-left variable">MAGISKBASE</span><span class="token operator">=</span><span class="token variable"><span class="token variable">$(</span>magisk <span class="token parameter variable">--path</span><span class="token variable">)</span></span>
+
+<span class="token comment"># Magisk 内部文件</span>
+<span class="token assign-left variable">MAGISKTMP</span><span class="token operator">=</span><span class="token variable">$MAGISKBASE</span>/.magisk
+
+<span class="token comment"># Magisk 的 BusyBox 目录。 </span>
+<span class="token comment"># 在此文件夹中存储 busybox 二进制文件和指向其所有小程序的符号链接。 </span>
+<span class="token comment"># 此目录的任何用法已弃用，请直接调用 /data/adb/magisk/busybox 并使用 BusyBox 的 ASH 独立模式。</span>
+<span class="token comment"># 将来会删除此路径的创建。</span>
+<span class="token variable">$MAGISKTMP</span>/busybox
+
+<span class="token comment"># /data/adb/modules 将mount在这里。 原始文件夹未被使用(由于 nosuid 挂载标志)。</span>
+<span class="token variable">$MAGISKTMP</span>/modules
+
+<span class="token comment"># 当前的 Magisk 安装配置</span>
+<span class="token variable">$MAGISKTMP</span>/config
+
+<span class="token comment"># 分区镜像</span>
+<span class="token comment"># 应用在访问系统文件的时候会优先访问该目录下的文件，以达到狸猫换太子的目的</span>
+<span class="token comment"># 例如 system，system_ext，vendor，data......</span>
+<span class="token variable">$MAGISKTMP</span>/mirror
+
+<span class="token comment"># Magisk 内部创建block设备来挂载镜像，和mirror对应，对应关系可通过ls -al列出</span>
+<span class="token variable">$MAGISKTMP</span>/block
+
+<span class="token comment"># Root 目录补丁文件</span>
+<span class="token comment"># 位于 system-as-root 设备上，/ 不可写。</span>
+<span class="token comment"># 所有预初始化补丁文件都放在这里并mount</span>
+<span class="token variable">$MAGISKTMP</span>/rootdir
+</code></pre> 
+<blockquote> 
+ <p>下面是<code>/dev/bNpnxq/.magisk/mirror</code>列出的文件列表，对应block的设备节点</p> 
+</blockquote> 
+<pre><code class="prism language-bash">blueline:/dev/bNpnxq/.magisk/block <span class="token comment"># ls -al</span>
+total <span class="token number">0</span>
+d--------- <span class="token number">2</span> root root      <span class="token number">160</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 <span class="token builtin class-name">.</span>
+drwxr-xr-x <span class="token number">8</span> root root      <span class="token number">180</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 <span class="token punctuation">..</span>
+brw------- <span class="token number">1</span> root root <span class="token number">253</span>,   <span class="token number">8</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 data
+brw------- <span class="token number">1</span> root root <span class="token number">259</span>,   <span class="token number">4</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 metadata
+brw------- <span class="token number">1</span> root root <span class="token number">253</span>,   <span class="token number">7</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 product
+brw------- <span class="token number">1</span> root root <span class="token number">253</span>,   <span class="token number">5</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 system_ext
+brw------- <span class="token number">1</span> root root <span class="token number">253</span>,   <span class="token number">4</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 system_root
+brw------- <span class="token number">1</span> root root <span class="token number">253</span>,   <span class="token number">6</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 vendor
+blueline:/dev/bNpnxq/.magisk/block <span class="token comment"># cd ../mirror/</span>
+blueline:
+<span class="token comment">####################################</span>
+/dev/bNpnxq/.magisk/mirror <span class="token comment"># ls -al</span>
+total <span class="token number">24</span>
+d---------  <span class="token number">7</span> root   root    <span class="token number">220</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 <span class="token builtin class-name">.</span>
+drwxr-xr-x  <span class="token number">8</span> root   root    <span class="token number">180</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 <span class="token punctuation">..</span>
+drwxrwx--x <span class="token number">50</span> system system <span class="token number">4096</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 data
+lrwxrwxrwx  <span class="token number">1</span> root   root      <span class="token number">9</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 metadata -<span class="token operator">&gt;</span> /metadata
+lrwxrwxrwx  <span class="token number">1</span> root   root     <span class="token number">19</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 persist -<span class="token operator">&gt;</span> /mnt/vendor/persist
+drwxr-xr-x <span class="token number">14</span> root   root   <span class="token number">4096</span> <span class="token number">2009</span>-01-01 08:00 product
+lrwxrwxrwx  <span class="token number">1</span> root   root     <span class="token number">17</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 sepolicy.rules -<span class="token operator">&gt;</span> ./metadata/magisk
+lrwxrwxrwx  <span class="token number">1</span> root   root     <span class="token number">20</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 system -<span class="token operator">&gt;</span> ./system_root/system
+drwxr-xr-x  <span class="token number">9</span> root   root   <span class="token number">4096</span> <span class="token number">2009</span>-01-01 08:00 system_ext
+drwxr-xr-x <span class="token number">26</span> root   root   <span class="token number">4096</span> <span class="token number">2009</span>-01-01 08:00 system_root
+drwxr-xr-x <span class="token number">20</span> root   shell  <span class="token number">4096</span> <span class="token number">2009</span>-01-01 08:00 vendor
+</code></pre> 
+<h1>
+<a id="dataadb_109"></a>配置和模块（/data/adb目录）</h1> 
+<p>不要被目录名迷惑，虽然是adb实际上是Magisk的一个应用目录，这个目录里面保存了Magisk的一些数据和配置文件，安装的模块也是被保存在这里，之所以使用这个目录是有它的优势的：</p> 
+<ul>
+<li>该目录对于任何出厂设备来说都存在，第三方APP无法据此检测Magisk。</li>
+<li>该目录权限默认为700，所有者为root，因此第三方APP无法进入和读写。</li>
+<li>该目录的安全上下文secontext是u:object_r:adb_data_file:s0，很少有进程有该权限。</li>
+<li>该目录在Device Encrypted (DE) storage，因此当FBE (File-Based Encryption) 设备在Direct Boot mode时或者解锁锁屏后即可使用。</li>
+</ul> 
+<p>这个目录下包含以下文件（配合Magisk启动流程来看更容易理解）：</p> 
+<pre><code class="prism language-bash"><span class="token assign-left variable">SECURE_DIR</span><span class="token operator">=</span>/data/adb
+
+<span class="token comment"># 存储一些 post-fs-data 后需要执行的脚本的文件夹</span>
+<span class="token variable">$SECURE_DIR</span>/post-fs-data.d
+
+<span class="token comment"># 存放通用 late_start 服务脚本的文件夹</span>
+<span class="token variable">$SECURE_DIR</span>/service.d
+
+<span class="token comment"># Magisk 模块目录</span>
+<span class="token variable">$SECURE_DIR</span>/modules
+
+<span class="token comment"># 待升级的 Magisk 模块</span>
+<span class="token comment"># 因为模块文件在挂载时修改是不安全的</span>
+<span class="token comment"># 通过 Magisk 应用程序安装的模块将存储在这里，并在下次重启时合并到 $SECURE_DIR/modules</span>
+<span class="token variable">$SECURE_DIR</span>/modules_update
+
+<span class="token comment"># 数据库存储应用设置和root授权日志</span>
+<span class="token assign-left variable">MAGISKDB</span><span class="token operator">=</span><span class="token variable">$SECURE_DIR</span>/magisk.db
+
+<span class="token comment"># 所有与 magisk 相关的二进制文件，包括 busybox、scripts和 magisk 二进制文件。 用于支持模块安装、addon.d、Magisk应用程序等。</span>
+<span class="token assign-left variable">DATABIN</span><span class="token operator">=</span><span class="token variable">$SECURE_DIR</span>/magisk
+</code></pre> 
+<h1>
+<a id="Magisk_143"></a>Magisk启动过程</h1> 
+<p>Magisk启动分为以下几步：Pre-Init，post-fs-data，late_start，Resetprop，这几个启动流程我们可以对应上Android系统启动，下面我详细说明一下：</p> 
+<h2>
+<a id="PreInit__146"></a>Pre-Init 阶段</h2> 
+<p>使用 magiskinit替换init并执行：</p> 
+<ul>
+<li>先挂载所需的分区。 在传统的 system-as-root 设备上，切换root到/system；在2SI 设备上（使用systemless）, 将 init 文件重定向到 magiskinit 并执行（原理是我们在patch boot的时候会重定向原来的init步骤 ），以此来挂载所需的分区。</li>
+<li>在 init.rc注入magisk服务</li>
+<li>对于使用 monolithic (整体的)安全策略的设备，从 /sepolicy读取安全策略；对于其它设备，用FIFO劫持selinuxfs nodes，设置 LD_PRELOAD 来hook security_load_policy ，并且协助劫持2SI 设备，并且启动daemon直到init尝试读取sepolicy。</li>
+<li>Patch sepolicy 规则。如果使用 “劫持” 方法, 则将修补的sepolicy载入kernel, 然后解除init 劫持并退出daemon。</li>
+<li>执行原始的 init 来执行后续的启动过程</li>
+</ul> 
+<h2>
+<a id="postfsdata_154"></a>post-fs-data阶段</h2> 
+<p><code>post-fs-data</code> 过程在 /data 解密并挂载后触发。首先会启动守护进程 <code>magiskd</code> ，执行<code>post-fs-data</code>脚本，这个时候模块文件就挂载完毕了。</p> 
+<h2>
+<a id="late_start_157"></a>late_start阶段</h2> 
+<p>在启动过程的后期, late_start 类会被触发，开启Magisk “service” 模式。服务脚本会在这个模式下执行。</p> 
+<p>到这里Magisk就完全启动了，上面就是App了，他只是负责一些配置的修改和状态显示，以及调用前面启动的服务和程序来执行，大概就是这样的过程。</p> 
+<h1>
+<a id="Resetprop_162"></a>修改属性（Resetprop）</h1> 
+<p>正常来说，只有init能修改系统属性，非root进程只能读取无法修改。在有root时可以通过由init提供的property_service发送请求（比如adb可以使用setprop命令）来实现修改，但是通过这种方式不能修改和删除只读属性（以ro.开头的属性，例如ro.build.product），除非修改系统源码。</p> 
+<p>resetprop 通过提取和patch AOSP中和系统属性相关的源代码，从而允许直接修改属性区域（prop_area），不再需要通过property_service来修改系统属性（实际上这个功能和Github上开源的mprop的原理类似）。不过也正是因为绕过了property_service,所以需要有下面的注意事项：</p> 
+<ul>
+<li> <p><strong>触发事件的修复</strong>：由于绕过了property_service，所以当属性改变时，在*.rc脚本中注册的on property:foo=bar 动作事件不会被触发（在init语言中这个叫做属性触发器）。但Mgisk考虑到了这点，所以默认情况下 resetprop设置属性时会和setprop一样，它会触发事件（通过先删除属性再通过property_service来设置属性来实现）。如果不想触发动作事件，可以使用-n参数禁用。</p> </li>
+<li> <p><strong>实现重启也保留修改</strong>：持久属性（以persist.开头的属性，例如persist.sys.usb.config）在 prop_area 和 /data/property都有存储。默认情况下，删除持久属性时不会把它从持久化存储中移除，也就是说下次重启时持久属性会被恢复； getprop在不会从持久化存储中读取持久属性。但是对于resetprop ，<strong>可以使用-p参数</strong>，这样删除时会同时将该属性从 prop_area 和 /data/property中移除，读取时也会同时从prop_area 和 持久化存储中读取。</p> </li>
+</ul> 
+<h1>
+<a id="SELinux__171"></a>SELinux 策略</h1> 
+<p>Magisk通过patch原来的sepolicy来确保Magisk的操作可以安全地执行。新的magisk域权限很高， magiskd和所有root shell都会在该域中运行。magisk_file是一个新的文件类型，该文件类型允许每一个域访问（不受限制的文件上下文），下面这个magisk文件用的就是<code>magisk_file</code>上下文。</p> 
+<pre><code class="prism language-bash">blueline:/data/adb <span class="token comment"># ls -Zl</span>
+total <span class="token number">52</span>
+drwxr-xr-x <span class="token number">3</span> root root u:object_r:magisk_file:s0     <span class="token number">3488</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 magisk
+-rw------- <span class="token number">1</span> root root u:object_r:adb_data_file:s0  <span class="token number">40960</span> <span class="token number">2022</span>-12-27 02:22 magisk.db
+drwxr-xr-x <span class="token number">2</span> root root u:object_r:system_file:s0     <span class="token number">3488</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 modules
+drwxr-xr-x <span class="token number">2</span> root root u:object_r:adb_data_file:s0   <span class="token number">3488</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 post-fs-data.d
+drwxr-xr-x <span class="token number">2</span> root root u:object_r:adb_data_file:s0   <span class="token number">3488</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 service.d
+</code></pre> 
+<p>在 Android 8.0之前，所有被su允许的客户端域都可以直接连接到 magiskd 并且与守护进程连接，从而获得远程的root shell访问。Magisk同时也需要释放一些ioctl 操作以便root shell可以正常工作。</p> 
+<p>但是，在Android 8.0及以后，为了避免Android沙箱中对规则的放松，Magisk实现了一个新的SELinux模型。 magisk二进制文件被标记为magisk_exec文件类型，进程在以su client的域运行时执行 magisk二进制文件（包括su命令）时会被中转为 magisk_client（通过使用一个type_transition规则）。</p> 
+<p>规则严格限制了magisk域的进程才被允许归属于magisk_exec文件类型。不再允许直接通过socket连接至magiskd；唯一的访问该守护进程的方式就是通过一个magisk_client 进程。这样做确保了沙箱的完整性，让Magisk专用规则从其它规则中分离。如下magisk64：</p> 
+<pre><code class="prism language-bash">blueline:/dev/bNpnxq <span class="token comment"># ls -lZ</span>
+total <span class="token number">720</span>
+lrwxrwxrwx <span class="token number">1</span> root    root    u:object_r:system_file:s0                            <span class="token number">10</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 magisk -<span class="token operator">&gt;</span> ./magisk64
+-rwxr-xr-x <span class="token number">1</span> root    root    u:object_r:system_file:s0                        <span class="token number">154452</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 magisk32
+-rwxr-xr-x <span class="token number">1</span> root    root    u:object_r:magisk_exec:s0                        <span class="token number">247168</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 magisk64
+-rwxr-xr-x <span class="token number">1</span> u0_a206 u0_a206 u:object_r:app_data_file:s0:c206,c256,c512,c768  <span class="token number">328240</span> <span class="token number">2022</span>-12-24 <span class="token number">21</span>:41 magiskpolicy
+lrwxrwxrwx <span class="token number">1</span> root    root    u:object_r:system_file:s0                             <span class="token number">8</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 resetprop -<span class="token operator">&gt;</span> ./magisk
+lrwxrwxrwx <span class="token number">1</span> root    root    u:object_r:system_file:s0                             <span class="token number">8</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 <span class="token function">su</span> -<span class="token operator">&gt;</span> ./magisk
+lrwxrwxrwx <span class="token number">1</span> root    root    u:object_r:system_file:s0                            <span class="token number">14</span> <span class="token number">1970</span>-02-17 <span class="token number">10</span>:04 supolicy -<span class="token operator">&gt;</span> ./magiskpolicy
+</code></pre> 
+<p>关于更加详细规则可以在 <code>magiskpolicy/rules.cpp</code>中找到。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

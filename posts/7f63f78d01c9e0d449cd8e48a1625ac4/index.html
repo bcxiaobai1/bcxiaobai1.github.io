@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>基于扩散模型的图像压缩：创建基于Stable Diffusion的有损压缩编解码器 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于扩散模型的图像压缩：创建基于Stable Diffusion的有损压缩编解码器</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <p>Stable Diffusion是最近在图像生成领域大火的模型，在对他研究的时候我发现它可以作为非常强大的有损图像压缩编解码器。在介绍之前，我们先看看它与高压缩率下的JPG和WebP相比的而结果，所有都是512x512像素的分辨率为单位：</p> 
+<p><img src="https://images2.imgbox.com/9b/48/wA0Qa88u_o.png" alt=""></p> 
+<p>上面这图的细节如下：</p> 
+<p>这是JPG压缩结果大小为5.66kB</p> 
+<p><img src="https://images2.imgbox.com/35/1e/MGn6mI4i_o.png" alt=""></p> 
+<p>这是WebP ，大小为6.74kB：</p> 
+<p><img src="https://images2.imgbox.com/b6/7d/1g7D2xy8_o.png" alt=""></p> 
+<p>最后是Stable Diffusion 大小4.97kB</p> 
+<p><img src="https://images2.imgbox.com/a8/6f/JCq8tZWx_o.png" alt=""></p> 
+<p>还有一些其他示例，请参考我们最后提供的源代码地址</p> 
+<p>这些示例非常明显，与JPG和WebP相比，用Stable Diffusion压缩这些图像在较小的文件尺寸下会产生极好的图像质量。这么看来这是一种非常有前途的有损图像压缩的选择，但是Stable Diffusion还会带来一些问题，我们在后面介绍。</p> 
+<h2>
+<a id="Stable_Diffusion_23"></a>Stable Diffusion的潜在空间</h2> 
+<p>Stable Diffusion使用三个常用的神经网络进行组合：</p> 
+<p>1、VAE</p> 
+<p>2、U-net</p> 
+<p>3、文本编码器</p> 
+<p>Variational Auto Encoder（VAE）编码和解码器将图像转换为一些潜在空间表示。</p> 
+<p>VAE如何将图像编码到这个潜在空间中呢，它在训练过程中自行学习，随着模型的进一步训练，模型的不同版本的潜在空间表示可能会有所不同，但是Stable Diffusion v1.4的表示形式看起来像这样（重新映射为4通道颜色图像）：</p> 
+<p><img src="https://images2.imgbox.com/7c/b6/sxYOSHqV_o.png" alt=""></p> 
+<p>在重新缩放和解释潜在的颜色值（带有alpha通道）后，图像的主要特征仍然是肉眼可见，VAE将较高的分辨率特征编码到这些像素值中。一个vae的编码/解码的过程如下：</p> 
+<p><img src="https://images2.imgbox.com/b8/85/G2CknDey_o.png" alt=""></p> 
+<p>左：512x512@24bpp的真实图像，中：64x64@128bpp的潜在空间，右：潜在空间解码生成的512x512@24bpp图像</p> 
+<p>通过潜在空间还原的过程并不是无损的。可以看到解码后，我们的羊驼头上蓝色带子包含的名字就不太清晰了。这是因为Stable Diffusion v1.4的VAE通常不太擅长表示小文本以及人脸。</p> 
+<p>而我们知道Stable Diffusion的主要算法从短文本描述中生成新图像，它从潜在空间表示中的随机噪声开始，然后通过使用训练过的U-Net对潜在空间图像进行迭代去噪，简单地说，U-Net输出它认为在噪声中“看到”的东西的预测。当生成图像时，这个迭代的去噪步骤由第三个ML模型(文本编码器)进行指导，该模型向U-Net提供关于它应该在噪声中尝试看到什么内容的信息。所以对于我们这个压缩的方案来说，不需要文本编码器，也就是希望没有文本来进行引导。所以我们这里只创建一个空字符串的一次性编码，这样相当于是告诉U-Net在图像重建期间进行无引导去噪。</p> 
+<h2>
+<a id="_49"></a>压缩方法</h2> 
+<p>为了使用Stable Diffusion作为图像压缩编解码器，我们还需要研究了如何有效地压缩由VAE生成的潜在表示。在这个实验中，进行下采样或者应用现有的有损图像压缩方法都会大大降低重构图像的质量。但是我发现VAE的解码似乎对潜在的量化非常稳健。</p> 
+<p>对潜在空间进行从浮点到8位无符号整数的量化，通过scaling，clamping，然后remapping ，只有非常小的可见重构误差:</p> 
+<p>为了量化由VAE生成的空间，我首先将它们按1 / 0.18215进行缩放，这个数字是在Stable Diffusion源代码中出现的。用这个数字可以很好地映射到[- 1,1]的范围。</p> 
+<p>通过将潜在项量化到8位，图像表示的数据大小现在是64<em>64</em>4<em>8位= 16 kB(真实图像为512</em>512<em>3</em>8位= 768 kB)</p> 
+<p>将潜在对象量化到8位以下并没有产生好的结果，但通过重整色调和抖动来进一步量化它们却出乎意料地好。使用256个4<em>8位向量和Floyd-Steinberg抖动的潜在色调创建了一个色调表示。使用256的色调用单个8位索引表示每个潜在向量，使数据大小达到64</em>64<em>8+256</em>4*8位= 5 kB。</p> 
+<p>色调的抖动会引入了噪声使解码结果失真。但由于扩散模型是基于潜波的去噪，所以可以使用U-Net来去除抖动带来的噪声。经过4次迭代，重构结果在视觉上非常接近于未量化的版本:</p> 
+<p><img src="https://images2.imgbox.com/dd/3d/zSHMUFFW_o.png" alt=""></p> 
+<p>左：抖动后，中:4个去噪步骤，右:真实图像</p> 
+<p>数据大小的极大减少了(压缩系数为155倍)，结果非常好，但是我们也看到心脏符号上新增了光泽阴影，这是在压缩之前不存在。这种压缩方案会引入新的内容从而影响图像表示而不是图像质量，这也说明扩散模型是在创造而不仅仅是还原。</p> 
+<h2>
+<a id="_69"></a>结果评估</h2> 
+<p>为了评估此压缩编解码器，所以没有使用任何公开的图像，这样以确保图像不会包含在扩散模型的训练集中（这样的图像可能会获得不公平的压缩优势，因为它们的一部分数据可能已经在训练时出现了）。为了使比较尽可能公平，使用了Python图像库的JPG和WebP压缩的最高质量设置，并且还使用MozJPEG库对压缩JPG数据进行了无损压缩。</p> 
+<p>虽然看起来Stable Diffusion结果比JPG和WebP压缩图像好得多，但就标准测量指标（如PSNR或SSIM）而言，它们并没有明显好（但也没更差）。这可能是因为Stable Diffusion创造了一些不太引人注意的新的内容，这些内容不会会影响图像评分，但是对人类而言感觉却变好了，例如重构内容可能会受到新生成内容的影响，即使它看起来非常清晰（原图没有，但是还原图被生成出来的一些细节欺骗了）。例如这张旧金山测试图像中的一个细节:</p> 
+<p><img src="https://images2.imgbox.com/ed/8d/ALMZ0QeR_o.png" alt=""></p> 
+<p>左:JPG压缩图，中:真实图片 -右:Stable Diffusion压缩</p> 
+<p>可以非常清晰的看到，建筑物的形状的改变。</p> 
+<h2>
+<a id="_81"></a>一些限制</h2> 
+<p>有些特征目前并没有被保留得很好;特别是小文本和(参考 Stable Diffusion v1.4的Limitations and Biases节)。下面是一个简单的例子</p> 
+<p>这是真实图像：</p> 
+<p><img src="https://images2.imgbox.com/ef/78/JTj37ubR_o.png" alt=""></p> 
+<p>vae潜在空间 32bit</p> 
+<p><img src="https://images2.imgbox.com/67/f7/bGvdVBem_o.png" alt=""></p> 
+<p>8bit的解码和去噪</p> 
+<p><img src="https://images2.imgbox.com/b9/fe/hUQxAtjf_o.png" alt=""></p> 
+<p>可以非常清晰的看到当前的Stable Diffusion1.4模型在潜在空间中不能很好地保存小的文本，所以这个压缩方案也有这些限制。但是据说从1.5以后似乎在人脸处理方面做得更好，期待stability.ai尽快发布更好的版本。</p> 
+<h2>
+<a id="ml_99"></a>这种方法与基于ml的图像恢复有何不同?</h2> 
+<p>深度学习非常成功地用于恢复降级的图像和视频或将其提高到更高的分辨率。这种方法与恢复图像压缩的图像有何不同？</p> 
+<p>这里重要的区别是是要理解Stable Diffusion不是用来恢复由于压缩而降级的图像。它是将有损的压缩应用于对图像的内部理解，然后试图“修复”有损压缩对内部表示造成的损害(这与修复降级图像不同)。</p> 
+<p>例如，传统的图像恢复保留相机纹理(定性)以及任何其他定性退化，而AI恢复一个高度压缩的jpg将无法恢复相机纹理，因为任何关于它的信息已经从数据中丢失了。</p> 
+<p>一下这个比喻可能会更恰当一点：</p> 
+<p>假设我们有一个拥有过目不忘的高技能艺术家。我们给他们看一张图像，然后让他们重新创造它，艺术家可以根据自己的记忆创造一个近乎完美的副本。这位艺术家的摄影记忆就是是Stable Diffusion中VAE的潜在空间。</p> 
+<p>而传统的图像恢复，我们会给这位艺术家看一张被图像压缩后严重降级的图像，然后让他们根据记忆重建这张图像。</p> 
+<p>然对于我们的量化操作，可以认为是我们向艺术家展示原始的、未压缩的图像并要求他们尽可能地记住它。然后我们对艺术家进行脑部手术，通过对其进行一些有损压缩来缩小他们记忆中的数据（量化或者上面提到的压缩），这种压缩去除了看起来不重要的细微差别，并用相同的变化替换了记忆图像中非常非常相似的概念和方面的变化。</p> 
+<p>手术后，我们还是要求艺术家根据自己的记忆，创造一个完美的图像重建。他们仍然会记住图像的所有重要方面，例如，从内容到相机纹理的定性属性，以及他们看到的每座建筑的位置和大致外观，虽然可能每个点的确切位置不再相同，并且在他们记忆中还有一些奇怪的缺失，但是这些小的缺失对于整理来说影响并不大。</p> 
+<p>最后，艺术家通过这些手术后的记忆（压缩后）来从新绘画，细节变少了也就是被压缩了，但是整体来说还是不变的。</p> 
+<p>所以在这种情况下，艺术家被要求根据他们的记忆和经验画出他们认为应该是什么样子的东西，但由于这里的压缩应用于他们对图像的记忆表示，图像的视觉质量和概念内容都已降低，所以在某些部分可能是因为其他记忆产生的所以艺术家会在图画中发明创造一些新的东西。这也就是我们刚才说到的创造。</p> 
+<h2>
+<a id="_121"></a>总结</h2> 
+<p>作为有损图像压缩方案，Stable Diffusion似乎非常有前途。我们可以通过更多的实验来完整这个方案并且还可以专门设计和训练用于图像压缩的VAE，或者其他更好的方法都是我们在未来研究的方向，如果你感兴趣，请看看下本文的源代码并加以改进。</p> 
+<p><a href="https://avoid.overfit.cn/post/3b8ce036928f431d93061e5a307f8067">https://avoid.overfit.cn/post/3b8ce036928f431d93061e5a307f8067</a></p> 
+<p>作者：Matthias Bühlmann</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

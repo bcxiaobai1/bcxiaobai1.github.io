@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>go net/http 源码解读 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">go net/http 源码解读</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>回顾</h1> 
+<h2>
+<a id="1_HTTP_Server_2"></a>1. HTTP Server</h2> 
+<p>在 go 中启动一个 http server 只需短短几行代码</p> 
+<pre><code class="prism language-Go">func PingHandler(w http.ResponseWriter, r *http.Request) {
+	io.WriteString(w, "pong!")
+}
+
+func main() {
+	http.HandleFunc("/ping", PingHandler)
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+</code></pre> 
+<h2>
+<a id="2_HTTP_Client_19"></a>2. HTTP Client</h2> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	resp<span class="token punctuation">,</span> err <span class="token operator">:=</span> http<span class="token punctuation">.</span><span class="token function">Get</span><span class="token punctuation">(</span><span class="token string">"http://localhost:8080/ping"</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		fmt<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+		<span class="token keyword">return</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">defer</span> resp<span class="token punctuation">.</span>Body<span class="token punctuation">.</span><span class="token function">Close</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	body<span class="token punctuation">,</span> <span class="token boolean">_</span> <span class="token operator">:=</span> io<span class="token punctuation">.</span><span class="token function">ReadAll</span><span class="token punctuation">(</span>resp<span class="token punctuation">.</span>Body<span class="token punctuation">)</span>
+	fmt<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span><span class="token function">string</span><span class="token punctuation">(</span>body<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h1>
+<a id="nethttp__38"></a>net/http 库</h1> 
+<p>本文涉及内容的源码均位于 net/http 库下，各模块的文件位置如下表所示：</p> 
+<table>
+<thead><tr>
+<th>模块</th>
+<th>文件</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>服务端</td>
+<td>net/http/server.go</td>
+</tr>
+<tr>
+<td>客户端——主流程</td>
+<td>net/http/client.go</td>
+</tr>
+<tr>
+<td>客户端——构造请求</td>
+<td>net/http/request.go</td>
+</tr>
+<tr>
+<td>客户端——网络交互</td>
+<td>net/http/transport.go</td>
+</tr>
+</tbody>
+</table> 
+<h1>
+<a id="HTTP_Client_51"></a>HTTP Client</h1> 
+<h2>
+<a id="Client_Struct_55"></a>Client Struct</h2> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> Client <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	Transport RoundTripper
+	CheckRedirect <span class="token keyword">func</span><span class="token punctuation">(</span>req <span class="token operator">*</span>Request<span class="token punctuation">,</span> via <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>Request<span class="token punctuation">)</span> <span class="token builtin">error</span> 
+	Jar CookieJar
+	Timeout time<span class="token punctuation">.</span>Duration
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>Client 结构体总共由四个字段组成：</p> 
+<ul>
+<li>
+<strong>Transport</strong>：负责 http 通信的核心部分；</li>
+<li>
+<strong>CheckRedirect</strong>：用于指定处理重定向的策略；</li>
+<li>
+<strong>Jar</strong>：用于管理和存储请求中的 cookie；</li>
+<li>
+<strong>Timeout</strong>：指定客户端请求的最大超时时间，该超时时间包括连接、任何的重定向以及读取相应的时间；</li>
+</ul> 
+<h2>
+<a id="RoundTripper_75"></a>RoundTripper</h2> 
+<p>RoundTripper 是通信模块的 interface，需要实现方法 Roundtrip，即通过传入请求 Request，与服务端交互后获得响应 Response.</p> 
+<pre><code>type RoundTripper interface {
+    RoundTrip(*Request) (*Response, error)
+}
+</code></pre> 
+<h2>
+<a id="Transport_87"></a>Transport</h2> 
+<p>Transport 实现了 RoundTripper 接口，是 RoundTripper 的实现类, 也是整个请求过程中最重要并且最复杂的结构体，该结构体会在 Transport.roundTrip 中发送 HTTP 请求并等待响应</p> 
+<p>核心字段包括：</p> 
+<ul>
+<li>idleConn：空闲连接 map，实现复用</li>
+<li>DialContext：新连接生成器</li>
+</ul> 
+<pre><code>type Transport struct {
+    idleConn     map[connectMethodKey][]*persistConn // most recently used at end
+    // ...
+    DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+    // ...
+}
+</code></pre> 
+<h2>
+<a id="Request_107"></a>Request</h2> 
+<p>http 请求参数结构体.</p> 
+<pre><code>type Request struct {
+    // 方法
+    Method string
+    // 请求路径
+    URL *url.URL
+    // 请求头
+    Header Header
+    // 请求参数内容
+    Body io.ReadCloser
+    // 服务器主机
+    Host string
+    // query 请求参数
+    Form url.Values
+    // 响应参数 struct
+    Response *Response
+    // 请求链路的上下文
+    ctx context.Context
+    // ...
+}
+</code></pre> 
+<h2>
+<a id="Response_135"></a>Response</h2> 
+<p>http 响应参数结构体.</p> 
+<pre><code>type Response struct {
+    // 请求状态，200 为 请求成功
+    StatusCode int    // e.g. 200
+    // http 协议，如：HTTP/1.0
+    Proto      string // e.g. "HTTP/1.0"
+    // 请求头
+    Header Header
+    // 响应参数内容  
+    Body io.ReadCloser
+    // 指向请求参数
+    Request *Request
+    // ...
+}
+</code></pre> 
+<h2>
+<a id="_http__157"></a>发起 http 请求链路总览</h2> 
+<p>客户端发起一次 http 请求大致分为几个步骤：</p> 
+<ul>
+<li>• 构造 http 请求参数</li>
+<li>• 获取用于与服务端交互的 tcp 连接</li>
+<li>• 通过 tcp 连接发送请求参数</li>
+<li>• 通过 tcp 连接接收响应结果</li>
+</ul> 
+<p>整体方法链路如下图：</p> 
+<p><img src="https://images2.imgbox.com/4a/bf/uZYht7U1_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="NewRequest_176"></a>NewRequest</h2> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>c <span class="token operator">*</span>Client<span class="token punctuation">)</span> <span class="token function">Get</span><span class="token punctuation">(</span>url <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>resp <span class="token operator">*</span>Response<span class="token punctuation">,</span> err <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	req<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">NewRequest</span><span class="token punctuation">(</span><span class="token string">"GET"</span><span class="token punctuation">,</span> url<span class="token punctuation">,</span> <span class="token boolean">nil</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> err
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> c<span class="token punctuation">.</span><span class="token function">Do</span><span class="token punctuation">(</span>req<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>NewRequestWithContext 方法中，根据用户传入的 url、method等信息，构造了 Request 实例.</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">NewRequestWithContext</span><span class="token punctuation">(</span>ctx context<span class="token punctuation">.</span>Context<span class="token punctuation">,</span> method<span class="token punctuation">,</span> url <span class="token builtin">string</span><span class="token punctuation">,</span> body io<span class="token punctuation">.</span>Reader<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token operator">*</span>Request<span class="token punctuation">,</span> <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// ...</span>
+    u<span class="token punctuation">,</span> err <span class="token operator">:=</span> urlpkg<span class="token punctuation">.</span><span class="token function">Parse</span><span class="token punctuation">(</span>url<span class="token punctuation">)</span>
+    <span class="token comment">// ...</span>
+    rc<span class="token punctuation">,</span> ok <span class="token operator">:=</span> body<span class="token punctuation">.</span><span class="token punctuation">(</span>io<span class="token punctuation">.</span>ReadCloser<span class="token punctuation">)</span>
+    <span class="token comment">// ...</span>
+    req <span class="token operator">:=</span> <span class="token operator">&amp;</span>Request<span class="token punctuation">{<!-- --></span>
+        ctx<span class="token punctuation">:</span>        ctx<span class="token punctuation">,</span>
+        Method<span class="token punctuation">:</span>     method<span class="token punctuation">,</span>
+        URL<span class="token punctuation">:</span>        u<span class="token punctuation">,</span>
+        <span class="token comment">// ...</span>
+        Header<span class="token punctuation">:</span>     <span class="token function">make</span><span class="token punctuation">(</span>Header<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        Body<span class="token punctuation">:</span>       rc<span class="token punctuation">,</span>
+        Host<span class="token punctuation">:</span>       u<span class="token punctuation">.</span>Host<span class="token punctuation">,</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// ...</span>
+    <span class="token keyword">return</span> req<span class="token punctuation">,</span> <span class="token boolean">nil</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="ClientDo_215"></a>Client.Do</h2> 
+<p>发送请求方法时，经由 Client.Do、Client.do 辗转，继而步入到 Client.send 方法中.</p> 
+<pre><code>func (c *Client) Do(req *Request) (*Response, error) {
+    return c.do(req)
+}
+</code></pre> 
+<pre><code>func (c *Client) do(req *Request) (retres *Response, reterr error) {
+    var (
+        deadline      = c.deadline()
+        resp          *Response
+        // ...
+    )    
+    for {
+        // ...
+        var err error       
+        if resp, didTimeout, err = c.send(req, deadline); err != nil {
+            // ...
+        }
+        // ...
+    }
+}
+</code></pre> 
+<p>在 Client.send 方法中，会在通过 send 方法发送请求之前和之后，分别对 cookie 进行更新.</p> 
+<pre><code>func (c *Client) send(req *Request, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
+    // 设置 cookie 到请求头中
+    if c.Jar != nil {
+        for _, cookie := range c.Jar.Cookies(req.URL) {
+            req.AddCookie(cookie)
+        }
+    }
+    // 发送请求
+    resp, didTimeout, err = send(req, c.transport(), deadline)
+    if err != nil {
+        return nil, didTimeout, err
+    }
+    // 更新 resp 的 cookie 到请求头中
+    if c.Jar != nil {
+        if rc := resp.Cookies(); len(rc) &gt; 0 {
+            c.Jar.SetCookies(req.URL, rc)
+        }
+    }
+    return resp, nil, nil
+}
+</code></pre> 
+<p>在调用 send 方法时，需要注入 RoundTripper 模块，默认会使用全局单例 DefaultTransport 进行注入，核心逻辑位于 Transport.RoundTrip 方法中，其中分为两个步骤：</p> 
+<ul>
+<li>获取/构造 tcp 连接</li>
+<li>通过 tcp 连接完成与服务端的交互</li>
+</ul> 
+<pre><code>var DefaultTransport RoundTripper = &amp;Transport{
+    // ...
+    DialContext: defaultTransportDialContext(&amp;net.Dialer{
+        Timeout:   30 * time.Second,
+        KeepAlive: 30 * time.Second,
+    }),
+    // ...
+}
+
+
+func (c *Client) transport() RoundTripper {
+    if c.Transport != nil {
+        return c.Transport
+    }
+    return DefaultTransport
+}
+</code></pre> 
+<pre><code>func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, didTimeout func() bool, err error) {
+    // ...
+    resp, err = rt.RoundTrip(req)
+    // ...
+    return resp, nil, nil
+}
+</code></pre> 
+<pre><code>func (t *Transport) RoundTrip(req *Request) (*Response, error) {
+    return t.roundTrip(req)
+}
+</code></pre> 
+<pre><code>func (t *Transport) roundTrip(req *Request) (*Response, error) {
+	ctx := req.Context()
+	scheme := req.URL.Scheme
+
+	if altRT := t.alternateRoundTripper(req); altRT != nil {
+		if resp, err := altRT.RoundTrip(req); err != ErrSkipAltProtocol {
+			return resp, err
+		}
+	}
+
+    // ...
+    for {          
+        // ...    
+        treq := &amp;transportRequest{Request: req, trace: trace, cancelKey: cancelKey}      
+        // ...
+        pconn, err := t.getConn(treq, cm)        
+        // ...
+        resp, err = pconn.roundTrip(treq)          
+        // ...
+    }
+}
+</code></pre> 
+<p>可以将该函数的执行过程分成两个部分：</p> 
+<ol>
+<li>根据 URL 的协议查找并执行自定义的 net/http.RoundTripper 实现；</li>
+<li>从连接池中获取或者初始化新的持久连接并调用连接的 net/http.persistConn.roundTrip 发出请求；</li>
+</ol> 
+<p>可以在标准库的 net/http.Transport 中调用 net/http.Transport.RegisterProtocol 为不同的协议注册 net/http.RoundTripper 的实现，在下面的这段代码中就会根据 URL 中的协议选择对应的实现来替代默认的逻辑：</p> 
+<h2>
+<a id="TransportgetConn_352"></a>Transport.getConn</h2> 
+<p>获取 tcp 连接的策略分为两步：</p> 
+<ul>
+<li>通过 queueForIdleConn 方法，尝试复用采用相同协议、访问相同服务端的空闲连接</li>
+<li>倘若无可用连接，则通过 queueForDial 方法，异步创建一个新的连接，并通过接收 ready channel 信号的方式，确认构造连接的工作已经完成.</li>
+</ul> 
+<pre><code>func (t *Transport) getConn(treq *transportRequest, cm connectMethod) (pc *persistConn, err error) {
+    // 获取连接的请求参数体
+    w := &amp;wantConn{
+        cm:         cm,
+        // key 由 http 协议、服务端地址等信息组成
+        key:        cm.key(),
+        ctx:        ctx,
+        // 标识连接构造成功的信号发射器
+        ready:      make(chan struct{}, 1),
+    }
+    // 倘若连接获取失败，在 wantConn.cancel 方法中，会尝试将 tcp 连接放回队列中以供后续复用
+    defer func() {
+        if err != nil {
+            w.cancel(t, err)
+        }
+    }()
+    // 尝试复用指向相同服务端地址的空闲连接
+    if delivered := t.queueForIdleConn(w); delivered {
+        pc := w.pc
+        // ...
+        return pc, nil
+    }
+    // 异步构造新的连接
+    t.queueForDial(w)
+    select {
+    // 通过阻塞等待信号的方式，等待连接获取完成
+    case &lt;-w.ready:
+        // ...
+        return w.pc, w.err
+    // ...
+    }
+}
+</code></pre> 
+<p>（1）复用连接</p> 
+<ul>
+<li>尝试从 Transport.idleConn 中获取指向同一服务端的空闲连接 persisConn</li>
+<li>获取到连接后会调用 wantConn.tryDeliver 方法将连接绑定到 wantConn 请求参数上</li>
+<li>绑定成功后，会关闭 wantConn.ready channel，以唤醒阻塞读取该 channel 的 goroutine</li>
+</ul> 
+<pre><code>func (t *Transport) queueForIdleConn(w *wantConn) (delivered bool) {
+    // ...
+    if list, ok := t.idleConn[w.key]; ok {
+        // ...
+        for len(list) &gt; 0 &amp;&amp; !stop {
+            pconn := list[len(list)-1]
+            // ...
+            delivered = w.tryDeliver(pconn, nil)
+            if delivered {
+                // ...
+                list = list[:len(list)-1]               
+            }
+            stop = true
+        }
+        // ...
+        if stop {
+            return delivered
+        }
+    }
+   
+    // ...    
+    return false
+}
+</code></pre> 
+<pre><code>func (w *wantConn) tryDeliver(pc *persistConn, err error) bool {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+    // ...
+    w.pc = pc
+    w.err = err
+    // ...
+    close(w.ready)
+    return true
+}
+</code></pre> 
+<p>（2）创建连接</p> 
+<p>在 queueForDial 方法会异步调用 Transport.dialConnFor 方法，创建新的 tcp 连接. 由于是异步操作，所以在上游会通过读 channel 的方式，等待创建操作完成.</p> 
+<p>这里之所以采用异步操作进行连接创建，有两部分原因：</p> 
+<ul>
+<li>一个 tcp 连接并不是一个静态的数据结构，它是有生命周期的，创建过程中会为其创建负责读写的两个守护协程，伴随而生</li>
+<li>在上游 Transport.queueForIdleConn 方法中，当通过 select 多路复用的方式，接收到其他终止信号时，可以提前调用 wantConn.cancel 方法打断创建连接的 goroutine. 相比于串行化执行而言，这种异步交互的模式，具有更高的灵活度</li>
+</ul> 
+<pre><code>func (t *Transport) queueForDial(w *wantConn) {
+    // ...
+    go t.dialConnFor(w) 
+    // ...
+}
+</code></pre> 
+<p>Transport.dialConnFor 方法中，首先调用 Transport.dialConn 创建 tcp 连接 persisConn，接着执行 wantConn.tryDeliver 方法，将连接绑定到 wantConn 上，然后通过关闭 ready channel 操作唤醒上游读 ready channel 的 goroutine.</p> 
+<pre><code>func (t *Transport) dialConnFor(w *wantConn) {
+    // ...
+    pc, err := t.dialConn(w.ctx, w.cm)
+    delivered := w.tryDeliver(pc, err)
+    // ...
+}
+</code></pre> 
+<p>Transport.dialConn 方法包含了创建连接的核心逻辑：</p> 
+<ul>
+<li>调用 Transport.dial 方法，最终通过 Tranport.DialContext 成员函数，创建好 tcp 连接，封装到 persistConn 当中</li>
+<li>异步启动连接的伴生读写协程 readLoop 和 writeLoop 方法，组成提交请求、接收响应的循环</li>
+</ul> 
+<pre><code>func (t *Transport) dialConn(ctx context.Context, cm connectMethod) (pconn *persistConn, err error) {
+    pconn = &amp;persistConn{
+        t:             t,
+        reqch:         make(chan requestAndChan, 1),
+        writech:       make(chan writeRequest, 1),
+        // ...
+    }
+    
+    conn, err := t.dial(ctx, "tcp", cm.addr())
+    // ...
+    pconn.conn = conn      
+    // ...
+   
+    go pconn.readLoop()
+    go pconn.writeLoop()
+    return pconn, nil
+}
+</code></pre> 
+<pre><code>func (t *Transport) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+    // ...
+    return t.DialContext(ctx, network, addr)
+    // ...
+}
+</code></pre> 
+<p>在读协程 persisConn.readLoop 方法中，会读取来自服务端的响应，并添加到 persistConn.reqCh 中，供上游 persistConn.roundTrip 方法接收.</p> 
+<pre><code>func (pc *persistConn) readLoop() { 
+    // ...
+    alive := true
+    for alive {
+        // ...
+        rc := &lt;-pc.reqch
+        // ...
+        var resp *Response
+        // ...
+        resp, err = pc.readResponse(rc, trace)
+        // ...
+        select{
+            rc.ch &lt;- responseAndError{res: resp}:
+            // ...
+        }
+        // ...        
+    }
+}
+</code></pre> 
+<p>在伴生协程<code>persistConn.wireLoop()</code>方法中，会通过 persistConn.writech 读取到客户端提交的请求，然后将其发送到服务端.</p> 
+<pre><code>func (pc *persistConn) writeLoop() {    
+    for {
+        select {
+        case wr := &lt;-pc.writech:
+            // ...
+            err := wr.req.Request.write(pc.bw, pc.isProxy, wr.req.extra, pc.waitForContinue(wr.continueCh))
+            // ...       
+    }
+}
+</code></pre> 
+<h2>
+<a id="_557"></a>归还连接</h2> 
+<p>有复用连接的能力，就必然存在归还连接的机制.</p> 
+<p>首先，在构造新连接中途，倘若被打断，则可能会将连接放回队列以供复用：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>t <span class="token operator">*</span>Transport<span class="token punctuation">)</span> <span class="token function">getConn</span><span class="token punctuation">(</span>treq <span class="token operator">*</span>transportRequest<span class="token punctuation">,</span> cm connectMethod<span class="token punctuation">)</span> <span class="token punctuation">(</span>pc <span class="token operator">*</span>persistConn<span class="token punctuation">,</span> err <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// ...</span>
+    <span class="token comment">// 倘若连接获取失败，在 wantConn.cancel 方法中，会尝试将 tcp 连接放回队列中以供后续复用</span>
+    <span class="token keyword">defer</span> <span class="token keyword">func</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+            w<span class="token punctuation">.</span><span class="token function">cancel</span><span class="token punctuation">(</span>t<span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token comment">// ...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>w <span class="token operator">*</span>wantConn<span class="token punctuation">)</span> <span class="token function">cancel</span><span class="token punctuation">(</span>t <span class="token operator">*</span>Transport<span class="token punctuation">,</span> err <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+   <span class="token comment">// ...</span>
+    <span class="token keyword">if</span> pc <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+        t<span class="token punctuation">.</span><span class="token function">putOrCloseIdleConn</span><span class="token punctuation">(</span>pc<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>t <span class="token operator">*</span>Transport<span class="token punctuation">)</span> <span class="token function">putOrCloseIdleConn</span><span class="token punctuation">(</span>pconn <span class="token operator">*</span>persistConn<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> err <span class="token operator">:=</span> t<span class="token punctuation">.</span><span class="token function">tryPutIdleConn</span><span class="token punctuation">(</span>pconn<span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+        pconn<span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>t <span class="token operator">*</span>Transport<span class="token punctuation">)</span> <span class="token function">tryPutIdleConn</span><span class="token punctuation">(</span>pconn <span class="token operator">*</span>persistConn<span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// ...</span>
+    key <span class="token operator">:=</span> pconn<span class="token punctuation">.</span>cacheKey
+    <span class="token comment">// ...</span>
+    t<span class="token punctuation">.</span>idleConn<span class="token punctuation">[</span>key<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span>idles<span class="token punctuation">,</span> pconn<span class="token punctuation">)</span>
+    <span class="token comment">// ...</span>
+    <span class="token keyword">return</span> <span class="token boolean">nil</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其次，倘若与服务端的一轮交互流程结束，也会将连接放回队列以供复用.</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>pc <span class="token operator">*</span>persistConn<span class="token punctuation">)</span> <span class="token function">readLoop</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    tryPutIdleConn <span class="token operator">:=</span> <span class="token keyword">func</span><span class="token punctuation">(</span>trace <span class="token operator">*</span>httptrace<span class="token punctuation">.</span>ClientTrace<span class="token punctuation">)</span> <span class="token builtin">bool</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> err <span class="token operator">:=</span> pc<span class="token punctuation">.</span>t<span class="token punctuation">.</span><span class="token function">tryPutIdleConn</span><span class="token punctuation">(</span>pc<span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// ...</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">// ...</span>
+    <span class="token punctuation">}</span>
+    
+    <span class="token comment">// ...</span>
+    alive <span class="token operator">:=</span> <span class="token boolean">true</span>
+    <span class="token keyword">for</span> alive <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// ...</span>
+        <span class="token keyword">select</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> bodyEOF <span class="token operator">:=</span> <span class="token operator">&lt;-</span>waitForBodyRead<span class="token punctuation">:</span>
+            <span class="token comment">// ...</span>
+            <span class="token function">tryPutIdleConn</span><span class="token punctuation">(</span>trace<span class="token punctuation">)</span>
+            <span class="token comment">// ...</span>
+        <span class="token punctuation">}</span>           
+    <span class="token punctuation">}</span>
+    
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="persistConnroundTrip_642"></a>persistConn.roundTrip</h2> 
+<p><img src="https://images2.imgbox.com/2f/f7/fHN29Hg0_o.png" alt="在这里插入图片描述"></p> 
+<p>一个连接 persistConn 是一个具有生命特征的角色. 它本身伴有 readLoop 和 writeLoop 两个守护协程，与上游应用者之间通过 channel 进行读写交互.</p> 
+<p>而其中扮演应用者这一角色的，正式本小节谈到的主流程中的方法：persistConn.roundTrip：</p> 
+<ul>
+<li>首先将 http 请求通过 persistConn.writech 发送给连接的守护协程 writeLoop，并进一步传送到服务端</li>
+<li>其次通过读取 resc channel，接收由守护协程 readLoop 代理转发的客户端响应数据.</li>
+</ul> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>pc <span class="token operator">*</span>persistConn<span class="token punctuation">)</span> <span class="token function">roundTrip</span><span class="token punctuation">(</span>req <span class="token operator">*</span>transportRequest<span class="token punctuation">)</span> <span class="token punctuation">(</span>resp <span class="token operator">*</span>Response<span class="token punctuation">,</span> err <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// ...</span>
+    pc<span class="token punctuation">.</span>writech <span class="token operator">&lt;-</span> writeRequest<span class="token punctuation">{<!-- --></span>req<span class="token punctuation">,</span> writeErrCh<span class="token punctuation">,</span> continueCh<span class="token punctuation">}</span>
+    resc <span class="token operator">:=</span> <span class="token function">make</span><span class="token punctuation">(</span><span class="token keyword">chan</span> responseAndError<span class="token punctuation">)</span>
+    pc<span class="token punctuation">.</span>reqch <span class="token operator">&lt;-</span> requestAndChan<span class="token punctuation">{<!-- --></span>
+        req<span class="token punctuation">:</span>        req<span class="token punctuation">.</span>Request<span class="token punctuation">,</span>
+        cancelKey<span class="token punctuation">:</span>  req<span class="token punctuation">.</span>cancelKey<span class="token punctuation">,</span>
+        ch<span class="token punctuation">:</span>         resc<span class="token punctuation">,</span>
+        <span class="token comment">// ...</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">// ...</span>
+    <span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>       
+        <span class="token keyword">select</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// ...</span>
+        <span class="token keyword">case</span> re <span class="token operator">:=</span> <span class="token operator">&lt;-</span>resc<span class="token punctuation">:</span>
+            <span class="token comment">// ...</span>
+            <span class="token keyword">return</span> re<span class="token punctuation">.</span>res<span class="token punctuation">,</span> <span class="token boolean">nil</span>
+        <span class="token comment">// ...</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_680"></a>调用关键流程</h2> 
+<ul>
+<li>step1 - http.NewRequest(method, url string, body io.Reader) 创建请求</li>
+<li>step2 - http.Client.Do(req *Request) 发送请求&amp;接收应答</li>
+</ul> 
+<pre><code>整个http.Client.Do逻辑分为两道，第一道执行send发送请求接收Response，关闭Req.Body；第二层对请求执行重定向等操作(若需要redirect)，并关闭Resp.Body
+
+http.Client.Do(req) =&gt; send(ireq *Request, rt RoundTripper, deadline time.Time)
+  -&gt; setRequestCancel(req, rt, deadline) 设置请求超时时间
+  -&gt; http.Client.RoundTrip(req) 
+
+=&gt; http.Client.RoundTrip(req) 
+  -&gt; http.Transport.t.getConn(treq, cm) 获取连接(新创建的 or 复用空闲连接) 
+    -&gt; http.Transport.queueForIdleConn(w *wantConn) 获取空闲连接
+    -&gt; http.Transport.dialConnFor(w *wantConn) -&gt; http.Transport.dialConn(ctx context.Context, cm connectMethod) 创建新连接
+      -&gt; http.Transport.dial(ctx context.Context, network, addr string) -&gt; http.Transport.DialContext(net.Dialer.DialContext)
+      -&gt; http.persistConn.readLoop() read http.Response(读取响应内容，并构建http.Response)
+      -&gt; http.persistConn.writeLoop() write http.Request(发送请求) 
+  -&gt; http.persistConn.roundTrip(treq) 发送请求，读取Response并返回
+</code></pre> 
+<ul><li>step3 - http.Response.Body.Close() 关闭应答Body</li></ul> 
+<h1>
+<a id="HTTP_Server_710"></a>HTTP Server</h1> 
+<p><img src="https://images2.imgbox.com/9d/78/sNz8dx3H_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="_http__716"></a>启动 http 服务</h2> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">PingHandler</span><span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	io<span class="token punctuation">.</span><span class="token function">WriteString</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> <span class="token string">"pong!"</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	http<span class="token punctuation">.</span><span class="token function">HandleFunc</span><span class="token punctuation">(</span><span class="token string">"/ping"</span><span class="token punctuation">,</span> PingHandler<span class="token punctuation">)</span>
+	log<span class="token punctuation">.</span><span class="token function">Fatal</span><span class="token punctuation">(</span>http<span class="token punctuation">.</span><span class="token function">ListenAndServe</span><span class="token punctuation">(</span><span class="token string">":8080"</span><span class="token punctuation">,</span> <span class="token boolean">nil</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ol>
+<li>调用 http.HandleFunc 注册 handler 函数</li>
+<li>调用 http.ListenAndServe 启动 http 服务</li>
+</ol> 
+<h2>
+<a id="_734"></a>路由注册</h2> 
+<p>首先，我们调用<code>http.HandleFunc("/ping", PingHandler)</code>注册路径处理函数，这里将路径<code>/ping</code>的处理函数设置为<code>PingHandler</code>。处理函数的类型必须是：</p> 
+<p><code>func (http.ResponseWriter, *http.Request) </code></p> 
+<p>其中<code>*http.Request</code>表示 HTTP 请求对象，该对象包含请求的所有信息，如 URL、首部、表单内容、请求的其他内容等。</p> 
+<p><code>http.ResponseWriter</code>是一个接口类型：</p> 
+<pre><code class="prism language-go"><span class="token comment">// net/http/server.go</span>
+<span class="token keyword">type</span> ResponseWriter <span class="token keyword">interface</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token function">Header</span><span class="token punctuation">(</span><span class="token punctuation">)</span> Header
+  <span class="token function">Write</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">byte</span><span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token builtin">int</span><span class="token punctuation">,</span> <span class="token builtin">error</span><span class="token punctuation">)</span>
+  <span class="token function">WriteHeader</span><span class="token punctuation">(</span>statusCode <span class="token builtin">int</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>用于向客户端发送响应，实现了<code>ResponseWriter</code>接口的类型显然也实现了<code>io.Writer</code>接口。所以在处理函数<code>index</code>中，可以调用<code>fmt.Fprintln()</code> 和 <code>io.WriteString()</code>向<code>ResponseWriter</code>写入响应信息。</p> 
+<p>仔细阅读<code>net/http</code>包中<code>HandleFunc()</code>函数的源码：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">HandleFunc</span><span class="token punctuation">(</span>pattern <span class="token builtin">string</span><span class="token punctuation">,</span> handler <span class="token keyword">func</span><span class="token punctuation">(</span>ResponseWriter<span class="token punctuation">,</span> <span class="token operator">*</span>Request<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  DefaultServeMux<span class="token punctuation">.</span><span class="token function">HandleFunc</span><span class="token punctuation">(</span>pattern<span class="token punctuation">,</span> handler<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>我们发现它直接调用了一个名为<code>DefaultServeMux</code>对象的<code>HandleFunc()</code>方法。<code>DefaultServeMux</code>是<code>ServeMux</code>类型的实例：</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> ServeMux <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+  mu    sync<span class="token punctuation">.</span>RWMutex
+  m     <span class="token keyword">map</span><span class="token punctuation">[</span><span class="token builtin">string</span><span class="token punctuation">]</span>muxEntry
+  es    <span class="token punctuation">[</span><span class="token punctuation">]</span>muxEntry <span class="token comment">// slice of entries sorted from longest to shortest.</span>
+  hosts <span class="token builtin">bool</span>       <span class="token comment">// whether any patterns contain hostnames</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">var</span> DefaultServeMux <span class="token operator">=</span> <span class="token operator">&amp;</span>defaultServeMux
+<span class="token keyword">var</span> defaultServeMux ServeMux
+</code></pre> 
+<p><strong>像这种提供默认类型实例的用法在 Go 语言的各个库中非常常见，在默认参数就已经足够的场景中使用默认实现很方便</strong>。<code>ServeMux</code>保存了注册的所有路径和处理函数的对应关系。<code>ServeMux.HandleFunc()</code>方法如下：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>mux <span class="token operator">*</span>ServeMux<span class="token punctuation">)</span> <span class="token function">HandleFunc</span><span class="token punctuation">(</span>pattern <span class="token builtin">string</span><span class="token punctuation">,</span> handler <span class="token keyword">func</span><span class="token punctuation">(</span>ResponseWriter<span class="token punctuation">,</span> <span class="token operator">*</span>Request<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  mux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span>pattern<span class="token punctuation">,</span> <span class="token function">HandlerFunc</span><span class="token punctuation">(</span>handler<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里将处理函数<code>handler</code>转为<code>HandlerFunc</code>类型，然后调用<code>ServeMux.Handle()</code>方法注册。注意这里的<code>HandlerFunc(handler)</code>是类型转换，而非函数调用，类型<code>HandlerFunc</code>的定义如下：</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> HandlerFunc <span class="token keyword">func</span><span class="token punctuation">(</span>ResponseWriter<span class="token punctuation">,</span> <span class="token operator">*</span>Request<span class="token punctuation">)</span>
+
+<span class="token keyword">func</span> <span class="token punctuation">(</span>f HandlerFunc<span class="token punctuation">)</span> <span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token function">f</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> r<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>HandlerFunc</code>实际上是以函数类型<code>func(ResponseWriter, *Request)</code>为底层类型，为<code>HandlerFunc</code>类型定义了方法<code>ServeHTTP</code>。是的，Go 语言允许为（基于）函数的类型定义方法。<code>Serve.Handle()</code>方法只接受类型为接口<code>Handler</code>的参数：</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> Handler <span class="token keyword">interface</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token function">ServeHTTP</span><span class="token punctuation">(</span>ResponseWriter<span class="token punctuation">,</span> <span class="token operator">*</span>Request<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token punctuation">(</span>mux <span class="token operator">*</span>ServeMux<span class="token punctuation">)</span> <span class="token function">Handle</span><span class="token punctuation">(</span>pattern <span class="token builtin">string</span><span class="token punctuation">,</span> handler Handler<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    
+  <span class="token keyword">if</span> mux<span class="token punctuation">.</span>m <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+    mux<span class="token punctuation">.</span>m <span class="token operator">=</span> <span class="token function">make</span><span class="token punctuation">(</span><span class="token keyword">map</span><span class="token punctuation">[</span><span class="token builtin">string</span><span class="token punctuation">]</span>muxEntry<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+  e <span class="token operator">:=</span> muxEntry<span class="token punctuation">{<!-- --></span>h<span class="token punctuation">:</span> handler<span class="token punctuation">,</span> pattern<span class="token punctuation">:</span> pattern<span class="token punctuation">}</span>
+  <span class="token keyword">if</span> pattern<span class="token punctuation">[</span><span class="token function">len</span><span class="token punctuation">(</span>pattern<span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token char">'/'</span> <span class="token punctuation">{<!-- --></span>
+    mux<span class="token punctuation">.</span>es <span class="token operator">=</span> <span class="token function">appendSorted</span><span class="token punctuation">(</span>mux<span class="token punctuation">.</span>es<span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+  mux<span class="token punctuation">.</span>m<span class="token punctuation">[</span>pattern<span class="token punctuation">]</span> <span class="token operator">=</span> e
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>显然<code>HandlerFunc</code>实现了接口<code>Handler</code>。<code>HandlerFunc</code>类型只是为了方便注册函数类型的处理器。我们当然可以直接定义一个实现<code>Handler</code>接口的类型，然后注册该类型的实例：</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> greeting <span class="token builtin">string</span>
+
+<span class="token keyword">func</span> <span class="token punctuation">(</span>g greeting<span class="token punctuation">)</span> <span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  fmt<span class="token punctuation">.</span><span class="token function">Fprintln</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> g<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+
+http<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span><span class="token string">"/greeting"</span><span class="token punctuation">,</span> <span class="token function">greeting</span><span class="token punctuation">(</span><span class="token string">"Welcome, pepsi"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>我们基于<code>string</code>类型定义了一个新类型<code>greeting</code>，然后为它定义一个方法<code>ServeHTTP()</code>（实现接口<code>Handler</code>），最后调用<code>http.Handle()</code>方法注册该处理器。</p> 
+<p>注册了处理逻辑后，调用<code>http.ListenAndServe(":8080", nil)</code>监听本地计算机的 8080 端口，开始处理请求。下面看源码的处理：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">ListenAndServe</span><span class="token punctuation">(</span>addr <span class="token builtin">string</span><span class="token punctuation">,</span> handler Handler<span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+  server <span class="token operator">:=</span> <span class="token operator">&amp;</span>Server<span class="token punctuation">{<!-- --></span>Addr<span class="token punctuation">:</span> addr<span class="token punctuation">,</span> Handler<span class="token punctuation">:</span> handler<span class="token punctuation">}</span>
+  <span class="token keyword">return</span> server<span class="token punctuation">.</span><span class="token function">ListenAndServe</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>ListenAndServe</code>创建了一个<code>Server</code>类型的对象：</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> Server <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+  Addr <span class="token builtin">string</span>
+  Handler Handler
+  TLSConfig <span class="token operator">*</span>tls<span class="token punctuation">.</span>Config
+  ReadTimeout time<span class="token punctuation">.</span>Duration
+  ReadHeaderTimeout time<span class="token punctuation">.</span>Duration
+  WriteTimeout time<span class="token punctuation">.</span>Duration
+  IdleTimeout time<span class="token punctuation">.</span>Duration
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>Server</code>结构体有比较多的字段，我们可以使用这些字段来调节 Web 服务器的参数，如上面的<code>ReadTimeout/ReadHeaderTimeout/WriteTimeout/IdleTimeout</code>用于控制读写和空闲超时。在该方法中，先调用<code>net.Listen()</code>监听端口，将返回的<code>net.Listener</code>作为参数调用<code>Server.Serve()</code>方法：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>srv <span class="token operator">*</span>Server<span class="token punctuation">)</span> <span class="token function">ListenAndServe</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+  addr <span class="token operator">:=</span> srv<span class="token punctuation">.</span>Addr
+  ln<span class="token punctuation">,</span> err <span class="token operator">:=</span> net<span class="token punctuation">.</span><span class="token function">Listen</span><span class="token punctuation">(</span><span class="token string">"tcp"</span><span class="token punctuation">,</span> addr<span class="token punctuation">)</span>
+  <span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> err
+  <span class="token punctuation">}</span>
+  <span class="token keyword">return</span> srv<span class="token punctuation">.</span><span class="token function">Serve</span><span class="token punctuation">(</span>ln<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在<code>Server.Serve()</code>方法中，使用一个无限的<code>for</code>循环，不停地调用<code>Listener.Accept()</code>方法接受新连接，开启新 goroutine 处理新连接：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>srv <span class="token operator">*</span>Server<span class="token punctuation">)</span> <span class="token function">Serve</span><span class="token punctuation">(</span>l net<span class="token punctuation">.</span>Listener<span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">var</span> tempDelay time<span class="token punctuation">.</span>Duration <span class="token comment">// how long to sleep on accept failure</span>
+  <span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>
+    rw<span class="token punctuation">,</span> err <span class="token operator">:=</span> l<span class="token punctuation">.</span><span class="token function">Accept</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">if</span> ne<span class="token punctuation">,</span> ok <span class="token operator">:=</span> err<span class="token punctuation">.</span><span class="token punctuation">(</span>net<span class="token punctuation">.</span>Error<span class="token punctuation">)</span><span class="token punctuation">;</span> ok <span class="token operator">&amp;&amp;</span> ne<span class="token punctuation">.</span><span class="token function">Temporary</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> tempDelay <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+          tempDelay <span class="token operator">=</span> <span class="token number">5</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Millisecond
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+          tempDelay <span class="token operator">*=</span> <span class="token number">2</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">if</span> max <span class="token operator">:=</span> <span class="token number">1</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Second<span class="token punctuation">;</span> tempDelay <span class="token operator">&gt;</span> max <span class="token punctuation">{<!-- --></span>
+          tempDelay <span class="token operator">=</span> max
+        <span class="token punctuation">}</span>
+        srv<span class="token punctuation">.</span><span class="token function">logf</span><span class="token punctuation">(</span><span class="token string">"http: Accept error: %v; retrying in %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">,</span> tempDelay<span class="token punctuation">)</span>
+        time<span class="token punctuation">.</span><span class="token function">Sleep</span><span class="token punctuation">(</span>tempDelay<span class="token punctuation">)</span>
+        <span class="token keyword">continue</span>
+      <span class="token punctuation">}</span>
+      <span class="token keyword">return</span> err
+    <span class="token punctuation">}</span>
+    tempDelay <span class="token operator">=</span> <span class="token number">0</span>
+    c <span class="token operator">:=</span> srv<span class="token punctuation">.</span><span class="token function">newConn</span><span class="token punctuation">(</span>rw<span class="token punctuation">)</span>
+    <span class="token keyword">go</span> c<span class="token punctuation">.</span><span class="token function">serve</span><span class="token punctuation">(</span>connCtx<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这里有一个<strong>指数退避策略</strong>的用法。如果<code>l.Accept()</code>调用返回错误，我们判断该错误是不是临时性地（<code>ne.Temporary()</code>）。如果是临时性错误，<code>Sleep</code>一小段时间后重试，每发生一次临时性错误，<code>Sleep</code>的时间翻倍，最多<code>Sleep</code> 1s。获得新连接后，将其封装成一个<code>conn</code>对象（<code>srv.newConn(rw)</code>），创建一个 goroutine 运行其<code>serve()</code>方法。省略无关逻辑的代码如下：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>c <span class="token operator">*</span>conn<span class="token punctuation">)</span> <span class="token function">serve</span><span class="token punctuation">(</span>ctx context<span class="token punctuation">.</span>Context<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>
+    w<span class="token punctuation">,</span> err <span class="token operator">:=</span> c<span class="token punctuation">.</span><span class="token function">readRequest</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span>
+    serverHandler<span class="token punctuation">{<!-- --></span>c<span class="token punctuation">.</span>server<span class="token punctuation">}</span><span class="token punctuation">.</span><span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> w<span class="token punctuation">.</span>req<span class="token punctuation">)</span>
+    w<span class="token punctuation">.</span><span class="token function">finishRequest</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>serve()</code>方法其实就是不停地读取客户端发送地请求，创建<code>serverHandler</code>对象调用其<code>ServeHTTP()</code>方法去处理请求，然后做一些清理工作。<code>serverHandler</code>只是一个中间的辅助结构，代码如下：</p> 
+<pre><code class="prism language-golang">type serverHandler struct {
+  srv *Server
+}
+
+func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+  handler := sh.srv.Handler
+  if handler == nil {
+    handler = DefaultServeMux
+  }
+  handler.ServeHTTP(rw, req)
+}
+</code></pre> 
+<p>从<code>Server</code>对象中获取<code>Handler</code>，这个<code>Handler</code>就是调用<code>http.ListenAndServe()</code>时传入的第二个参数。在<code>Hello World</code>的示例代码中，我们传入了<code>nil</code>。所以这里<code>handler</code>会取默认值<code>DefaultServeMux</code>。调用<code>DefaultServeMux.ServeHTTP()</code>方法处理请求：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>mux <span class="token operator">*</span>ServeMux<span class="token punctuation">)</span> <span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  h<span class="token punctuation">,</span> <span class="token boolean">_</span> <span class="token operator">:=</span> mux<span class="token punctuation">.</span><span class="token function">Handler</span><span class="token punctuation">(</span>r<span class="token punctuation">)</span>
+  h<span class="token punctuation">.</span><span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> r<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>mux.Handler(r)</code>通过请求的路径信息查找处理器，然后调用处理器的<code>ServeHTTP()</code>方法处理请求：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>mux <span class="token operator">*</span>ServeMux<span class="token punctuation">)</span> <span class="token function">Handler</span><span class="token punctuation">(</span>r <span class="token operator">*</span>Request<span class="token punctuation">)</span> <span class="token punctuation">(</span>h Handler<span class="token punctuation">,</span> pattern <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  host <span class="token operator">:=</span> <span class="token function">stripHostPort</span><span class="token punctuation">(</span>r<span class="token punctuation">.</span>Host<span class="token punctuation">)</span>
+  <span class="token keyword">return</span> mux<span class="token punctuation">.</span><span class="token function">handler</span><span class="token punctuation">(</span>host<span class="token punctuation">,</span> r<span class="token punctuation">.</span>URL<span class="token punctuation">.</span>Path<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token punctuation">(</span>mux <span class="token operator">*</span>ServeMux<span class="token punctuation">)</span> <span class="token function">handler</span><span class="token punctuation">(</span>host<span class="token punctuation">,</span> path <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>h Handler<span class="token punctuation">,</span> pattern <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  h<span class="token punctuation">,</span> pattern <span class="token operator">=</span> mux<span class="token punctuation">.</span><span class="token function">match</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span>
+  <span class="token keyword">return</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token punctuation">(</span>mux <span class="token operator">*</span>ServeMux<span class="token punctuation">)</span> <span class="token function">match</span><span class="token punctuation">(</span>path <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>h Handler<span class="token punctuation">,</span> pattern <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  v<span class="token punctuation">,</span> ok <span class="token operator">:=</span> mux<span class="token punctuation">.</span>m<span class="token punctuation">[</span>path<span class="token punctuation">]</span>
+  <span class="token keyword">if</span> ok <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> v<span class="token punctuation">.</span>h<span class="token punctuation">,</span> v<span class="token punctuation">.</span>pattern
+  <span class="token punctuation">}</span>
+
+  <span class="token keyword">for</span> <span class="token boolean">_</span><span class="token punctuation">,</span> e <span class="token operator">:=</span> <span class="token keyword">range</span> mux<span class="token punctuation">.</span>es <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> strings<span class="token punctuation">.</span><span class="token function">HasPrefix</span><span class="token punctuation">(</span>path<span class="token punctuation">,</span> e<span class="token punctuation">.</span>pattern<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">return</span> e<span class="token punctuation">.</span>h<span class="token punctuation">,</span> e<span class="token punctuation">.</span>pattern
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+  <span class="token keyword">return</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> <span class="token string">""</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>上面的代码省略了大量的无关代码，在<code>match</code>方法中，首先会检查路径是否精确匹配<code>mux.m[path]</code>。如果不能精确匹配，后面的<code>for</code>循环会匹配路径的最长前缀。<strong>只要注册了<code>/</code>根路径处理，所有未匹配到的路径最终都会交给<code>/</code>路径处理</strong>。为了保证最长前缀优先，在注册时，会对路径进行排序。所以<code>mux.es</code>中存放的是按路径排序的处理列表：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">appendSorted</span><span class="token punctuation">(</span>es <span class="token punctuation">[</span><span class="token punctuation">]</span>muxEntry<span class="token punctuation">,</span> e muxEntry<span class="token punctuation">)</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>muxEntry <span class="token punctuation">{<!-- --></span>
+  n <span class="token operator">:=</span> <span class="token function">len</span><span class="token punctuation">(</span>es<span class="token punctuation">)</span>
+  i <span class="token operator">:=</span> sort<span class="token punctuation">.</span><span class="token function">Search</span><span class="token punctuation">(</span>n<span class="token punctuation">,</span> <span class="token keyword">func</span><span class="token punctuation">(</span>i <span class="token builtin">int</span><span class="token punctuation">)</span> <span class="token builtin">bool</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token function">len</span><span class="token punctuation">(</span>es<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">.</span>pattern<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token function">len</span><span class="token punctuation">(</span>e<span class="token punctuation">.</span>pattern<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span><span class="token punctuation">)</span>
+  <span class="token keyword">if</span> i <span class="token operator">==</span> n <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">return</span> <span class="token function">append</span><span class="token punctuation">(</span>es<span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+  es <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span>es<span class="token punctuation">,</span> muxEntry<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span>
+  <span class="token function">copy</span><span class="token punctuation">(</span>es<span class="token punctuation">[</span>i<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">,</span> es<span class="token punctuation">[</span>i<span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+  es<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> e
+  <span class="token keyword">return</span> es
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="ServeMux_982"></a>创建<code>ServeMux</code>
+</h2> 
+<p>调用<code>http.HandleFunc()/http.Handle()</code>都是将处理器/函数注册到<code>ServeMux</code>的默认对象<code>DefaultServeMux</code>上。使用默认对象有一个问题：不可控。</p> 
+<p>一来<code>Server</code>参数都使用了默认值，二来第三方库也可能使用这个默认对象注册一些处理，容易冲突。更严重的是，我们在不知情中调用<code>http.ListenAndServe()</code>开启 Web 服务，那么第三方库注册的处理逻辑就可以通过网络访问到，有极大的安全隐患。所以，除非在示例程序中，否则建议不要使用默认对象。</p> 
+<p>我们可以使用<code>http.NewServeMux()</code>创建一个新的<code>ServeMux</code>对象，然后创建<code>http.Server</code>对象定制参数，用<code>ServeMux</code>对象初始化<code>Server</code>的<code>Handler</code>字段，最后调用<code>Server.ListenAndServe()</code>方法开启 Web 服务：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  mux <span class="token operator">:=</span> http<span class="token punctuation">.</span><span class="token function">NewServeMux</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+  mux<span class="token punctuation">.</span><span class="token function">HandleFunc</span><span class="token punctuation">(</span><span class="token string">"/"</span><span class="token punctuation">,</span> index<span class="token punctuation">)</span>
+  mux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span><span class="token string">"/greeting"</span><span class="token punctuation">,</span> <span class="token function">greeting</span><span class="token punctuation">(</span><span class="token string">"Welcome, pepsi"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+  server <span class="token operator">:=</span> <span class="token operator">&amp;</span>http<span class="token punctuation">.</span>Server<span class="token punctuation">{<!-- --></span>
+    Addr<span class="token punctuation">:</span>         <span class="token string">":8080"</span><span class="token punctuation">,</span>
+    Handler<span class="token punctuation">:</span>      mux<span class="token punctuation">,</span>
+    ReadTimeout<span class="token punctuation">:</span>  <span class="token number">20</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Second<span class="token punctuation">,</span>
+    WriteTimeout<span class="token punctuation">:</span> <span class="token number">20</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Second<span class="token punctuation">,</span>
+  <span class="token punctuation">}</span>
+  server<span class="token punctuation">.</span><span class="token function">ListenAndServe</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="Middleware_1010"></a>Middleware</h2> 
+<p>有时候需要在请求处理代码中增加一些通用的逻辑，如统计处理耗时、记录日志、捕获宕机等等。如果在每个请求处理函数中添加这些逻辑，代码很快就会变得不可维护，添加新的处理函数也会变得非常繁琐。所以就有了中间件的需求。</p> 
+<p>中间件有点像面向切面的编程思想，但是与 Java 语言不同。在 Java 中，通用的处理逻辑（也可以称为切面）可以通过反射插入到正常逻辑的处理流程中，在 Go 语言中基本不这样做。</p> 
+<p>在 Go 中，中间件是通过函数闭包来实现的。Go 语言中的函数是第一类值，既可以作为参数传给其他函数，也可以作为返回值从其他函数返回。我们前面介绍了处理器/函数的使用和实现。那么可以利用闭包封装已有的处理函数。</p> 
+<p>首先，基于函数类型<code>func(http.Handler) http.Handler</code>定义一个中间件类型：</p> 
+<p>type Middleware func(http.Handler) http.Handler</p> 
+<p>接下来我们来编写中间件，最简单的中间件就是在请求前后各输出一条日志：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">WithLogger</span><span class="token punctuation">(</span>handler http<span class="token punctuation">.</span>Handler<span class="token punctuation">)</span> http<span class="token punctuation">.</span>Handler <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">return</span> http<span class="token punctuation">.</span><span class="token function">HandlerFunc</span><span class="token punctuation">(</span><span class="token keyword">func</span><span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    logger<span class="token punctuation">.</span><span class="token function">Printf</span><span class="token punctuation">(</span><span class="token string">"path:%s process start...n"</span><span class="token punctuation">,</span> r<span class="token punctuation">.</span>URL<span class="token punctuation">.</span>Path<span class="token punctuation">)</span>
+    <span class="token keyword">defer</span> <span class="token keyword">func</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      logger<span class="token punctuation">.</span><span class="token function">Printf</span><span class="token punctuation">(</span><span class="token string">"path:%s process end...n"</span><span class="token punctuation">,</span> r<span class="token punctuation">.</span>URL<span class="token punctuation">.</span>Path<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    handler<span class="token punctuation">.</span><span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> r<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>实现很简单，通过中间件封装原来的处理器对象，然后返回一个新的处理函数。在新的处理函数中，先输出开始处理的日志，然后用<code>defer</code>语句在函数结束后输出处理结束的日志。接着调用原处理器对象的<code>ServeHTTP()</code>方法执行原处理逻辑。</p> 
+<p>类似地，我们再来实现一个统计处理耗时的中间件：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">Metric</span><span class="token punctuation">(</span>handler http<span class="token punctuation">.</span>Handler<span class="token punctuation">)</span> http<span class="token punctuation">.</span>HandlerFunc <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">return</span> <span class="token keyword">func</span> <span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    start <span class="token operator">:=</span> time<span class="token punctuation">.</span><span class="token function">Now</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">defer</span> <span class="token keyword">func</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      logger<span class="token punctuation">.</span><span class="token function">Printf</span><span class="token punctuation">(</span><span class="token string">"path:%s elapsed:%fsn"</span><span class="token punctuation">,</span> r<span class="token punctuation">.</span>URL<span class="token punctuation">.</span>Path<span class="token punctuation">,</span> time<span class="token punctuation">.</span><span class="token function">Since</span><span class="token punctuation">(</span>start<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Seconds</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token punctuation">}</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    time<span class="token punctuation">.</span><span class="token function">Sleep</span><span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Second<span class="token punctuation">)</span>
+    handler<span class="token punctuation">.</span><span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> r<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>Metric</code>中间件封装原处理器对象，开始执行前记录时间，执行完成后输出耗时。为了能方便看到结果，我在上面代码中添加了一个<code>time.Sleep()</code>调用。</p> 
+<p>最后，由于请求的处理逻辑都是由功能开发人员（而非库作者）自己编写的，所以为了 Web 服务器的稳定，我们需要捕获可能出现的 panic。<code>PanicRecover</code>中间件如下：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">PanicRecover</span><span class="token punctuation">(</span>handler http<span class="token punctuation">.</span>Handler<span class="token punctuation">)</span> http<span class="token punctuation">.</span>Handler <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">return</span> http<span class="token punctuation">.</span><span class="token function">HandlerFunc</span><span class="token punctuation">(</span><span class="token keyword">func</span><span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">defer</span> <span class="token keyword">func</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">if</span> err <span class="token operator">:=</span> <span class="token function">recover</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+        logger<span class="token punctuation">.</span><span class="token function">Println</span><span class="token punctuation">(</span><span class="token function">string</span><span class="token punctuation">(</span>debug<span class="token punctuation">.</span><span class="token function">Stack</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+    handler<span class="token punctuation">.</span><span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> r<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>调用<code>recover()</code>函数捕获 panic，输出堆栈信息，为了防止程序异常退出。实际上，在<code>conn.serve()</code>方法中也有<code>recover()</code>，程序一般不会异常退出。但是自定义的中间件可以添加我们自己的定制逻辑。</p> 
+<p>现在我们可以这样来注册处理函数：</p> 
+<pre><code class="prism language-go">mux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span><span class="token string">"/a"</span><span class="token punctuation">,</span> <span class="token function">PanicRecover</span><span class="token punctuation">(</span><span class="token function">WithLogger</span><span class="token punctuation">(</span><span class="token function">Metric</span><span class="token punctuation">(</span>http<span class="token punctuation">.</span><span class="token function">HandlerFunc</span><span class="token punctuation">(</span>index<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+mux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span><span class="token string">"/greeting"</span><span class="token punctuation">,</span> <span class="token function">PanicRecover</span><span class="token punctuation">(</span><span class="token function">WithLogger</span><span class="token punctuation">(</span><span class="token function">Metric</span><span class="token punctuation">(</span><span class="token function">greeting</span><span class="token punctuation">(</span><span class="token string">"welcome, pepsi"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这种方式略显繁琐，我们可以编写一个帮助函数，它接受原始的处理器对象，和可变的多个中间件。对处理器对象应用这些中间件，返回新的处理器对象：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">applyMiddlewares</span><span class="token punctuation">(</span>handler http<span class="token punctuation">.</span>Handler<span class="token punctuation">,</span> middlewares <span class="token operator">...</span>Middleware<span class="token punctuation">)</span> http<span class="token punctuation">.</span>Handler <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">for</span> i <span class="token operator">:=</span> <span class="token function">len</span><span class="token punctuation">(</span>middlewares<span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span> i <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">;</span> i<span class="token operator">--</span> <span class="token punctuation">{<!-- --></span>
+    handler <span class="token operator">=</span> middlewares<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">(</span>handler<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+
+  <span class="token keyword">return</span> handler
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>注意应用顺序是<strong>从右到左</strong>的，即<strong>右结合</strong>，越靠近原处理器的越晚执行。</p> 
+<p>利用帮助函数，注册可以简化为：</p> 
+<pre><code class="prism language-go">middlewares <span class="token operator">:=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>Middleware<span class="token punctuation">{<!-- --></span>
+  PanicRecover<span class="token punctuation">,</span>
+  WithLogger<span class="token punctuation">,</span>
+  Metric<span class="token punctuation">,</span>
+<span class="token punctuation">}</span>
+mux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span><span class="token string">"/"</span><span class="token punctuation">,</span> <span class="token function">applyMiddlewares</span><span class="token punctuation">(</span>http<span class="token punctuation">.</span><span class="token function">HandlerFunc</span><span class="token punctuation">(</span>index<span class="token punctuation">)</span><span class="token punctuation">,</span> middlewares<span class="token operator">...</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+mux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span><span class="token string">"/greeting"</span><span class="token punctuation">,</span> <span class="token function">applyMiddlewares</span><span class="token punctuation">(</span><span class="token function">greeting</span><span class="token punctuation">(</span><span class="token string">"welcome, pepsi"</span><span class="token punctuation">)</span><span class="token punctuation">,</span> middlewares<span class="token operator">...</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>上面每次注册处理逻辑都需要调用一次<code>applyMiddlewares()</code>函数，还是略显繁琐。我们可以这样来优化，封装一个自己的<code>ServeMux</code>结构，然后定义一个方法<code>Use()</code>将中间件保存下来，重写<code>Handle/HandleFunc</code>将传入的<code>http.HandlerFunc/http.Handler</code>处理器包装中间件之后再传给底层的<code>ServeMux.Handle()</code>方法：</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> MyMux <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token operator">*</span>http<span class="token punctuation">.</span>ServeMux
+  middlewares <span class="token punctuation">[</span><span class="token punctuation">]</span>Middleware
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token function">NewMyMux</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">*</span>MyMux <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">return</span> <span class="token operator">&amp;</span>MyMux<span class="token punctuation">{<!-- --></span>
+    ServeMux<span class="token punctuation">:</span> http<span class="token punctuation">.</span><span class="token function">NewServeMux</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token punctuation">(</span>m <span class="token operator">*</span>MyMux<span class="token punctuation">)</span> <span class="token function">Use</span><span class="token punctuation">(</span>middlewares <span class="token operator">...</span>Middleware<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  m<span class="token punctuation">.</span>middlewares <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span>m<span class="token punctuation">.</span>middlewares<span class="token punctuation">,</span> middlewares<span class="token operator">...</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token punctuation">(</span>m <span class="token operator">*</span>MyMux<span class="token punctuation">)</span> <span class="token function">Handle</span><span class="token punctuation">(</span>pattern <span class="token builtin">string</span><span class="token punctuation">,</span> handler http<span class="token punctuation">.</span>Handler<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  handler <span class="token operator">=</span> <span class="token function">applyMiddlewares</span><span class="token punctuation">(</span>handler<span class="token punctuation">,</span> m<span class="token punctuation">.</span>middlewares<span class="token operator">...</span><span class="token punctuation">)</span>
+  m<span class="token punctuation">.</span>ServeMux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span>pattern<span class="token punctuation">,</span> handler<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">func</span> <span class="token punctuation">(</span>m <span class="token operator">*</span>MyMux<span class="token punctuation">)</span> <span class="token function">HandleFunc</span><span class="token punctuation">(</span>pattern <span class="token builtin">string</span><span class="token punctuation">,</span> handler http<span class="token punctuation">.</span>HandlerFunc<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  newHandler <span class="token operator">:=</span> <span class="token function">applyMiddlewares</span><span class="token punctuation">(</span>handler<span class="token punctuation">,</span> m<span class="token punctuation">.</span>middlewares<span class="token operator">...</span><span class="token punctuation">)</span>
+  m<span class="token punctuation">.</span>ServeMux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span>pattern<span class="token punctuation">,</span> newHandler<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>注册时只需要创建<code>MyMux</code>对象，调用其<code>Use()</code>方法传入要应用的中间件即可：</p> 
+<pre><code class="prism language-go">middlewares <span class="token operator">:=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>Middleware<span class="token punctuation">{<!-- --></span>
+  PanicRecover<span class="token punctuation">,</span>
+  WithLogger<span class="token punctuation">,</span>
+  Metric<span class="token punctuation">,</span>
+<span class="token punctuation">}</span>
+mux <span class="token operator">:=</span> <span class="token function">NewMyMux</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+mux<span class="token punctuation">.</span><span class="token function">Use</span><span class="token punctuation">(</span>middlewares<span class="token operator">...</span><span class="token punctuation">)</span>
+mux<span class="token punctuation">.</span><span class="token function">HandleFunc</span><span class="token punctuation">(</span><span class="token string">"/"</span><span class="token punctuation">,</span> index<span class="token punctuation">)</span>
+mux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span><span class="token string">"/greeting"</span><span class="token punctuation">,</span> <span class="token function">greeting</span><span class="token punctuation">(</span><span class="token string">"welcome, pepsi"</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这种方式简单易用，但是也有它的问题，最大的问题是必须先设置好中间件，然后才能调用<code>Handle/HandleFunc</code>注册，后添加的中间件不会对之前注册的处理器/函数生效。</p> 
+<p>为了解决这个问题，我们可以改写<code>ServeHTTP</code>方法，在确定了处理器之后再应用中间件。这样后续添加的中间件也能生效。很多第三方库都是采用这种方式。<code>http.ServeMux</code>默认的<code>ServeHTTP()</code>方法如下：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>m <span class="token operator">*</span>ServeMux<span class="token punctuation">)</span> <span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">if</span> r<span class="token punctuation">.</span>RequestURI <span class="token operator">==</span> <span class="token string">"*"</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> r<span class="token punctuation">.</span><span class="token function">ProtoAtLeast</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      w<span class="token punctuation">.</span><span class="token function">Header</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Set</span><span class="token punctuation">(</span><span class="token string">"Connection"</span><span class="token punctuation">,</span> <span class="token string">"close"</span><span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+    w<span class="token punctuation">.</span><span class="token function">WriteHeader</span><span class="token punctuation">(</span>http<span class="token punctuation">.</span>StatusBadRequest<span class="token punctuation">)</span>
+    <span class="token keyword">return</span>
+  <span class="token punctuation">}</span>
+  h<span class="token punctuation">,</span> <span class="token boolean">_</span> <span class="token operator">:=</span> m<span class="token punctuation">.</span><span class="token function">Handler</span><span class="token punctuation">(</span>r<span class="token punctuation">)</span>
+  h<span class="token punctuation">.</span><span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> r<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>改造这个方法定义<code>MyMux</code>类型的<code>ServeHTTP()</code>方法也很简单，只需要在<code>m.Handler(r)</code>获取处理器之后，应用当前的中间件即可：</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>m <span class="token operator">*</span>MyMux<span class="token punctuation">)</span> <span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// ...</span>
+  h<span class="token punctuation">,</span> <span class="token boolean">_</span> <span class="token operator">:=</span> m<span class="token punctuation">.</span><span class="token function">Handler</span><span class="token punctuation">(</span>r<span class="token punctuation">)</span>
+  <span class="token comment">// 只需要加这一行即可</span>
+  h <span class="token operator">=</span> <span class="token function">applyMiddlewares</span><span class="token punctuation">(</span>h<span class="token punctuation">,</span> m<span class="token punctuation">.</span>middlewares<span class="token operator">...</span><span class="token punctuation">)</span>
+  h<span class="token punctuation">.</span><span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> r<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_1199"></a>思考题</h2> 
+<p>再思考一下有没有其他实现方式</p> 
+<p>放在闭包中延迟执行</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>mux <span class="token operator">*</span>MyMux<span class="token punctuation">)</span> <span class="token function">HandleFunc</span><span class="token punctuation">(</span>pattern <span class="token builtin">string</span><span class="token punctuation">,</span> handler http<span class="token punctuation">.</span>HandlerFunc<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	mux<span class="token punctuation">.</span>ServeMux<span class="token punctuation">.</span><span class="token function">Handle</span><span class="token punctuation">(</span>pattern<span class="token punctuation">,</span> http<span class="token punctuation">.</span><span class="token function">HandlerFunc</span><span class="token punctuation">(</span><span class="token keyword">func</span><span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		h <span class="token operator">:=</span> <span class="token function">applyMiddlewares</span><span class="token punctuation">(</span>handler<span class="token punctuation">,</span> mux<span class="token punctuation">.</span>middlewares<span class="token operator">...</span><span class="token punctuation">)</span>
+		h<span class="token punctuation">.</span><span class="token function">ServeHTTP</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> r<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="_1216"></a>思考题</h2> 
+<p>根据最长前缀的逻辑，如果键入<code>localhost:8080/hello/a/b/c/</code>，应该会匹配<code>/hello</code>路径。 如果键入<code>localhost:8080/a/b/c/</code>，应该会匹配<code>/</code>路径。是这样么？</p> 
+<p><code>/hello/</code></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

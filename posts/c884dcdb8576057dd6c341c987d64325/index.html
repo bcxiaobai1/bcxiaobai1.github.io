@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Solana light client - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Solana light client</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="1__0"></a>1. 引言</h1> 
+<p><a href="https://docs.solana.com/proposals/simple-payment-and-state-verification">Solana已接收提案——Simple Payment and State Verification</a> 中指出：<br> 资源有限的客户端可运行light client来参与Solana网络，可在无需信任第三方的情况下，确认其提交的交易已提交到账本。</p> 
+<p>Solana中的Validators会将最近确认交易的签名在本地存储一段时间，已确保这些交易不会被重复处理。</p> 
+<p>客户端可：</p> 
+<ul>
+<li>通过Validator提供的JSON RPC端口来查询其提交的交易是否已被处理。</li>
+<li>通过注册监听Validator提供的PubSub通知，可获知某签名是否已被Validator注意到。</li>
+</ul> 
+<p>以上两种方式，客户端都可验证一笔支付，但是，这不是a proof，需完全信任某单一Validator。</p> 
+<p>为了进一步减少客户端对某单一Validator的信任，可改为：</p> 
+<ul><li>使用Merkle Proofs来锚定 该Validator在账本中的response，允许客户端通过验证 其选择的足够多数量的Validators是否已确认该交易。通过多个Validators的attestations可进一步减少对某单一Validator的信任。</li></ul> 
+<h1>
+<a id="2_Solanalight_client_16"></a>2. Solana的light client</h1> 
+<p>light client：是指不运行validator的参与者。<br> light client 可在无需增加资源投入的情况下验证账本，其提供的安全性要高于信任某一远程Validator。</p> 
+<p>Validator并不会将交易签名提交给light client，而是生成：</p> 
+<ul><li>a Merkle Proof from the transaction of interest to the root of a Merkle Tree of all transactions in the including block。</li></ul> 
+<p>该Merkle Root存在ledger entry中，并经由Validators投票来提供共识合法性。</p> 
+<p>light client的安全性还取决于其初始收录的validators set。随着网络中Validators变化，light client也需要使用receipts来更新其内部的validators set。</p> 
+<p>考虑到性能，Validators本身可能也会想用light client API。如，在初始启动a validator的过程中，该validator可使用a receipt来验证一个由cluster提供的checkpoint of the state。</p> 
+<h1>
+<a id="3_Receipts_29"></a>3. Receipts</h1> 
+<p>A receipt为a minimal proof，用于证明：</p> 
+<ul>
+<li>1）某一交易被包含在某一区块——Transaction Inclusion Proof；</li>
+<li>2）该区块已经由light client所选择的validators set 投票——；</li>
+<li>3）投票达到了要求的确认深度（desired confirmation depth）——Chain of Entries。</li>
+</ul> 
+<h2>
+<a id="31_Transaction_Inclusion_Proof_35"></a>3.1 Transaction Inclusion Proof</h2> 
+<p>Transaction Inclusion Proof为一种数据结构，包含了：</p> 
+<ul><li>某笔交易经由Entry-Merkle到达Block-Merkle的Merkle Path。</li></ul> 
+<p>Block-Merkle会与the required set of validator votes一起，被包含在a Bank-Hash中。<br> 包含后续validator投票的PoH entry chain（源自Bank-Hash）即为proof of confirmation。</p> 
+<h3>
+<a id="311_Transaction_Merkle_42"></a>3.1.1 Transaction Merkle</h3> 
+<p>An Entry-Merkle即为a Merkle Root，包含了某个entry中的所有交易，按签名排序。</p> 
+<p>entry中的每笔交易均通过如下方式被merkled：【由此可证明某交易<code>T</code>被包含在某entry<code>E</code>中。】</p> 
+<pre><code>poh.record(hash_transactions(transactions)).unwrap().hash
+</code></pre> 
+<pre><code>pub fn hash_transactions(transactions: &amp;[VersionedTransaction]) -&gt; Hash {
+    // a hash of a slice of transactions only needs to hash the signatures
+    let signatures: Vec&lt;_&gt; = transactions
+        .iter()
+        .flat_map(|tx| tx.signatures.iter())
+        .collect();
+    let merkle_tree = MerkleTree::new(&amp;signatures);
+    if let Some(root_hash) = merkle_tree.get_root() {
+        *root_hash
+    } else {
+        Hash::default()
+    }
+}
+
+pub struct VersionedTransaction {
+    /// List of signatures
+    #[serde(with = "short_vec")]
+    pub signatures: Vec&lt;Signature&gt;,
+    /// Message to sign.
+    pub message: VersionedMessage,
+}
+pub enum VersionedMessage {
+    Legacy(Message),
+    V0(v0::Message),
+}
+</code></pre> 
+<p>A Block-Merkle为the Merkle Root of all the Entry-Merkles sequenced in the block。</p> 
+<p><img src="https://images2.imgbox.com/6e/4e/NI0j89XO_o.png" alt="在这里插入图片描述"></p> 
+<p>将以上2个merkle proof一起，即可证明a transaction <code>T</code>被包含在bank hash为<code>B</code>的某block中。</p> 
+<p>Accounts-Hash为the hash of th econcatentation of the state hashes of each account modified during the current slot，即：<br> <span class="katex--inline"><span class="katex"><span class="katex-mathml">
+    
+     
+      
+       
+        A
+       
+       
+        c
+       
+       
+        c
+       
+       
+        o
+       
+       
+        u
+       
+       
+        n
+       
+       
+        t
+       
+       
+        s
+       
+       
+        H
+       
+       
+        a
+       
+       
+        s
+       
+       
+        h
+       
+       
+        =
+       
+       
+        H
+       
+       
+        a
+       
+       
+        s
+       
+       
+        h
+       
+       
+        (
+       
+       
+        H
+       
+       
+        a
+       
+       
+        s
+       
+       
+        h
+       
+       
+        (
+       
+       
+        a
+       
+       
+        c
+       
+       
+        c
+       
+       
+        o
+       
+       
+        u
+       
+       
+        n
+       
+       
+        t
+       
+       
+        
+         1
+        
+        
+         
+          s
+         
+         
+          t
+         
+         
+          a
+         
+         
+          t
+         
+         
+          e
+         
+        
+       
+       
+        )
+       
+       
+        ∣
+       
+       
+        ∣
+       
+       
+        H
+       
+       
+        a
+       
+       
+        s
+       
+       
+        h
+       
+       
+        (
+       
+       
+        a
+       
+       
+        c
+       
+       
+        c
+       
+       
+        o
+       
+       
+        u
+       
+       
+        n
+       
+       
+        t
+       
+       
+        
+         2
+        
+        
+         
+          s
+         
+         
+          t
+         
+         
+          a
+         
+         
+          t
+         
+         
+          e
+         
+        
+       
+       
+        )
+       
+       
+        ∣
+       
+       
+        ∣
+       
+       
+        .
+       
+       
+        .
+       
+       
+        .
+       
+       
+        ∣
+       
+       
+        ∣
+       
+       
+        H
+       
+       
+        a
+       
+       
+        s
+       
+       
+        h
+       
+       
+        (
+       
+       
+        a
+       
+       
+        c
+       
+       
+        c
+       
+       
+        o
+       
+       
+        u
+       
+       
+        n
+       
+       
+        t
+       
+       
+        
+         n
+        
+        
+         
+          s
+         
+         
+          t
+         
+         
+          a
+         
+         
+          t
+         
+         
+          e
+         
+        
+       
+       
+        )
+       
+       
+        ∣
+       
+       
+        )
+       
+      
+      
+       AccountsHash=Hash(Hash(account1_{state})||Hash(account2_{state})||...||Hash(accountn_{state})|)
+      
+     
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.69444em;vertical-align: 0em"></span><span class="mord mathdefault">A</span><span class="mord mathdefault">c</span><span class="mord mathdefault">c</span><span class="mord mathdefault">o</span><span class="mord mathdefault">u</span><span class="mord mathdefault">n</span><span class="mord mathdefault">t</span><span class="mord mathdefault">s</span><span class="mord mathdefault" style="margin-right: 0.08125em">H</span><span class="mord mathdefault">a</span><span class="mord mathdefault">s</span><span class="mord mathdefault">h</span><span class="mspace" style="margin-right: 0.277778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.277778em"></span></span><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mord mathdefault" style="margin-right: 0.08125em">H</span><span class="mord mathdefault">a</span><span class="mord mathdefault">s</span><span class="mord mathdefault">h</span><span class="mopen">(</span><span class="mord mathdefault" style="margin-right: 0.08125em">H</span><span class="mord mathdefault">a</span><span class="mord mathdefault">s</span><span class="mord mathdefault">h</span><span class="mopen">(</span><span class="mord mathdefault">a</span><span class="mord mathdefault">c</span><span class="mord mathdefault">c</span><span class="mord mathdefault">o</span><span class="mord mathdefault">u</span><span class="mord mathdefault">n</span><span class="mord mathdefault">t</span><span class="mord"><span class="mord">1</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.280556em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">s</span><span class="mord mathdefault mtight">t</span><span class="mord mathdefault mtight">a</span><span class="mord mathdefault mtight">t</span><span class="mord mathdefault mtight">e</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mord">∣</span><span class="mord">∣</span><span class="mord mathdefault" style="margin-right: 0.08125em">H</span><span class="mord mathdefault">a</span><span class="mord mathdefault">s</span><span class="mord mathdefault">h</span><span class="mopen">(</span><span class="mord mathdefault">a</span><span class="mord mathdefault">c</span><span class="mord mathdefault">c</span><span class="mord mathdefault">o</span><span class="mord mathdefault">u</span><span class="mord mathdefault">n</span><span class="mord mathdefault">t</span><span class="mord"><span class="mord">2</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.280556em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">s</span><span class="mord mathdefault mtight">t</span><span class="mord mathdefault mtight">a</span><span class="mord mathdefault mtight">t</span><span class="mord mathdefault mtight">e</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mord">∣</span><span class="mord">∣</span><span class="mord">.</span><span class="mord">.</span><span class="mord">.</span><span class="mord">∣</span><span class="mord">∣</span><span class="mord mathdefault" style="margin-right: 0.08125em">H</span><span class="mord mathdefault">a</span><span class="mord mathdefault">s</span><span class="mord mathdefault">h</span><span class="mopen">(</span><span class="mord mathdefault">a</span><span class="mord mathdefault">c</span><span class="mord mathdefault">c</span><span class="mord mathdefault">o</span><span class="mord mathdefault">u</span><span class="mord mathdefault">n</span><span class="mord mathdefault">t</span><span class="mord"><span class="mord mathdefault">n</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.280556em"><span class="" style="margin-left: 0em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathdefault mtight">s</span><span class="mord mathdefault mtight">t</span><span class="mord mathdefault mtight">a</span><span class="mord mathdefault mtight">t</span><span class="mord mathdefault mtight">e</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mord">∣</span><span class="mclose">)</span></span></span></span></span></p> 
+<p>receipt需要transaction status，因为需要为block构建state receipt。同一区块中可能有具有相同state的2笔交易，仅根据state无法区分一笔交易是否提交成功。尽管可能没必要encode the full status code，但是需要一个status bit来标记交易是否成功。</p> 
+<p><strong>当前Solana中并未实现Block-Merkle，因此，为了验证entry <code>E</code>在 bank hash为<code>B</code> 的block中，需提供该block中的所有entry hashes。这样的实现效率很低，未来Solana应该会实现Block-Merkele。</strong></p> 
+<h3>
+<a id="312_Block_Headers_90"></a>3.1.2 Block Headers</h3> 
+<p>为了验证Transaction inclusion proofs，light client应能推断出网络中的拓扑结构。</p> 
+<p>light client应能跟踪新生成的block headers，如新来的2个bank hash为<code>A,B</code>的区块，light client应能判断出<code>A</code>是<code>B</code>的ancestor（具体见下面提到的 Optimistic Confirmation Proof）。header中的内容将用于计算bank hash。</p> 
+<p>Bank-Hash=Hash(Accounts-Hash || Block-Merkle)</p> 
+<p><img src="https://images2.imgbox.com/01/db/HEYNykzZ_o.png" alt="在这里插入图片描述"><br> <a href="https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/runtime/src/bank.rs#L3468-L3473">具体代码实现为</a>：</p> 
+<pre><code>		let mut hash = hashv(&amp;[
+            self.parent_hash.as_ref(),
+            accounts_delta_hash.hash.as_ref(),
+            &amp;signature_count_buf,
+            self.last_blockhash().as_ref(),
+        ]);
+</code></pre> 
+<p><a href="https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/core/src/replay_stage.rs#L1092-L1096">可跟现有的Validator replay logic中的streaming logic来实现该逻辑</a>：</p> 
+<pre><code>			if let Some(sender) = bank_notification_sender {
+                sender
+                    .send(BankNotification::Root(root_bank))
+                    .unwrap_or_else(|err| warn!("bank_notification_sender failed: {:?}", err));
+            }
+</code></pre> 
+<h3>
+<a id="313_Optimistic_Confirmation_Proof_116"></a>3.1.3 Optimistic Confirmation Proof</h3> 
+<p><a href="https://github.com/solana-labs/solana/blob/b6bfed64cb159ee67bb6bdbaefc7f833bbed3563/core/src/cluster_info_vote_listener.rs#L604-L614">当前可通过a listener that monitors gossip and the replay pipeline for votes来获得optimistic confirmation信息，具体为</a>：</p> 
+<pre><code>				if is_confirmed {
+                    new_optimistic_confirmed_slots.push((*slot, last_vote_hash));
+                    // Notify subscribers about new optimistic confirmation
+                    if let Some(sender) = bank_notification_sender {
+                        sender
+                            .send(BankNotification::OptimisticallyConfirmed(*slot))
+                            .unwrap_or_else(|err| {
+                                warn!("bank_notification_sender failed: {:?}", err)
+                            });
+                    }
+                }
+</code></pre> 
+<p>对bank hash为<code>B</code>的区块的每一个投票都是a signed transaction。一旦投票数达到了某阈值<code>T</code>，即可认为该区块是optimistially confirmed。参与投票的这<code>T</code>个validators需要show that the block with bank hash <code>B</code> was optimistically confirmed。</p> 
+<p>但是，当前signed votes本身并不存储，未来可能需要维护在Rocksdb数据库中，以key <code>(Slot, Hash, Pubkey)</code>索引，来表示the slot of the vote, bank hash of the vote 以及 vote account pubkey responsible for the vote。</p> 
+<p>可扩展现有的signature subscription logic，将transaction merkle proof和optimistic confirmation proof通过RPC提供给订阅者。<br> 当探测到optimistic confirmation，即会通知订阅者“Confirmed” confirmation。同时，需要提供一个flag来标记应返回transaction merkle proof和optimistic confirmation proof。</p> 
+<p>It is important to note that optimistcally confirming <code>B</code> also implies that all ancestor blocks of <code>B</code> are also optimistically confirmed, and also that not all blocks will be optimistically confirmed.</p> 
+<pre><code>B -&gt; B'
+</code></pre> 
+<p>So in the example above if a block <code>B'</code> is optimisically confirmed, then so is B. Thus if a transaction was in block <code>B</code>, the transaction merkle in the proof will be for block <code>B</code>, but the votes presented in the proof will be for block <code>B'</code>. This is why the headers in the Block headers section above are important, the client will need to verify that <code>B</code> is indeed an ancestor of <code>B'</code>.</p> 
+<h3>
+<a id="314_Proof_of_Stake_Distributioin_145"></a>3.1.4 Proof of Stake Distributioin</h3> 
+<p>当收到transaction merkle proof 和optimistic confirmation proof时，客户端需验证交易<code>T</code>确实optimistially confirmed在bank hash为<code>B</code>的block中。<br> 最后，需要验证，在optimistic proof中的投票确实超过了<code>T</code>%的质押，以保证“optimistic confirmation”的安全性。</p> 
+<p>对于每个epoch，当stake set变化时，将所有的stakes写到a system account，然后validators可订阅该system account。然后全节点提供a merkle proving that the system account state was updated in some block <code>B</code>，再show that the block <code>B</code> was optimistically confirmed/rooted。</p> 
+<h2>
+<a id="32_Account_State_Verification_151"></a>3.2 Account State Verification</h2> 
+<p>可通过向cluster提交包含某TBD指令的交易来验证某account的state（如balance或其它数据）。然后client可使用Transaction Inclusion Proof来验证该cluster是否同意 that the account has reached the expected state。</p> 
+<h2>
+<a id="33_Validator_Votes_154"></a>3.3 Validator Votes</h2> 
+<p>Leaders可将股权与权重合并到一个entry中。这将减少创建receipt所需的entry数量。</p> 
+<h2>
+<a id="34_Chain_of_Entries_157"></a>3.4 Chain of Entries</h2> 
+<p>A receipt has a PoH link from the payment or state Merkle Path root to a list of consecutive validation votes.</p> 
+<p>receipt中包含：</p> 
+<ul><li>Transaction -&gt; Entry-Merkle -&gt; Block-Merkle -&gt; Bank-Hash</li></ul> 
+<p>receipt中还包含一组PoH entries：</p> 
+<ul>
+<li>Validator vote entries</li>
+<li>Ticks</li>
+<li>Light entries</li>
+</ul> 
+<pre><code>/// This Entry definition skips over the transactions and only contains the
+/// hash of the transactions used to modify PoH.
+LightEntry {
+    /// The number of hashes since the previous Entry ID.
+    pub num_hashes: u64,
+    /// The SHA-256 hash `num_hashes` after the previous Entry ID.
+    hash: Hash,
+    /// The Merkle Root of the transactions encoded into the Entry.
+    entry_hash: Hash,
+}
+</code></pre> 
+<p>The light entries are reconstructed from Entries and simply show the entry Merkle Root that was mixed in to the PoH hash, instead of the full transaction set.</p> 
+<p>Clients do not need the starting vote state. The <a href="https://docs.solana.com/implemented-proposals/tower-bft">fork selection</a> algorithm is defined such that only votes that appear after the transaction provide finality for the transaction, and finality is independent of the starting state.</p> 
+<h2>
+<a id="35_Verification_185"></a>3.5 Verification</h2> 
+<p>A light client that is aware of the supermajority set validators can verify a receipt by following the Merkle Path to the PoH chain. The Block-Merkle is the Merkle Root and will appear in votes included in an Entry. The light client can simulate fork selection for the consecutive votes and verify that the receipt is confirmed at the desired lockout threshold.</p> 
+<h2>
+<a id="36_Synthetic_State_188"></a>3.6 Synthetic State</h2> 
+<p>Synthetic state should be computed into the Bank-Hash along with the bank generated state.</p> 
+<p>For example:</p> 
+<ul>
+<li>Epoch validator accounts and their stakes and weights.</li>
+<li>Computed fee rates</li>
+</ul> 
+<p>These values should have an entry in the Bank-Hash. They should live under known accounts, and therefore have an index into the hash concatenation.</p> 
+<h1>
+<a id="_198"></a>参考资料</h1> 
+<p>[1] <a href="https://docs.solana.com/proposals/simple-payment-and-state-verification">Solana已接收提案——Simple Payment and State Verification</a><br> [2] <a href="https://blog.nil.foundation/2021/10/14/solana-ethereum-bridge.html">用于Solana-Ethereum的zk-bridge方案——=nil; Foundation’s In-EVM Solana Light-Client State Verification</a></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

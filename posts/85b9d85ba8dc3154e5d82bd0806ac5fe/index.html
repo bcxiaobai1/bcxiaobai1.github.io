@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>七、浅析kafka状态机 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">七、浅析kafka状态机</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <ul><li>此文章基于kafka2.5<br> kafka状态机有两种，一种是ReplicaStateMachine副本状态机，另一种是PartitionStateMachine分区状态机，下面我们就来分别介绍一下</li></ul> 
+<h1>
+<a id="kafkacontrollerKafkaControlleronControllerFailover_2"></a>状态机启动的入口kafka.controller.KafkaController#onControllerFailover</h1> 
+<p>在服务端controller选举之后会启动状态机</p> 
+<pre><code class="prism language-scala"><span class="token keyword">private</span> <span class="token keyword">def</span> onControllerFailover<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//……省略</span>
+    replicaStateMachine<span class="token punctuation">.</span>startup<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    partitionStateMachine<span class="token punctuation">.</span>startup<span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h1>
+<a id="_11"></a>副本状态机流转图</h1> 
+<p><img src="https://images2.imgbox.com/36/48/QwCPhNI8_o.png" alt="图一"></p> 
+<h1>
+<a id="ReplicaStateMachine_15"></a>ReplicaStateMachine源码分析</h1> 
+<p>startup()代码如下</p> 
+<pre><code class="prism language-scala">  <span class="token keyword">def</span> startup<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    info<span class="token punctuation">(</span><span class="token string">"Initializing replica state"</span><span class="token punctuation">)</span>
+    <span class="token comment">//3.1 初始化副本状态</span>
+    initializeReplicaState<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    info<span class="token punctuation">(</span><span class="token string">"Triggering online replica state changes"</span><span class="token punctuation">)</span>
+    <span class="token keyword">val</span> <span class="token punctuation">(</span>onlineReplicas<span class="token punctuation">,</span> offlineReplicas<span class="token punctuation">)</span> <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>onlineAndOfflineReplicas
+    <span class="token comment">//3.2 上线副本</span>
+    handleStateChanges<span class="token punctuation">(</span>onlineReplicas<span class="token punctuation">.</span>toSeq<span class="token punctuation">,</span> OnlineReplica<span class="token punctuation">)</span>
+    info<span class="token punctuation">(</span><span class="token string">"Triggering offline replica state changes"</span><span class="token punctuation">)</span>
+    <span class="token comment">//3.3 剔除下线副本</span>
+    handleStateChanges<span class="token punctuation">(</span>offlineReplicas<span class="token punctuation">.</span>toSeq<span class="token punctuation">,</span> OfflineReplica<span class="token punctuation">)</span>
+    debug<span class="token punctuation">(</span>s<span class="token string">"Started replica state machine with initial state -&gt; ${controllerContext.replicaStates}"</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="kafkacontrollerReplicaStateMachineinitializeReplicaState_32"></a>kafka.controller.ReplicaStateMachine#initializeReplicaState</h2> 
+<p>这里逻辑很简单，就是循环所有的topic的partition，区分出目前在线的副本及已下线的副本</p> 
+<pre><code class="prism language-scala">  <span class="token keyword">private</span> <span class="token keyword">def</span> initializeReplicaState<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+      controllerContext<span class="token punctuation">.</span>allPartitions<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> partition <span class="token keyword">=&gt;</span>
+        <span class="token keyword">val</span> replicas <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>partitionReplicaAssignment<span class="token punctuation">(</span>partition<span class="token punctuation">)</span>
+        replicas<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replicaId <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> partitionAndReplica <span class="token operator">=</span> PartitionAndReplica<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> replicaId<span class="token punctuation">)</span>
+          <span class="token comment">//判断broker是否存活，以及脱机Map是否包含此TopicAndPartition</span>
+          <span class="token keyword">if</span> <span class="token punctuation">(</span>controllerContext<span class="token punctuation">.</span>isReplicaOnline<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> partition<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>partitionAndReplica<span class="token punctuation">,</span> OnlineReplica<span class="token punctuation">)</span>
+          <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// mark replicas on dead brokers as failed for topic deletion, if they belong to a topic to be deleted.</span>
+            <span class="token comment">// This is required during controller failover since during controller failover a broker can go down,</span>
+            <span class="token comment">// so the replicas on that broker should be moved to ReplicaDeletionIneligible to be on the safer side.</span>
+            controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>partitionAndReplica<span class="token punctuation">,</span> ReplicaDeletionIneligible<span class="token punctuation">)</span>
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="kafkacontrollerZkReplicaStateMachinehandleStateChanges_53"></a>kafka.controller.ZkReplicaStateMachine#handleStateChanges</h2> 
+<pre><code class="prism language-scala"><span class="token keyword">override</span> <span class="token keyword">def</span> handleStateChanges<span class="token punctuation">(</span>replicas<span class="token operator">:</span> Seq<span class="token punctuation">[</span>PartitionAndReplica<span class="token punctuation">]</span><span class="token punctuation">,</span> targetState<span class="token operator">:</span> ReplicaState<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>replicas<span class="token punctuation">.</span>nonEmpty<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//校验</span>
+        controllerBrokerRequestBatch<span class="token punctuation">.</span>newBatch<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment">//3.2.1 处理上线请求</span>
+        replicas<span class="token punctuation">.</span>groupBy<span class="token punctuation">(</span>_<span class="token punctuation">.</span>replica<span class="token punctuation">)</span><span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> <span class="token keyword">case</span> <span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> replicas<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+          doHandleStateChanges<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> replicas<span class="token punctuation">,</span> targetState<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//3.2.2 批量发送请求</span>
+        controllerBrokerRequestBatch<span class="token punctuation">.</span>sendRequestsToBrokers<span class="token punctuation">(</span>controllerContext<span class="token punctuation">.</span>epoch<span class="token punctuation">)</span>
+      <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> e<span class="token operator">:</span> ControllerMovedException <span class="token keyword">=&gt;</span>
+          error<span class="token punctuation">(</span>s<span class="token string">"Controller moved to another broker when moving some replicas to $targetState state"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+          <span class="token keyword">throw</span> e
+        <span class="token keyword">case</span> e<span class="token operator">:</span> Throwable <span class="token keyword">=&gt;</span> error<span class="token punctuation">(</span>s<span class="token string">"Error while moving some replicas to $targetState state"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="doHandleStateChanges_75"></a>着重分析doHandleStateChanges，这也是副本状态机的核心方法</h3> 
+<p>副本状态机总共有7种状态，具体见图二<br> <img src="https://images2.imgbox.com/18/68/2gLDPtsw_o.png" alt="图二"></p> 
+<pre><code class="prism language-scala">  <span class="token keyword">private</span> <span class="token keyword">def</span> doHandleStateChanges<span class="token punctuation">(</span>replicaId<span class="token operator">:</span> <span class="token builtin">Int</span><span class="token punctuation">,</span> replicas<span class="token operator">:</span> Seq<span class="token punctuation">[</span>PartitionAndReplica<span class="token punctuation">]</span><span class="token punctuation">,</span> targetState<span class="token operator">:</span> ReplicaState<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">//首先判断将要改变的状态是不是合法的，剔除不合法的副本</span>
+    replicas<span class="token punctuation">.</span>foreach<span class="token punctuation">(</span>replica <span class="token keyword">=&gt;</span> controllerContext<span class="token punctuation">.</span>putReplicaStateIfNotExists<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> NonExistentReplica<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">val</span> <span class="token punctuation">(</span>validReplicas<span class="token punctuation">,</span> invalidReplicas<span class="token punctuation">)</span> <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>checkValidReplicaStateChange<span class="token punctuation">(</span>replicas<span class="token punctuation">,</span> targetState<span class="token punctuation">)</span>
+    invalidReplicas<span class="token punctuation">.</span>foreach<span class="token punctuation">(</span>replica <span class="token keyword">=&gt;</span> logInvalidTransition<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> targetState<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+    targetState <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> NewReplica <span class="token keyword">=&gt;</span>
+        validReplicas<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> partition <span class="token operator">=</span> replica<span class="token punctuation">.</span>topicPartition
+          <span class="token comment">//通过controller上下文中获取该副本当前的状态</span>
+          <span class="token keyword">val</span> currentState <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>replicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+          <span class="token comment">//partitionLeadershipInfo为Map.empty[TopicPartition, LeaderIsrAndControllerEpoch]结构的数据</span>
+          controllerContext<span class="token punctuation">.</span>partitionLeadershipInfo<span class="token punctuation">.</span>get<span class="token punctuation">(</span>partition<span class="token punctuation">)</span> <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">case</span> Some<span class="token punctuation">(</span>leaderIsrAndControllerEpoch<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+              <span class="token comment">//判断如果当前需要处理的副本为leader，则抛StateChangeFailedException异常</span>
+              <span class="token keyword">if</span> <span class="token punctuation">(</span>leaderIsrAndControllerEpoch<span class="token punctuation">.</span>leaderAndIsr<span class="token punctuation">.</span>leader <span class="token operator">==</span> replicaId<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">val</span> exception <span class="token operator">=</span> <span class="token keyword">new</span> StateChangeFailedException<span class="token punctuation">(</span>s<span class="token string">"Replica $replicaId for partition $partition cannot be moved to NewReplica state as it is being requested to become leader"</span><span class="token punctuation">)</span>
+                logFailedStateChange<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> OfflineReplica<span class="token punctuation">,</span> exception<span class="token punctuation">)</span>
+              <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">//发送LeaderAndISRRequest将当前leader及isr等信息告诉新副本所在的broker，这里的replicaId就是副本所在的brokerId</span>
+                <span class="token comment">//给所有存活的broker发送UpdateMetadataRequest</span>
+                controllerBrokerRequestBatch<span class="token punctuation">.</span>addLeaderAndIsrRequestForBrokers<span class="token punctuation">(</span>Seq<span class="token punctuation">(</span>replicaId<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                  replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span>
+                  leaderIsrAndControllerEpoch<span class="token punctuation">,</span>
+                  controllerContext<span class="token punctuation">.</span>partitionFullReplicaAssignment<span class="token punctuation">(</span>replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                  isNew <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">)</span>
+                logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> partition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> NewReplica<span class="token punctuation">)</span>
+                <span class="token comment">//更新controllerContext中的副本状态</span>
+                controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> NewReplica<span class="token punctuation">)</span>
+              <span class="token punctuation">}</span>
+            <span class="token keyword">case</span> None <span class="token keyword">=&gt;</span>
+              logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> partition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> NewReplica<span class="token punctuation">)</span>
+              controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> NewReplica<span class="token punctuation">)</span>
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+      <span class="token keyword">case</span> OnlineReplica <span class="token keyword">=&gt;</span>
+        validReplicas<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> partition <span class="token operator">=</span> replica<span class="token punctuation">.</span>topicPartition
+          <span class="token keyword">val</span> currentState <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>replicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+          <span class="token comment">//这里再次回顾一下，能流转为OnlineReplica状态的状态为NewReplica、OnlineReplica、OfflineReplica、ReplicaDeletionIneligible</span>
+          <span class="token comment">//这里对NewReplica做了特殊处理</span>
+          currentState <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">case</span> NewReplica <span class="token keyword">=&gt;</span>
+              <span class="token comment">//获取副本的分配信息，如果不包含当前副本id则将当前副本id写入</span>
+              <span class="token keyword">val</span> assignment <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>partitionFullReplicaAssignment<span class="token punctuation">(</span>partition<span class="token punctuation">)</span>
+              <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>assignment<span class="token punctuation">.</span>replicas<span class="token punctuation">.</span>contains<span class="token punctuation">(</span>replicaId<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                error<span class="token punctuation">(</span>s<span class="token string">"Adding replica ($replicaId) that is not part of the assignment $assignment"</span><span class="token punctuation">)</span>
+                <span class="token keyword">val</span> newAssignment <span class="token operator">=</span> assignment<span class="token punctuation">.</span>copy<span class="token punctuation">(</span>replicas <span class="token operator">=</span> assignment<span class="token punctuation">.</span>replicas <span class="token operator">:</span><span class="token operator">+</span> replicaId<span class="token punctuation">)</span>
+                controllerContext<span class="token punctuation">.</span>updatePartitionFullReplicaAssignment<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> newAssignment<span class="token punctuation">)</span>
+              <span class="token punctuation">}</span>
+            <span class="token keyword">case</span> _ <span class="token keyword">=&gt;</span>
+              <span class="token comment">//如果是其他状态则发送LeaderAndIsrRequest及UpdateMetadataRequest</span>
+              controllerContext<span class="token punctuation">.</span>partitionLeadershipInfo<span class="token punctuation">.</span>get<span class="token punctuation">(</span>partition<span class="token punctuation">)</span> <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">case</span> Some<span class="token punctuation">(</span>leaderIsrAndControllerEpoch<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+                  controllerBrokerRequestBatch<span class="token punctuation">.</span>addLeaderAndIsrRequestForBrokers<span class="token punctuation">(</span>Seq<span class="token punctuation">(</span>replicaId<span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span>
+                    leaderIsrAndControllerEpoch<span class="token punctuation">,</span>
+                    controllerContext<span class="token punctuation">.</span>partitionFullReplicaAssignment<span class="token punctuation">(</span>partition<span class="token punctuation">)</span><span class="token punctuation">,</span> isNew <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">)</span>
+                <span class="token keyword">case</span> None <span class="token keyword">=&gt;</span>
+              <span class="token punctuation">}</span>
+          <span class="token punctuation">}</span>
+          logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> partition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> OnlineReplica<span class="token punctuation">)</span>
+          controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> OnlineReplica<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+      <span class="token keyword">case</span> OfflineReplica <span class="token keyword">=&gt;</span>
+        <span class="token comment">//对有效的副本发送StopReplicaRequest</span>
+        validReplicas<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          controllerBrokerRequestBatch<span class="token punctuation">.</span>addStopReplicaRequestForBrokers<span class="token punctuation">(</span>Seq<span class="token punctuation">(</span>replicaId<span class="token punctuation">)</span><span class="token punctuation">,</span> replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span> deletePartition <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//区分出存在leader的副本及不存在leader的副本</span>
+        <span class="token keyword">val</span> <span class="token punctuation">(</span>replicasWithLeadershipInfo<span class="token punctuation">,</span> replicasWithoutLeadershipInfo<span class="token punctuation">)</span> <span class="token operator">=</span> validReplicas<span class="token punctuation">.</span>partition <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          controllerContext<span class="token punctuation">.</span>partitionLeadershipInfo<span class="token punctuation">.</span>contains<span class="token punctuation">(</span>replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//将副本从isr中移除，里面主要就是更新zk及controllerContext</span>
+        <span class="token keyword">val</span> updatedLeaderIsrAndControllerEpochs <span class="token operator">=</span> removeReplicasFromIsr<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> replicasWithLeadershipInfo<span class="token punctuation">.</span>map<span class="token punctuation">(</span>_<span class="token punctuation">.</span>topicPartition<span class="token punctuation">)</span><span class="token punctuation">)</span>
+        updatedLeaderIsrAndControllerEpochs<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> <span class="token keyword">case</span> <span class="token punctuation">(</span>partition<span class="token punctuation">,</span> leaderIsrAndControllerEpoch<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+          <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>controllerContext<span class="token punctuation">.</span>isTopicQueuedUpForDeletion<span class="token punctuation">(</span>partition<span class="token punctuation">.</span>topic<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">val</span> recipients <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>partitionReplicaAssignment<span class="token punctuation">(</span>partition<span class="token punctuation">)</span><span class="token punctuation">.</span>filterNot<span class="token punctuation">(</span>_ <span class="token operator">==</span> replicaId<span class="token punctuation">)</span>
+            <span class="token comment">//给其他还存活的副本发送LeaderAndIsr及更新元数据请求，这里我猜想有可能是在下线leader的情况下要进行选举，所以需要发送LeaderAndIsrRequest</span>
+            controllerBrokerRequestBatch<span class="token punctuation">.</span>addLeaderAndIsrRequestForBrokers<span class="token punctuation">(</span>recipients<span class="token punctuation">,</span>
+              partition<span class="token punctuation">,</span>
+              leaderIsrAndControllerEpoch<span class="token punctuation">,</span>
+              controllerContext<span class="token punctuation">.</span>partitionFullReplicaAssignment<span class="token punctuation">(</span>partition<span class="token punctuation">)</span><span class="token punctuation">,</span> isNew <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">)</span>
+          <span class="token punctuation">}</span>
+          <span class="token keyword">val</span> replica <span class="token operator">=</span> PartitionAndReplica<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> replicaId<span class="token punctuation">)</span>
+          <span class="token keyword">val</span> currentState <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>replicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+          logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> partition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> OfflineReplica<span class="token punctuation">)</span>
+          controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> OfflineReplica<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//给没有leader的副本直接发送更新元数据的请求</span>
+        replicasWithoutLeadershipInfo<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> currentState <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>replicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+          logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> OfflineReplica<span class="token punctuation">)</span>
+          controllerBrokerRequestBatch<span class="token punctuation">.</span>addUpdateMetadataRequestForBrokers<span class="token punctuation">(</span>controllerContext<span class="token punctuation">.</span>liveOrShuttingDownBrokerIds<span class="token punctuation">.</span>toSeq<span class="token punctuation">,</span> Set<span class="token punctuation">(</span>replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">)</span><span class="token punctuation">)</span>
+          controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> OfflineReplica<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+      <span class="token keyword">case</span> ReplicaDeletionStarted <span class="token keyword">=&gt;</span>
+        validReplicas<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> currentState <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>replicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+          logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> ReplicaDeletionStarted<span class="token punctuation">)</span>
+          controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> ReplicaDeletionStarted<span class="token punctuation">)</span>
+          <span class="token comment">//多了一个StopReplicaRequest的处理</span>
+          controllerBrokerRequestBatch<span class="token punctuation">.</span>addStopReplicaRequestForBrokers<span class="token punctuation">(</span>Seq<span class="token punctuation">(</span>replicaId<span class="token punctuation">)</span><span class="token punctuation">,</span> replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span> deletePartition <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+      <span class="token keyword">case</span> ReplicaDeletionIneligible <span class="token keyword">=&gt;</span>
+        validReplicas<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> currentState <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>replicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+          logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> ReplicaDeletionIneligible<span class="token punctuation">)</span>
+          controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> ReplicaDeletionIneligible<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+      <span class="token keyword">case</span> ReplicaDeletionSuccessful <span class="token keyword">=&gt;</span>
+        validReplicas<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> currentState <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>replicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+          logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> ReplicaDeletionSuccessful<span class="token punctuation">)</span>
+          controllerContext<span class="token punctuation">.</span>putReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">,</span> ReplicaDeletionSuccessful<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+      <span class="token keyword">case</span> NonExistentReplica <span class="token keyword">=&gt;</span>
+        validReplicas<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> replica <span class="token keyword">=&gt;</span>
+          <span class="token keyword">val</span> currentState <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>replicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+          <span class="token keyword">val</span> newAssignedReplicas <span class="token operator">=</span> controllerContext
+            <span class="token punctuation">.</span>partitionFullReplicaAssignment<span class="token punctuation">(</span>replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">)</span>
+            <span class="token punctuation">.</span>removeReplica<span class="token punctuation">(</span>replica<span class="token punctuation">.</span>replica<span class="token punctuation">)</span>
+          <span class="token comment">//也是处理了controllerContext中的数据及状态</span>
+          controllerContext<span class="token punctuation">.</span>updatePartitionFullReplicaAssignment<span class="token punctuation">(</span>replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span> newAssignedReplicas<span class="token punctuation">)</span>
+          logSuccessfulTransition<span class="token punctuation">(</span>replicaId<span class="token punctuation">,</span> replica<span class="token punctuation">.</span>topicPartition<span class="token punctuation">,</span> currentState<span class="token punctuation">,</span> NonExistentReplica<span class="token punctuation">)</span>
+          controllerContext<span class="token punctuation">.</span>removeReplicaState<span class="token punctuation">(</span>replica<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h1>
+<a id="_212"></a>分区状态机流转图</h1> 
+<p><img src="https://images2.imgbox.com/62/90/kf2ZFBd9_o.png" alt="图三"></p> 
+<h1>
+<a id="PartitionStateMachine_216"></a>PartitionStateMachine源码分析</h1> 
+<p>startup()代码如下</p> 
+<pre><code class="prism language-scala">  <span class="token keyword">def</span> startup<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    info<span class="token punctuation">(</span><span class="token string">"Initializing partition state"</span><span class="token punctuation">)</span>
+    <span class="token comment">//5.1 初始化分区状态</span>
+    initializePartitionState<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    info<span class="token punctuation">(</span><span class="token string">"Triggering online partition state changes"</span><span class="token punctuation">)</span>
+    <span class="token comment">//5.2 触发分区上线状态</span>
+    triggerOnlinePartitionStateChange<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    debug<span class="token punctuation">(</span>s<span class="token string">"Started partition state machine with initial state -&gt; ${controllerContext.partitionStates}"</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="kafkacontrollerPartitionStateMachineinitializePartitionState_229"></a>kafka.controller.PartitionStateMachine#initializePartitionState</h2> 
+<pre><code>这里就是对所有的分区做一次简单的状态过滤
+</code></pre> 
+<pre><code class="prism language-scala">  <span class="token keyword">private</span> <span class="token keyword">def</span> initializePartitionState<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>topicPartition <span class="token keyword">&lt;-</span> controllerContext<span class="token punctuation">.</span>allPartitions<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 这里逻辑也挺简单的，就是根据controllerContext中的cache来判断分区状态，如果不存在缓存中则是NewPartition状态，如果存在且Leader还存活，则置为Online状态，否则置为Offline状态</span>
+      controllerContext<span class="token punctuation">.</span>partitionLeadershipInfo<span class="token punctuation">.</span>get<span class="token punctuation">(</span>topicPartition<span class="token punctuation">)</span> <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> Some<span class="token punctuation">(</span>currentLeaderIsrAndEpoch<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+          <span class="token comment">// else, check if the leader for partition is alive. If yes, it is in Online state, else it is in Offline state</span>
+          <span class="token keyword">if</span> <span class="token punctuation">(</span>controllerContext<span class="token punctuation">.</span>isReplicaOnline<span class="token punctuation">(</span>currentLeaderIsrAndEpoch<span class="token punctuation">.</span>leaderAndIsr<span class="token punctuation">.</span>leader<span class="token punctuation">,</span> topicPartition<span class="token punctuation">)</span><span class="token punctuation">)</span>
+          <span class="token comment">// leader is alive</span>
+            controllerContext<span class="token punctuation">.</span>putPartitionState<span class="token punctuation">(</span>topicPartition<span class="token punctuation">,</span> OnlinePartition<span class="token punctuation">)</span>
+          <span class="token keyword">else</span>
+            controllerContext<span class="token punctuation">.</span>putPartitionState<span class="token punctuation">(</span>topicPartition<span class="token punctuation">,</span> OfflinePartition<span class="token punctuation">)</span>
+        <span class="token keyword">case</span> None <span class="token keyword">=&gt;</span>
+          controllerContext<span class="token punctuation">.</span>putPartitionState<span class="token punctuation">(</span>topicPartition<span class="token punctuation">,</span> NewPartition<span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h2>
+<a id="kafkacontrollerPartitionStateMachinetriggerOnlinePartitionStateChange_249"></a>kafka.controller.PartitionStateMachine#triggerOnlinePartitionStateChange</h2> 
+<pre><code class="prism language-scala">    <span class="token comment">//……省略若干代码</span>
+    <span class="token keyword">override</span> <span class="token keyword">def</span> handleStateChanges<span class="token punctuation">(</span>
+        partitions<span class="token operator">:</span> Seq<span class="token punctuation">[</span>TopicPartition<span class="token punctuation">]</span><span class="token punctuation">,</span>
+        targetState<span class="token operator">:</span> PartitionState<span class="token punctuation">,</span>
+        partitionLeaderElectionStrategyOpt<span class="token operator">:</span> Option<span class="token punctuation">[</span>PartitionLeaderElectionStrategy<span class="token punctuation">]</span>
+        <span class="token punctuation">)</span><span class="token operator">:</span> Map<span class="token punctuation">[</span>TopicPartition<span class="token punctuation">,</span> Either<span class="token punctuation">[</span>Throwable<span class="token punctuation">,</span> LeaderAndIsr<span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>partitions<span class="token punctuation">.</span>nonEmpty<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            controllerBrokerRequestBatch<span class="token punctuation">.</span>newBatch<span class="token punctuation">(</span>
+            <span class="token comment">//5.2.1 处理NewPartition及OfflinePartition状态的数据，将其置为上线状态</span>
+            <span class="token keyword">val</span> result <span class="token operator">=</span> doHandleStateChanges<span class="token punctuation">(</span>
+              partitions<span class="token punctuation">,</span>
+              targetState<span class="token punctuation">,</span>
+              partitionLeaderElectionStrategyOpt
+            <span class="token punctuation">)</span>
+            <span class="token comment">//5.2.2 批量发送请求</span>
+            controllerBrokerRequestBatch<span class="token punctuation">.</span>sendRequestsToBrokers<span class="token punctuation">(</span>controllerContext<span class="token punctuation">.</span>epoch<span class="token punctuation">)</span>
+            result
+          <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">case</span> e<span class="token operator">:</span> ControllerMovedException <span class="token keyword">=&gt;</span>
+              error<span class="token punctuation">(</span>s<span class="token string">"Controller moved to another broker when moving some partitions to $targetState state"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+              <span class="token keyword">throw</span> e
+            <span class="token keyword">case</span> e<span class="token operator">:</span> Throwable <span class="token keyword">=&gt;</span>
+              error<span class="token punctuation">(</span>s<span class="token string">"Error while moving some partitions to $targetState state"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+              partitions<span class="token punctuation">.</span>iterator<span class="token punctuation">.</span>map<span class="token punctuation">(</span>_ <span class="token operator">-&gt;</span> Left<span class="token punctuation">(</span>e<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>toMap
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+          Map<span class="token punctuation">.</span>empty
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="doHandleStateChanges_282"></a>着重分析doHandleStateChanges方法</h3> 
+<p>分区状态机总共有四种状态，具体见图四。<br> <img src="https://images2.imgbox.com/14/0f/vaDnMEUT_o.png" alt="图四"></p> 
+<pre><code class="prism language-scala"><span class="token keyword">private</span> <span class="token keyword">def</span> doHandleStateChanges<span class="token punctuation">(</span>
+    partitions<span class="token operator">:</span> Seq<span class="token punctuation">[</span>TopicPartition<span class="token punctuation">]</span><span class="token punctuation">,</span>
+    targetState<span class="token operator">:</span> PartitionState<span class="token punctuation">,</span>
+    partitionLeaderElectionStrategyOpt<span class="token operator">:</span> Option<span class="token punctuation">[</span>PartitionLeaderElectionStrategy<span class="token punctuation">]</span>
+  <span class="token punctuation">)</span><span class="token operator">:</span> Map<span class="token punctuation">[</span>TopicPartition<span class="token punctuation">,</span> Either<span class="token punctuation">[</span>Throwable<span class="token punctuation">,</span> LeaderAndIsr<span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">val</span> stateChangeLog <span class="token operator">=</span> stateChangeLogger<span class="token punctuation">.</span>withControllerEpoch<span class="token punctuation">(</span>controllerContext<span class="token punctuation">.</span>epoch<span class="token punctuation">)</span>
+    <span class="token comment">//校验原状态是否能流转到目标状态</span>
+    partitions<span class="token punctuation">.</span>foreach<span class="token punctuation">(</span>partition <span class="token keyword">=&gt;</span> controllerContext<span class="token punctuation">.</span>putPartitionStateIfNotExists<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> NonExistentPartition<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">val</span> <span class="token punctuation">(</span>validPartitions<span class="token punctuation">,</span> invalidPartitions<span class="token punctuation">)</span> <span class="token operator">=</span> controllerContext<span class="token punctuation">.</span>checkValidPartitionStateChange<span class="token punctuation">(</span>partitions<span class="token punctuation">,</span> targetState<span class="token punctuation">)</span>
+    invalidPartitions<span class="token punctuation">.</span>foreach<span class="token punctuation">(</span>partition <span class="token keyword">=&gt;</span> logInvalidTransition<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> targetState<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+    targetState <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token keyword">case</span> NewPartition <span class="token keyword">=&gt;</span>
+        validPartitions<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> partition <span class="token keyword">=&gt;</span>
+          stateChangeLog<span class="token punctuation">.</span>trace<span class="token punctuation">(</span>s<span class="token string">"Changed partition $partition state from ${partitionState(partition)} to $targetState with "</span> <span class="token operator">+</span>
+            s<span class="token string">"assigned replicas ${controllerContext.partitionReplicaAssignment(partition).mkString("</span><span class="token punctuation">,</span><span class="token string">")}"</span><span class="token punctuation">)</span>
+          <span class="token comment">//在内存中标记状态</span>
+          controllerContext<span class="token punctuation">.</span>putPartitionState<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> NewPartition<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        Map<span class="token punctuation">.</span>empty
+      <span class="token keyword">case</span> OnlinePartition <span class="token keyword">=&gt;</span>
+        <span class="token keyword">val</span> uninitializedPartitions <span class="token operator">=</span> validPartitions<span class="token punctuation">.</span>filter<span class="token punctuation">(</span>partition <span class="token keyword">=&gt;</span> partitionState<span class="token punctuation">(</span>partition<span class="token punctuation">)</span> <span class="token operator">==</span> NewPartition<span class="token punctuation">)</span>
+        <span class="token keyword">val</span> partitionsToElectLeader <span class="token operator">=</span> validPartitions<span class="token punctuation">.</span>filter<span class="token punctuation">(</span>partition <span class="token keyword">=&gt;</span> partitionState<span class="token punctuation">(</span>partition<span class="token punctuation">)</span> <span class="token operator">==</span> OfflinePartition <span class="token operator">||</span> partitionState<span class="token punctuation">(</span>partition<span class="token punctuation">)</span> <span class="token operator">==</span> OnlinePartition<span class="token punctuation">)</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>uninitializedPartitions<span class="token punctuation">.</span>nonEmpty<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token comment">//指定了第一个存活的副本为leader，将数据写入zk，路径为brokers/topics/对应的topic/partitions/对应的partition/state，并更新cache</span>
+          <span class="token comment">// 中的partitionLeadershipInfo数据</span>
+          <span class="token keyword">val</span> successfulInitializations <span class="token operator">=</span> initializeLeaderAndIsrForPartitions<span class="token punctuation">(</span>uninitializedPartitions<span class="token punctuation">)</span>
+          successfulInitializations<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> partition <span class="token keyword">=&gt;</span>
+            stateChangeLog<span class="token punctuation">.</span>trace<span class="token punctuation">(</span>s<span class="token string">"Changed partition $partition from ${partitionState(partition)} to $targetState with state "</span> <span class="token operator">+</span>
+              s<span class="token string">"${controllerContext.partitionLeadershipInfo(partition).leaderAndIsr}"</span><span class="token punctuation">)</span>
+            <span class="token comment">//更新分区状态</span>
+            controllerContext<span class="token punctuation">.</span>putPartitionState<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> OnlinePartition<span class="token punctuation">)</span>
+          <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token comment">//处理由OfflinePartition或OnlinePartition转变为OnlinePartition状态的数据</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>partitionsToElectLeader<span class="token punctuation">.</span>nonEmpty<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">val</span> electionResults <span class="token operator">=</span> electLeaderForPartitions<span class="token punctuation">(</span>
+            partitionsToElectLeader<span class="token punctuation">,</span>
+            partitionLeaderElectionStrategyOpt<span class="token punctuation">.</span>getOrElse<span class="token punctuation">(</span>
+              <span class="token keyword">throw</span> <span class="token keyword">new</span> IllegalArgumentException<span class="token punctuation">(</span><span class="token string">"Election strategy is a required field when the target state is OnlinePartition"</span><span class="token punctuation">)</span>
+            <span class="token punctuation">)</span>
+          <span class="token punctuation">)</span>
+          <span class="token comment">//leader选取完成之后更新cache中的partitionStates信息</span>
+          electionResults<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">case</span> <span class="token punctuation">(</span>partition<span class="token punctuation">,</span> Right<span class="token punctuation">(</span>leaderAndIsr<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+              stateChangeLog<span class="token punctuation">.</span>trace<span class="token punctuation">(</span>
+                s<span class="token string">"Changed partition $partition from ${partitionState(partition)} to $targetState with state $leaderAndIsr"</span>
+              <span class="token punctuation">)</span>
+              controllerContext<span class="token punctuation">.</span>putPartitionState<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> OnlinePartition<span class="token punctuation">)</span>
+            <span class="token keyword">case</span> <span class="token punctuation">(</span>_<span class="token punctuation">,</span> Left<span class="token punctuation">(</span>_<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> <span class="token comment">// Ignore; no need to update partition state on election error</span>
+          <span class="token punctuation">}</span>
+
+          electionResults
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+          Map<span class="token punctuation">.</span>empty
+        <span class="token punctuation">}</span>
+      <span class="token keyword">case</span> OfflinePartition <span class="token keyword">=&gt;</span>
+        validPartitions<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> partition <span class="token keyword">=&gt;</span>
+          stateChangeLog<span class="token punctuation">.</span>trace<span class="token punctuation">(</span>s<span class="token string">"Changed partition $partition state from ${partitionState(partition)} to $targetState"</span><span class="token punctuation">)</span>
+          <span class="token comment">//只改变了内存中的分区状态</span>
+          controllerContext<span class="token punctuation">.</span>putPartitionState<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> OfflinePartition<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        Map<span class="token punctuation">.</span>empty
+      <span class="token keyword">case</span> NonExistentPartition <span class="token keyword">=&gt;</span>
+        validPartitions<span class="token punctuation">.</span>foreach <span class="token punctuation">{<!-- --></span> partition <span class="token keyword">=&gt;</span>
+          stateChangeLog<span class="token punctuation">.</span>trace<span class="token punctuation">(</span>s<span class="token string">"Changed partition $partition state from ${partitionState(partition)} to $targetState"</span><span class="token punctuation">)</span>
+          <span class="token comment">//只改变了内存中的分区状态</span>
+          controllerContext<span class="token punctuation">.</span>putPartitionState<span class="token punctuation">(</span>partition<span class="token punctuation">,</span> NonExistentPartition<span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+        Map<span class="token punctuation">.</span>empty
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="OnlinePartitionelectLeaderForPartitions_360"></a>重点看一下OnlinePartition中的electLeaderForPartitions方法</h3> 
+<pre><code>分区选举leader总共有四种策略，在以下代码中我都做了说明，第一个离线分区选举策略就是初始化使用的策略，默认allowUnclean为false，但如果在topic中的配置是允许的，那也可选择除了isr以外的副本作为leader
+</code></pre> 
+<pre><code class="prism language-scala">    <span class="token comment">//……省略若干代码</span>
+    <span class="token keyword">val</span> <span class="token punctuation">(</span>partitionsWithoutLeaders<span class="token punctuation">,</span> partitionsWithLeaders<span class="token punctuation">)</span> <span class="token operator">=</span> partitionLeaderElectionStrategy <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//离线分区leader选举策略：优先选取isr中还存活的第一个副本作为leader，如果传入的allowUnclean为true或者topic中的配置允许选举，则可选其他副本作为leader</span>
+      <span class="token keyword">case</span> OfflinePartitionLeaderElectionStrategy<span class="token punctuation">(</span>allowUnclean<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>
+        <span class="token keyword">val</span> partitionsWithUncleanLeaderElectionState <span class="token operator">=</span> collectUncleanLeaderElectionState<span class="token punctuation">(</span>
+          validLeaderAndIsrs<span class="token punctuation">,</span>
+          allowUnclean
+        <span class="token punctuation">)</span>
+        leaderForOffline<span class="token punctuation">(</span>controllerContext<span class="token punctuation">,</span> partitionsWithUncleanLeaderElectionState<span class="token punctuation">)</span><span class="token punctuation">.</span>partition<span class="token punctuation">(</span>_<span class="token punctuation">.</span>leaderAndIsr<span class="token punctuation">.</span>isEmpty<span class="token punctuation">)</span>
+      <span class="token keyword">case</span> ReassignPartitionLeaderElectionStrategy <span class="token keyword">=&gt;</span>
+        <span class="token comment">//分区重分配leader选举策略：选取isr中还存活的第一个副本作为leader</span>
+        leaderForReassign<span class="token punctuation">(</span>controllerContext<span class="token punctuation">,</span> validLeaderAndIsrs<span class="token punctuation">)</span><span class="token punctuation">.</span>partition<span class="token punctuation">(</span>_<span class="token punctuation">.</span>leaderAndIsr<span class="token punctuation">.</span>isEmpty<span class="token punctuation">)</span>
+      <span class="token keyword">case</span> PreferredReplicaPartitionLeaderElectionStrategy <span class="token keyword">=&gt;</span>
+        <span class="token comment">//优先分区副本选举策略：是一定要ar中的第一个副本且在isr中且存活才能作为leader</span>
+        leaderForPreferredReplica<span class="token punctuation">(</span>controllerContext<span class="token punctuation">,</span> validLeaderAndIsrs<span class="token punctuation">)</span><span class="token punctuation">.</span>partition<span class="token punctuation">(</span>_<span class="token punctuation">.</span>leaderAndIsr<span class="token punctuation">.</span>isEmpty<span class="token punctuation">)</span>
+      <span class="token keyword">case</span> ControlledShutdownPartitionLeaderElectionStrategy <span class="token keyword">=&gt;</span>
+        <span class="token comment">//controller宕机分区leader选举策略：不在宕机broker之列的isr中还存活的第一个副本作为leader</span>
+        leaderForControlledShutdown<span class="token punctuation">(</span>controllerContext<span class="token punctuation">,</span> validLeaderAndIsrs<span class="token punctuation">)</span><span class="token punctuation">.</span>partition<span class="token punctuation">(</span>_<span class="token punctuation">.</span>leaderAndIsr<span class="token punctuation">.</span>isEmpty<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h1>
+<a id="_383"></a>总结</h1> 
+<h2>
+<a id="_384"></a>副本状态机总结</h2> 
+<ul><li>从状态图及源码分析来看我们大概可以猜到创建副本的流程及删除副本的过程，可能对ReplicaDeletionIneligible这个状态还能流转到上线或者下线状态有些疑问，咱们在做这里标记个todo，后面遇到了再来回顾</li></ul> 
+<h2>
+<a id="_386"></a>分区状态机总结</h2> 
+<ul><li>分区状态较为简单，里面稍微复杂点的就是选举leader的部分，里面针对选举leader的策略大部分都是优先存活且在isr中的副本为leader，只有离线分区选举策略才支持根据topic的配置判断是否允许非存活isr成为leader</li></ul>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

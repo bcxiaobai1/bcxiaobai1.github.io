@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>为什么在容器中 1 号进程挂不上 arthas？ - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">为什么在容器中 1 号进程挂不上 arthas？</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <p style="text-align:justify">最近在容器环境中，发现在 Java 进程是 1 号进程的情况下，无法使用 arthas。</p> 
+<p style="text-align:justify">提示 AttachNotSupportedException: Unable to get pid of LinuxThreads manager thread。具体操作和报错如下：</p> 
+<pre><code># java -jar arthas-boot.jar
+[INFO] arthas-boot version: 3.5.6
+[INFO] Found existing java process, please choose one and input the serial number of the process, eg : 1. Then hit ENTER.
+* [1]: 1 com.alibabacloud.mse.demo.ZuulApplication
+1
+[INFO] arthas home: /home/admin/.opt/ArmsAgent/arthas
+[INFO] Try to attach process 1
+[ERROR] Start arthas failed, exception stack trace:
+com.sun.tools.attach.AttachNotSupportedException: Unable to get pid of LinuxThreads manager thread
+    at sun.tools.attach.LinuxVirtualMachine.&lt;init&gt;(LinuxVirtualMachine.java:86)
+    at sun.tools.attach.LinuxAttachProvider.attachVirtualMachine(LinuxAttachProvider.java:78)
+    at com.sun.tools.attach.VirtualMachine.attach(VirtualMachine.java:250)
+    at com.taobao.arthas.core.Arthas.attachAgent(Arthas.java:117)
+    at com.taobao.arthas.core.Arthas.&lt;init&gt;(Arthas.java:27)
+    at com.taobao.arthas.core.Arthas.main(Arthas.java:166)
+[INFO] Attach process 1 success.</code></pre> 
+<p style="text-align:justify">之前也遇到过，总是调整了下镜像，让 Java 进程不是 1 号进程就可以了。但这个不是长久之计，还是要抽时间看下这个问题。</p> 
+<h3 style="text-align:justify">复现问题</h3> 
+<p style="text-align:justify">我们创建如下项目，来复现这个问题：</p> 
+<pre><code>public class Main {
+  public static void main(String args[]) throws Exception {
+    while (true) {
+      System.out.println("hello!");
+      Thread.sleep(30 * 1000);
+    }
+  }
+}</code></pre> 
+<p style="text-align:justify"></p> 
+<pre><code>FROM openjdk:8u212-jdk-alpine
+COPY ./ /app
+WORKDIR /app/src/main/java/
+RUN javac Main.java
+CMD ["java", "Main"]</code></pre> 
+<p style="text-align:justify">然后正常启动应用，并尝试用 arthas，或者 jstack：</p> 
+<pre><code>$ # 构建镜像
+$ docker build . -t example-attach
+$ # 启动容器
+$ docker run --name example-attach --rm example-attach
+
+$ # 在另一个终端进入容器，执行jstack
+$ docker exec -it example-attach sh
+/app/src/main/java # jstack 1
+1: Unable to get pid of LinuxThreads manager thread</code></pre> 
+<p style="text-align:justify">成功复现问题！接下来开始分析。</p> 
+<h3 style="text-align:justify">正常的 attach 流程是什么样子的？</h3> 
+<p style="text-align:justify">如下是在排查问题中，梳理出来的 jvm Attach 流程：</p> 
+<ol>
+<li style="text-align:justify">查找 /tmp/.java_pid${pid} 这个 unix socket，如果存在则检查权限，然后建立连接。</li>
+<li style="text-align:justify">如果不存在则先创建 /proc/${pid}/cwd/.attach_pid${pid}，开始通知 jvm 线程。</li>
+<li style="text-align:justify">首先判断是不是 LinuxThread如果是 LinuxThread则找到 LinuxThreadsManager，然后给其所有子进程发送 SIGQUIT.</li>
+<li style="text-align:justify">如果不是 LinuxThread，则直接给目标进程发送 SIGQUIT。</li>
+<li style="text-align:justify">目标进程收到信号后，创建 Attach Listener，监听 /tmp/.java_pid${pid}。</li>
+<li style="text-align:justify">开始正常的 socket 通信，根据通信的具体内容，可以是 dumpThread（jstack），也可以是加载 JavaAgent，比如上面提到的 arthas。</li>
+</ol> 
+<p style="text-align:justify"><strong>Java Attach 机制之 Native 篇[1]</strong>也是一个不错的 attach API 解析。</p> 
+<h3 style="text-align:justify">为什么对1号进程 attach 会报错？</h3> 
+<p style="text-align:justify">首先，/tmp/.java_pid${pid} 当时是肯定不存在的，如果存在就是直接通信加载 Arthas 了。也可以通过查看文件来确认这一点。</p> 
+<p style="text-align:justify">其次，.attach_pid${pid} 文件也是能够创建成功的，</p> 
+<p style="text-align:justify">我们也可以通过 strace 输出来确认：</p> 
+<p style="text-align:justify">open("/proc/424/cwd/.attach_pid424", O_RDWR|O_CREAT|O_EXCL|O_LARGEFILE, 0666 &lt;unfinished ...&gt;。</p> 
+<p style="text-align:justify">最有可能的原因就是线程判断、发送信号这一步了，我们以 jstack 为例查找为什么 attach 会失败。</p> 
+<p style="text-align:justify">本来类似<a href="https://link.zhihu.com/?target=http%3A//mp.weixin.qq.com/s%3Fspm%3Da2c6h.13046898.0.0.7f0d6ffa2XOZBc%26__biz%3DMzUzNzYxNjAzMg%3D%3D%26mid%3D2247548252%26idx%3D2%26sn%3Dfc1e31f55115315118998022b31c527d%26chksm%3Dfae63693cd91bf8501752194ae24f8e5d81394e05d9e8f10b1f5f3f6387da36e3b29a7f38a7a%26scene%3D21%23wechat_redirect" title="上一次的查找过程">上一次的查找过程</a>，想着通过调试符号来查，但是在 alpine 上的调试符号无法显示源码内容，编译环境又很麻烦。所以还是优先用 strace 来查，值得注意的是， jstack 的逻辑中有 fork，所以记得使用 strace -f jstack 1 来查。</p> 
+<p style="text-align:justify">查了下 strace 的输出，没有 kill 请求。看来问题是处在线程模型判定的。</p> 
+<p style="text-align:justify">刚刚提到 jvm 会判断是不是 LinuxThread，那么什么是 LinuxThread 呢？首先看下判断的源码：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/e2/b1/VOM5iOrH_o.png"></p> 
+<p style="text-align:justify">通俗的讲，Linux 内核刚开始是不支持“线程”的，LinuxThread 机制就是通过 fork 机制+共享内存空间的方式来实现线程。但 LinuxThread 在内核看来就是一些独立的父子进程，在信号处理、同步原语上有很多缺陷，要通过 manager thread 来处理这些逻辑。后来 Red Hat 发起 NPTL，内核开始支持线程能力，也能够通过更加标准的方式来处理信号、同步等逻辑。</p> 
+<p style="text-align:justify">可以用 getconf GNU_LIBPTHREAD_VERSION 来查看是哪种线程模型，比如我的机器上输出是 NPTL 2.34。</p> 
+<p style="text-align:justify">当然，如上面代码所写。可以用 confstr(_CS_GNU_LIBPTHREAD_VERSION,) 来获取当前的线程模型，<strong>详情参考手册[2]</strong>。</p> 
+<ul>
+<li style="text-align:justify">如果 confstr(_CS_GNU_LIBPTHREAD_VERSION,) 返回 0，则表示是 glibc 旧版本，认为是 LinuxThread：先找到 manager thread（通过查找父进程），然后给各个子进程发送 SIGQUIT 信号（这个过程需要遍历系统内所有进程）。</li>
+<li style="text-align:justify">如果 confstr(_CS_GNU_LIBPTHREAD_VERSION,) 结果包含 NPTL，则认为不是 LinuxThread，按照 NPTL 来处理：直接发送 SIGQUIT。</li>
+</ul> 
+<p style="text-align:justify">但很可惜的是，LinuxThread/confstr(_CS_GNU_LIBPTHREAD_VERSION,) 不是 POSIX 标准，所以 Alpine 自带的 musl 对这个调用返回 0。</p> 
+<p style="text-align:justify">按照上面逻辑，jvm 会认为是 LinuxThread，尝试找到父进程，如果 pid 是 1 的话，自然找不到父进程，所以报错 Unable to get pid of LinuxThreads manager thread，导致文章最开始说的 arthas 无法使用。</p> 
+<p style="text-align:justify">关于两种线程模型的详细比较，可以参考 <strong>Linux 线程模型比较：LinuxThreads 和 NPTL[3]</strong>。</p> 
+<h3 style="text-align:justify">为什么非1号进程就能 attach？</h3> 
+<p style="text-align:justify">模拟了下先手动进入 shell（这时 sh 就是 1 号进程），然后再手动执行 java Main（pid为 8 ），然后我们看下 getLinuxThreadsManager 是怎么表现的：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/28/1f/WGOwfTmE_o.png"></p> 
+<p style="text-align:justify">可以看到，在这种情况下，jvm 认为 manager thread 是 1 号进程。此时会后执行 sendQuitToChildrenOf(mpid)：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/36/fc/CJm1nCUd_o.png"></p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/c4/ad/qfePK4vH_o.png"></p> 
+<p style="text-align:justify">即遍历所有的子进程，都发送 SIGQUIT，这个逻辑其实是有点奇怪的。<strong>“超凡的主张，需要有超凡的证据”[4]</strong>。我们重新跑一遍，用 strace -f 验证一下。</p> 
+<p style="text-align:justify">进程树（其中绿色的是线程）：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/9f/77/izjrpGeF_o.png"></p> 
+<p style="text-align:justify">jstack 发送的 kill 信号，可以看到 jstack 给 1 号进程的所有子进程发送了 SIGQUIT：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/e3/37/t2esEzk0_o.png"></p> 
+<p style="text-align:justify">这个行为和刚刚分析是一致的。不过非常巧合的是，大部分进程是忽略了 SIGQUIT 信号的，所以在这种情况下，jstack 反而是正常工作了的。</p> 
+<h3 style="text-align:justify">怎么解决这个问题？</h3> 
+<h4 style="text-align:justify">最快捷 workaround</h4> 
+<blockquote>
+  注：这种方式不需要调整容器参数，不需要重启容器，比较推荐。 
+</blockquote> 
+<p style="text-align:justify">既然 attach 主要卡在了发送信号上，那我们就用 shell 来模拟这个流程：</p> 
+<pre><code>pid=1 ;
+touch /proc/${pid}/cwd/.attach_pid${pid} &amp;&amp; 
+  kill -SIGQUIT ${pid} &amp;&amp; 
+  sleep 2 &amp;&amp;
+  ls /proc/${pid}/root/tmp/.java_pid${pid}
+# 接下来就可以正常 java -jar arthas-boot.jar 挂arthas了</code></pre> 
+<p style="text-align:justify">通过上面的操作后，Attach Listener 已经启动并且监听了路径，第二次 attach 就直接可以连接了；就可以按照正常的方式使用 arthas 了。</p> 
+<p style="text-align:justify"><strong>其中有一点需要注意，一定需要提前创建 .attach_pid${pid} 文件，</strong>不然 jvm 会将这个信号交给默认的 sigaction 处理，对于 pid 1 来说，会导致容器退出！</p> 
+<p style="text-align:justify">也有人基于类似原理，做了一个 <strong>jattach[5] </strong>工具，可以直接在 Alpine 中，通过 apk add jattach 来安装，然后 jattach ${pid} properties，也能起到一样的效果。</p> 
+<h4 style="text-align:justify">设置启动参数</h4> 
+<blockquote>
+  注：这种方式需要调整启动参数或者环境变量，需要重启应用/容器，可能会丢失业务现场。 
+</blockquote> 
+<p style="text-align:justify">Jvm 支持设置 -XX:+StartAttachListener，这样就能在启动 Jvm 的时候，自动启动 Attach Listener 线程并监听，也可以正常使用 arthas。</p> 
+<p style="text-align:justify">对于容器环境下，更加容易的做法是给容器添加环境变量 JAVA_TOOL_OPTIONS=-XX:+StartAttachListener，这样不用修改启动脚本也能达到效果。</p> 
+<h4 style="text-align:justify">上游优先，修改镜像</h4> 
+<blockquote>
+  注：这种方式需要修改镜像。 
+</blockquote> 
+<p style="text-align:justify">OpenJDK 8 官方没有修复这个问题，所以如果直接使用 openjdk:8-jdk-alpine，是避免不了这个问题的。<strong>Docker 镜像仓库也有人讨论这个问题[6]</strong>。</p> 
+<p style="text-align:justify">OpenJDK 11 就已经解决了这个问题了（见<strong>源码[7]</strong>），不再对古旧的 LinuxThread 模型做判断，这样 arthas 也能工作。</p> 
+<p style="text-align:justify">不过 Alpine 官方仓库中的 OpenJDK 8 已经通过自己打 patch 的方式，修复了这个问题：</p> 
+<p style="text-align:justify"><u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//gitlab.alpinelinux.org/alpine/aports/-/issues/13032" title="https://gitlab.alpinelinux.org/alpine/aports/-/issues/13032">https://gitlab.alpinelinux.org/alpine/aports/-/issues/13032</a></em></u></em></u></p> 
+<p style="text-align:justify">作为比较知名的 JDK 发行版，也在 eclipse-temurin:8-jdk-alpine 中修复了这个问题，可以直接使用这个镜像。相关讨论见：<u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//github.com/adoptium/jdk8u/pull/8" title="https://github.com/adoptium/jdk8u/pull/8">https://github.com/adoptium/jdk8u/pull/8</a></em></u></em></u></p> 
+<h3 style="text-align:justify">总结</h3> 
+<p style="text-align:justify">在 arthas 的 issue 中，或者网上相关的文章中，总是重复着 Java 不能作为 1 号进程。很多时候，就因为如此，我们没有办法挂上诊断工具，导致现场丢失，故障原因不能及时定位。</p> 
+<p style="text-align:justify">作为技术人员还是需要了解底层，这样在排查问题、架构设计上才会有更多自由度，更能够抓住问题、解决问题。</p> 
+<p style="text-align:justify">后续还会出系列文章，来解决容器环境下奇奇怪怪的 jvm 问题，欢迎关注！</p> 
+<h3 style="text-align:justify">相关链接</h3> 
+<p style="text-align:justify">[1] Java Attach 机制之 Native 篇</p> 
+<p style="text-align:justify"><u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//my.oschina.net/u/3784034/blog/5526214" title="https://my.oschina.net/u/3784034/blog/5526214">https://my.oschina.net/u/3784034/blog/5526214</a></em></u></em></u></p> 
+<p style="text-align:justify">[2] 详情参考手册</p> 
+<p style="text-align:justify"><u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//man7.org/linux/man-pages/man3/confstr.3.html" title="https://man7.org/linux/man-pages/man3/confstr.3.html">https://man7.org/linux/man-pages/man3/confstr.3.html</a></em></u></em></u></p> 
+<p style="text-align:justify">[3] Linux 线程模型比较：LinuxThreads 和 NPTL</p> 
+<p style="text-align:justify"><u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//www.jianshu.com/p/6c507b966ad1" title="https://www.jianshu.com/p/6c507b966ad1">https://www.jianshu.com/p/6c507b966ad1</a></em></u></em></u></p> 
+<p style="text-align:justify">[4] 超凡的主张，需要有超凡的证据</p> 
+<p style="text-align:justify"><u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//zh.wikipedia.org/zh-hans/%2525E8%252596%2525A9%2525E6%2525A0%2525B9%2525E6%2525A8%252599%2525E6%2525BA%252596" title="https://zh.wikipedia.org/zh-hans/%E8%96%A9%E6%A0%B9%E6%A8%99%E6%BA%96">https://zh.wikipedia.org/zh-hans/%E8%96%A9%E6%A0%B9%E6%A8%99%E6%BA%96</a></em></u></em></u></p> 
+<p style="text-align:justify">[5] jattach</p> 
+<p style="text-align:justify"><u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//github.com/apangin/jattach" title="https://github.com/apangin/jattach">https://github.com/apangin/jattach</a></em></u></em></u></p> 
+<p style="text-align:justify">[6] Docker 镜像仓库也有人讨论这个问题</p> 
+<p style="text-align:justify"><u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//github.com/docker-library/openjdk/issues/76" title="https://github.com/docker-library/openjdk/issues/76">https://github.com/docker-library/openjdk/issues/76</a></em></u></em></u></p> 
+<p style="text-align:justify">[7] 源码</p> 
+<p style="text-align:justify"><u><em><u><em><a href="https://link.zhihu.com/?target=https%3A//github.com/openjdk/jdk11u/blob/jdk-11%25252B28/src/jdk.attach/linux/classes/sun/tools/attach/VirtualMachineImpl.java%23L78" title="https://github.com/openjdk/jdk11u/blob/jdk-11%2B28/src/jdk.attach/linux/classes/sun/tools/attach/VirtualMachineImpl.java#L78">https://github.com/openjdk/jdk11u/blob/jdk-11%2B28/src/jdk.attach/linux/classes/sun/tools/attach/VirtualMachineImpl.java#L78</a></em></u></em></u></p> 
+<p style="text-align:justify">作者：卜比</p> 
+<p style="text-align:justify"><strong><strong><a href="https://link.zhihu.com/?target=https%3A//click.aliyun.com/m/1000368270/" title="原文链接">原文链接</a></strong></strong></p> 
+<p style="text-align:justify"><strong>本文为阿里云原创内容，未经允许不得转载。</strong></p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

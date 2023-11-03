@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>单线程事件处理器ControllerEventManager - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">单线程事件处理器ControllerEventManager</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-tomorrow-night">
+                    
+                        
+                    
+                    <h2>
+<a id="0__1"></a>0 前言</h2> 
+<p>单线程事件处理器，Controller端定义的一个组件。该组件内置了一个专属线程，负责处理其他线程发送过来的Controller事件。还定义了一些管理方法，为专属线程输送待处理事件。</p> 
+<ul>
+<li>0.11.0.0版本前，Controller组件源码复杂。集群元数据信息在程序中同时被多个线程访问，因此，源码里有大量Monitor锁、Lock锁或其他线程安全机制，导致晦涩难懂，改动困难</li>
+<li>0.11.0.0版本开始，社区重构Controller代码结构。将多线程并发访问改为单线程的事件队列方式。并非说Controller只有一个线程，而是指对局部状态的访问限制在一个专属线程，即让这个特定线程排他操作Controller元数据信息</li>
+</ul> 
+<p>这就无需担心多线程访问引发的各种线程安全问题，简化Controller端代码。</p> 
+<h2>
+<a id="1__10"></a>1 基本概念</h2> 
+<p>Controller单线程事件队列处理模型及其基础组件。<br> <img src="https://images2.imgbox.com/67/70/LWDIUrmt_o.png" alt="">Controller端多线程向事件队列写入不同种类事件，如zk端注册的Watcher线程、KafkaRequestHandler线程、Kafka定时任务线程等。</p> 
+<p>事件队列的另一端，只有一个名为ControllerEventThread的线程，负责“消费”或处理队列中的事件。</p> 
+<p>即单线程事件队列模型。</p> 
+<h2>
+<a id="2__19"></a>2 相关类</h2> 
+<h3>
+<a id="21_ControllerEventProcessor_21"></a>2.1 ControllerEventProcessor</h3> 
+<p>Controller端的事件处理器接口：<br> <img src="https://images2.imgbox.com/8c/be/vMq4uNuw_o.png" alt=""></p> 
+<h4>
+<a id="API_26"></a>API</h4> 
+<h5>
+<a id="process_28"></a>process</h5> 
+<p>接收一个Controller事件，并进行普通处理。实现Controller事件处理的主要方法</p> 
+<h5>
+<a id="preempt_32"></a>preempt</h5> 
+<p>接收一个Controller事件，并抢占队列之前的Controller事件，进行优先处理。Kafka用其实现某些高优先级事件的抢占处理，目前在源码中也只有两类事件（ShutdownEventThread和Expire）需抢占式处理</p> 
+<p>KafkaController类是Controller组件的功能实现类，ControllerEventProcessor的唯一实现类。<br> <img src="https://images2.imgbox.com/d7/5d/38xUXant_o.png" alt=""></p> 
+<h3>
+<a id="22_ControllerEvent_39"></a>2.2 ControllerEvent</h3> 
+<p>Controller事件，即事件队列中被处理的对象，对应ControllerEvent接口<br> <img src="https://images2.imgbox.com/e0/ac/U6jAyn2j_o.png" alt=""><br> 每个ControllerEvent都定义了一个状态。Controller处理具体事件时，会更新状态。<br> 状态由ControllerState定义：<br> <img src="https://images2.imgbox.com/4f/12/OZEswjye_o.png" alt=""><br> 每类ControllerState都定义一个value值，表示Controller状态的序号，从0开始。<br> rateAndTimeMetricName方法用于构造Controller状态速率的监控指标名称。</p> 
+<p>如TopicChange是一类ControllerState：主题总数发生变化。</p> 
+<p>监控这类状态变更速率，rateAndTimeMetricName方法会定义名为TopicChangeRateAndTimeMs的指标。<br> 并非所有ControllerState都有对应速率监控指标，如表示空闲状态的Idle无对应指标。</p> 
+<p>Controller总共定义了25类事件和17种状态：<br> <img src="https://images2.imgbox.com/0a/08/JNHa6vBF_o.png" alt=""></p> 
+<p>监控到某些Controller状态变更速率异常时，可通过该表，快速确定可能造成瓶颈的Controller事件，并定位处理函数，辅助排查。</p> 
+<p>多个ControllerEvent可能属相同的ControllerState。</p> 
+<h3>
+<a id="23_ControllerEventManager_61"></a>2.3 ControllerEventManager</h3> 
+<p>事件处理器，创建和管理ControllerEventThread。位于ControllerEventManager.scala，该文件的组成：</p> 
+<ul>
+<li>ControllerEventManager Object<br> 保存一些字符串常量，如线程名称<br> <img src="https://images2.imgbox.com/03/e4/qjUXsmP9_o.png" alt="">
+</li>
+<li>ControllerEventProcessor<br> 事件处理器接口，目前只有KafkaController实现该接口</li>
+<li>QueuedEvent<br> 事件队列上的事件对象</li>
+<li>ControllerEventManager Class<br> ControllerEventManager的伴生类，主要创建和管理事件处理线程和事件队列。该类定义了ControllerEventThread线程类。</li>
+</ul> 
+<p>ControllerEventManager对象仅定义了3个公共变量。</p> 
+<h4>
+<a id="QueuedEvent_77"></a>QueuedEvent</h4> 
+<pre><code class="prism language-scala"><span class="token comment">// 每个QueuedEvent定义了两个字段</span>
+<span class="token comment">// event: ControllerEvent类，表示Controller事件</span>
+<span class="token comment">// enqueueTimeMs：表示Controller事件被放入到事件队列的时间戳</span>
+<span class="token keyword">class</span> QueuedEvent<span class="token punctuation">(</span><span class="token keyword">val</span> event<span class="token operator">:</span> ControllerEvent<span class="token punctuation">,</span>
+                  <span class="token keyword">val</span> enqueueTimeMs<span class="token operator">:</span> <span class="token builtin">Long</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 标识事件是否开始被处理</span>
+  <span class="token keyword">val</span> processingStarted <span class="token operator">=</span> <span class="token keyword">new</span> CountDownLatch<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+  
+  <span class="token comment">// 标识事件是否被处理过</span>
+  <span class="token keyword">val</span> spent <span class="token operator">=</span> <span class="token keyword">new</span> AtomicBoolean<span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span>
+  
+  <span class="token comment">// 处理事件</span>
+  <span class="token keyword">def</span> process<span class="token punctuation">(</span>processor<span class="token operator">:</span> ControllerEventProcessor<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>spent<span class="token punctuation">.</span>getAndSet<span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+      <span class="token keyword">return</span>
+    processingStarted<span class="token punctuation">.</span>countDown<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    processor<span class="token punctuation">.</span>process<span class="token punctuation">(</span>event<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token comment">// 抢占式处理事件</span>
+  <span class="token keyword">def</span> preempt<span class="token punctuation">(</span>processor<span class="token operator">:</span> ControllerEventProcessor<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>spent<span class="token punctuation">.</span>getAndSet<span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+      <span class="token keyword">return</span>
+    processor<span class="token punctuation">.</span>preempt<span class="token punctuation">(</span>event<span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token comment">// 阻塞等待事件被处理完成</span>
+  <span class="token keyword">def</span> awaitProcessing<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    processingStarted<span class="token punctuation">.</span>await<span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+  
+  <span class="token keyword">override</span> <span class="token keyword">def</span> toString<span class="token operator">:</span> <span class="token builtin">String</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string-interpolation"><span class="token id function">s</span><span class="token string">"QueuedEvent(event=</span><span class="token interpolation"><span class="token punctuation">$</span><span class="token expression">event</span></span><span class="token string">, enqueueTimeMs=</span><span class="token interpolation"><span class="token punctuation">$</span><span class="token expression">enqueueTimeMs</span></span><span class="token string">)"</span></span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>每个QueuedEvent对象实例都裹挟了一个ControllerEvent。<br> 在QueuedEvent中，用CountDownLatch来做各种条件控制，比如用于侦测线程是否成功启动、成功关闭等。<br> QueuedEvent使用它的唯一目的，是确保Expire事件在建立ZooKeeper会话前被处理。<br> 若不是在该场景，则代码就用spent来标识该事件是否已被处理：</p> 
+<ul><li>若已被处理<br> 再次调用process方法时就会直接返回</li></ul> 
+<h3>
+<a id="24_ControllerEventThread_125"></a>2.4 ControllerEventThread</h3> 
+<p>专属的事件处理线程，唯一作用：处理不同种类的ControllEvent。<br> ControllerEventManager类内部定义的线程类。</p> 
+<p>消费QueuedEvent的ControllerEventThread类：<br> <img src="https://images2.imgbox.com/74/ee/gw9VamCI_o.png" alt=""><br> 继承自ShutdownableThread：<br> <img src="https://images2.imgbox.com/61/c0/1nz7lOPA_o.png" alt=""><br> <img src="https://images2.imgbox.com/33/13/PcVFU6Gb_o.png" alt=""><br> 该类会循环执行doWork，具体实现则由子类完成。</p> 
+<p>作为Controller唯一的事件处理线程，需关注该线程运行状态。必须要知道该线程在JVM上的名字，后续就能对其监控。<br> 线程名由ControllerEventManager Object中ControllerEventThreadName变量定义：<br> <img src="https://images2.imgbox.com/8f/e2/9flnNu2S_o.png" alt=""><br> ControllerEventThread#doWork</p> 
+<pre><code class="prism language-scala"><span class="token keyword">override</span> <span class="token keyword">def</span> doWork<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 从事件队列获取待处理的Controller事件（QueuedEvent对象实例），否则等待</span>
+  <span class="token keyword">val</span> dequeued <span class="token operator">=</span> queue<span class="token punctuation">.</span>take<span class="token punctuation">(</span><span class="token punctuation">)</span>
+  dequeued<span class="token punctuation">.</span>event <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 若是关闭线程事件，啥都不做。关闭线程由外部来执行</span>
+    <span class="token keyword">case</span> ShutdownEventThread <span class="token keyword">=&gt;</span>
+    <span class="token keyword">case</span> controllerEvent <span class="token keyword">=&gt;</span>
+      _state <span class="token operator">=</span> controllerEvent<span class="token punctuation">.</span>state
+      <span class="token comment">// 更新对应事件在队列中保存的时间</span>
+      eventQueueTimeHist<span class="token punctuation">.</span>update<span class="token punctuation">(</span>time<span class="token punctuation">.</span>milliseconds<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> dequeued<span class="token punctuation">.</span>enqueueTimeMs<span class="token punctuation">)</span>
+      <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">def</span> process<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> dequeued<span class="token punctuation">.</span>process<span class="token punctuation">(</span>processor<span class="token punctuation">)</span>
+        <span class="token comment">// 处理事件，同时计算处理速率</span>
+        rateAndTimeMetrics<span class="token punctuation">.</span>get<span class="token punctuation">(</span>state<span class="token punctuation">)</span> <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">case</span> Some<span class="token punctuation">(</span>timer<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span> timer<span class="token punctuation">.</span>time <span class="token punctuation">{<!-- --></span> process<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">}</span>
+          <span class="token keyword">case</span> None <span class="token keyword">=&gt;</span> process<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> e<span class="token operator">:</span> Throwable <span class="token keyword">=&gt;</span> error<span class="token punctuation">(</span><span class="token string-interpolation"><span class="token id function">s</span><span class="token string">"Uncaught error processing event </span><span class="token interpolation"><span class="token punctuation">$</span><span class="token expression">controllerEvent</span></span><span class="token string">"</span></span><span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+      <span class="token punctuation">}</span>
+      _state <span class="token operator">=</span> ControllerState<span class="token punctuation">.</span>Idle
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>首先是调用LinkedBlockingQueue#take，去。注意，这里用的是take方法，这说明，如果事件队列中没有QueuedEvent，那么，ControllerEventThread线程将一直处于阻塞状态，直到事件队列上插入了新的待处理事件。</p> 
+<p>一旦拿到QueuedEvent事件后，线程会判断是否是ShutdownEventThread事件。当ControllerEventManager关闭时，会显式地向事件队列中塞入ShutdownEventThread，表明要关闭ControllerEventThread线程。如果是该事件，那么ControllerEventThread什么都不用做，毕竟要关闭这个线程了。相反地，如果是其他的事件，就调用QueuedEvent的process方法执行对应的处理逻辑，同时计算事件被处理的速率。</p> 
+<p>该process方法底层调用ControllerEventProcessor#process：</p> 
+<pre><code class="prism language-scala"><span class="token keyword">def</span> process<span class="token punctuation">(</span>processor<span class="token operator">:</span> ControllerEventProcessor<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 若已经被处理过，直接返回</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>spent<span class="token punctuation">.</span>getAndSet<span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span>
+  processingStarted<span class="token punctuation">.</span>countDown<span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token comment">// 调用ControllerEventProcessor的process方法处理事件</span>
+  processor<span class="token punctuation">.</span>process<span class="token punctuation">(</span>event<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>方法首先判断该事件是否已被处理:</p> 
+<ul>
+<li>是，直接返回</li>
+<li>不是，调用ControllerEventProcessor#process处理事件</li>
+</ul> 
+<p>每个ControllerEventProcessor#process都封装在KafkaController.scala文件。就是KafkaController类实现ControllerEventProcessor#process，部分代码：</p> 
+<pre><code class="prism language-scala"><span class="token keyword">override</span> <span class="token keyword">def</span> process<span class="token punctuation">(</span>event<span class="token operator">:</span> ControllerEvent<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 依次匹配ControllerEvent事件</span>
+      event <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">case</span> event<span class="token operator">:</span> MockEvent <span class="token keyword">=&gt;</span>
+          event<span class="token punctuation">.</span>process<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token keyword">case</span> ShutdownEventThread <span class="token keyword">=&gt;</span>
+          error<span class="token punctuation">(</span><span class="token string">"Received a ShutdownEventThread event. This type of event is supposed to be handle by ControllerEventThread"</span><span class="token punctuation">)</span>
+        <span class="token keyword">case</span> AutoPreferredReplicaLeaderElection <span class="token keyword">=&gt;</span>
+          processAutoPreferredReplicaLeaderElection<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 如果Controller换成了别的Broker</span>
+      <span class="token keyword">case</span> e<span class="token operator">:</span> ControllerMovedException <span class="token keyword">=&gt;</span>
+        info<span class="token punctuation">(</span><span class="token string-interpolation"><span class="token id function">s</span><span class="token string">"Controller moved to another broker when processing </span><span class="token interpolation"><span class="token punctuation">$</span><span class="token expression">event</span></span><span class="token string">."</span></span><span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+        <span class="token comment">// 执行Controller卸任逻辑</span>
+        maybeResign<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token keyword">case</span> e<span class="token operator">:</span> Throwable <span class="token keyword">=&gt;</span>
+        error<span class="token punctuation">(</span><span class="token string-interpolation"><span class="token id function">s</span><span class="token string">"Error processing event </span><span class="token interpolation"><span class="token punctuation">$</span><span class="token expression">event</span></span><span class="token string">"</span></span><span class="token punctuation">,</span> e<span class="token punctuation">)</span>
+    <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+      updateMetrics<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这个process方法接收一个ControllerEvent实例，接着会判断它是哪类Controller事件，并调用相应的处理方法：</p> 
+<ul>
+<li>AutoPreferredReplicaLeaderElection，调processAutoPreferredReplicaLeaderElection</li>
+<li>其他类型事件，调用process</li>
+</ul> 
+<p>put方法和clearAndPut方法也很重要。ControllerEventThread是读取队列事件，这两个方法就是向队列生产元素：</p> 
+<ul>
+<li>put把指定ControllerEvent插入事件队列</li>
+<li>clearAndPut先执行高优先级的抢占式事件，之后清空队列所有事件，最后再插入指定事件</li>
+</ul> 
+<p>下面这两段源码分别对应这两个方法：</p> 
+<pre><code class="prism language-scala"><span class="token comment">// put方法</span>
+<span class="token keyword">def</span> put<span class="token punctuation">(</span>event<span class="token operator">:</span> ControllerEvent<span class="token punctuation">)</span><span class="token operator">:</span> QueuedEvent <span class="token operator">=</span> inLock<span class="token punctuation">(</span>putLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 构建QueuedEvent实例</span>
+  <span class="token keyword">val</span> queuedEvent <span class="token operator">=</span> <span class="token keyword">new</span> QueuedEvent<span class="token punctuation">(</span>event<span class="token punctuation">,</span> time<span class="token punctuation">.</span>milliseconds<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+  <span class="token comment">// 插入到事件队列</span>
+  queue<span class="token punctuation">.</span>put<span class="token punctuation">(</span>queuedEvent<span class="token punctuation">)</span>
+  <span class="token comment">// 返回新建QueuedEvent实例</span>
+  queuedEvent
+<span class="token punctuation">}</span>
+<span class="token comment">// clearAndPut方法</span>
+<span class="token keyword">def</span> clearAndPut<span class="token punctuation">(</span>event<span class="token operator">:</span> ControllerEvent<span class="token punctuation">)</span><span class="token operator">:</span> QueuedEvent <span class="token operator">=</span> inLock<span class="token punctuation">(</span>putLock<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 优先处理抢占式事件</span>
+  queue<span class="token punctuation">.</span>forEach<span class="token punctuation">(</span>_<span class="token punctuation">.</span>preempt<span class="token punctuation">(</span>processor<span class="token punctuation">)</span><span class="token punctuation">)</span>
+  <span class="token comment">// 清空事件队列</span>
+  queue<span class="token punctuation">.</span>clear<span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token comment">// 调用上面的put方法将给定事件插入到事件队列</span>
+  put<span class="token punctuation">(</span>event<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>中的put方法使用putLock对代码进行保护，我觉得这个putLock是不需要的，因为LinkedBlockingQueue数据结构本身就已线程安全。put方法只会与全局共享变量queue打交道，因此，它们的线程安全性完全可委托LinkedBlockingQueue实现。LinkedBlockingQueue内部已维护一个putLock和一个takeLock，专门保护读写操作。</p> 
+<p>当然，我同意在clearAndPut中使用锁，毕竟要保证，访问抢占式事件和清空操作构成一个原子操作。</p> 
+<h2>
+<a id="3__256"></a>3 总结</h2> 
+<p>Controller端的单线程事件队列实现方式，即ControllerEventManager通过构建ControllerEvent、ControllerState和对应的ControllerEventThread线程，并且结合专属事件队列，共同实现事件处理。</p> 
+<p>ControllerEvent：定义Controller能够处理的各类事件名称，目前总共定义了25类事件。<br> ControllerState：定义Controller状态。ControllerEvent的上一级分类，因此，ControllerEvent和ControllerState是多对一。<br> ControllerEventManager：Controller定义的事件管理器，专门定义和维护专属线程以及对应的事件队列。<br> ControllerEventThread：事件管理器创建的事件处理线程。该线程排他性地读取事件队列并处理队列中的所有事件。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

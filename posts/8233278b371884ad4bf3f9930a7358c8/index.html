@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Spark3.0 Sql 使用HiveTableScanExec 读取Hive orc表源码分析及参数调优 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Spark3.0 Sql 使用HiveTableScanExec 读取Hive orc表源码分析及参数调优</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="Spark30_Sql__HiveTableScanExec_Hive_orc_0"></a>Spark3.0 Sql 使用HiveTableScanExec 读取Hive orc表源码分析及参数调优</h1> 
+<h2>
+<a id="1__1"></a>1 环境准备</h2> 
+<h3>
+<a id="11__2"></a>1.1 示例代码</h3> 
+<pre><code class="prism language-scala"><span class="token keyword">import</span> <span class="token namespace">org<span class="token punctuation">.</span>apache<span class="token punctuation">.</span>spark<span class="token punctuation">.</span>sql<span class="token punctuation">.</span></span>SparkSession
+
+<span class="token keyword">object</span> SparkSqlHive <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">def</span> main<span class="token punctuation">(</span>args<span class="token operator">:</span> Array<span class="token punctuation">[</span><span class="token builtin">String</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token operator">:</span> <span class="token builtin">Unit</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">val</span> ss <span class="token operator">=</span> SparkSession<span class="token punctuation">.</span>builder<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>master<span class="token punctuation">(</span><span class="token string">"local[2]"</span><span class="token punctuation">)</span><span class="token punctuation">.</span>appName<span class="token punctuation">(</span><span class="token string">"the test of SparkSession"</span><span class="token punctuation">)</span>
+      <span class="token punctuation">.</span>config<span class="token punctuation">(</span><span class="token string">"spark.sql.hive.convertMetastoreOrc"</span><span class="token punctuation">,</span> <span class="token string">"false"</span><span class="token punctuation">)</span>  <span class="token comment">// 默认true使用FileSourceScanExec算子读取，故设置为false</span>
+      <span class="token punctuation">.</span>config<span class="token punctuation">(</span><span class="token string">"spark.hadoop.mapreduce.input.fileinputformat.split.maxsize"</span><span class="token punctuation">,</span><span class="token string">"67108864"</span><span class="token punctuation">)</span> 
+      <span class="token punctuation">.</span>enableHiveSupport<span class="token punctuation">(</span><span class="token punctuation">)</span>
+      <span class="token punctuation">.</span>getOrCreate<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token comment">// 临时表存在则先删除</span>
+    ss<span class="token punctuation">.</span>sql<span class="token punctuation">(</span><span class="token string">"DROP TABLE IF EXISTS temp.temp_ods_start_log"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// 读取orc表ods_start_log 数据 存到临时表中</span>
+    <span class="token keyword">val</span> df <span class="token operator">=</span> ss<span class="token punctuation">.</span>sql<span class="token punctuation">(</span><span class="token string">"CREATE TABLE IF NOT EXISTS temp.temp_ods_start_log as select substr(str,1,10) as str10 from biods.ods_start_log where dt='20210721'"</span><span class="token punctuation">)</span>
+    <span class="token comment">// action算子，触发job启动</span>
+    df<span class="token punctuation">.</span>count<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token comment">// 线程休眠一段时间，便于spark ui上观察分析</span>
+    Thread<span class="token punctuation">.</span>sleep<span class="token punctuation">(</span><span class="token number">1000000</span><span class="token punctuation">)</span>
+    ss<span class="token punctuation">.</span>stop<span class="token punctuation">(</span><span class="token punctuation">)</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="12_hive_orc_28"></a>1.2 hive orc表准备</h3> 
+<p>由于orc表无法加载txt数据，故先把数据加载txt表，再写入orc表。</p> 
+<pre><code class="prism language-sql"><span class="token comment">-- 创建数据库</span>
+<span class="token keyword">create</span> <span class="token keyword">database</span> biods<span class="token punctuation">;</span>
+
+<span class="token comment">-- 创建orc外部表</span>
+<span class="token keyword">create</span> external <span class="token keyword">table</span> biods<span class="token punctuation">.</span>ods_start_log
+<span class="token punctuation">(</span>
+<span class="token identifier"><span class="token punctuation">`</span>str<span class="token punctuation">`</span></span> string
+<span class="token punctuation">)</span>
+<span class="token keyword">comment</span> <span class="token string">'用户启动日志信息'</span>
+partitioned <span class="token keyword">by</span> <span class="token punctuation">(</span><span class="token identifier"><span class="token punctuation">`</span>dt<span class="token punctuation">`</span></span> string<span class="token punctuation">)</span>
+stored <span class="token keyword">as</span> orc
+location <span class="token string">'/bi/ods/ods_start_log'</span><span class="token punctuation">;</span>
+
+<span class="token comment">-- 创建txt外部表</span>
+<span class="token keyword">create</span> external <span class="token keyword">table</span> biods<span class="token punctuation">.</span>txt_ods_start_log
+<span class="token punctuation">(</span>
+<span class="token identifier"><span class="token punctuation">`</span>str<span class="token punctuation">`</span></span> string
+<span class="token punctuation">)</span>
+<span class="token keyword">comment</span> <span class="token string">'用户启动日志信息'</span>
+partitioned <span class="token keyword">by</span> <span class="token punctuation">(</span><span class="token identifier"><span class="token punctuation">`</span>dt<span class="token punctuation">`</span></span> string<span class="token punctuation">)</span>
+stored <span class="token keyword">as</span> textfile
+location <span class="token string">'/bi/ods/txt_ods_start_log'</span><span class="token punctuation">;</span>
+
+<span class="token comment">-- 添加分区</span>
+<span class="token keyword">alter</span> <span class="token keyword">table</span> biods<span class="token punctuation">.</span>ods_start_log <span class="token keyword">add</span> <span class="token keyword">partition</span><span class="token punctuation">(</span>dt<span class="token operator">=</span><span class="token string">'20210721'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">alter</span> <span class="token keyword">table</span> biods<span class="token punctuation">.</span>txt_ods_start_log <span class="token keyword">add</span> <span class="token keyword">partition</span><span class="token punctuation">(</span>dt<span class="token operator">=</span><span class="token string">'20210721'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">-- 加载数据</span>
+<span class="token keyword">load</span> <span class="token keyword">data</span> <span class="token keyword">local</span> inpath <span class="token string">'/home/cwc/data/start0721.log'</span> overwrite <span class="token keyword">into</span> <span class="token keyword">table</span> biods<span class="token punctuation">.</span>txt_ods_start_log <span class="token keyword">partition</span><span class="token punctuation">(</span>dt<span class="token operator">=</span><span class="token string">'20210721'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">-- 写入orc表</span>
+<span class="token keyword">insert</span> overwrite <span class="token keyword">table</span> biods<span class="token punctuation">.</span>ods_start_log
+<span class="token keyword">partition</span><span class="token punctuation">(</span>dt<span class="token operator">=</span><span class="token string">'20210721'</span><span class="token punctuation">)</span>
+<span class="token keyword">select</span> str 
+<span class="token keyword">from</span> biods<span class="token punctuation">.</span>txt_ods_start_log
+<span class="token keyword">where</span> dt<span class="token operator">=</span><span class="token string">'20210721'</span><span class="token punctuation">;</span>
+
+<span class="token comment">--hdfs 合并多个文件为1个文件（如有需要）</span>
+<span class="token keyword">alter</span> <span class="token keyword">table</span> biods<span class="token punctuation">.</span>ods_start_log <span class="token keyword">partition</span><span class="token punctuation">(</span>dt<span class="token operator">=</span><span class="token string">'20210721'</span><span class="token punctuation">)</span> concatenate<span class="token punctuation">;</span>
+</code></pre> 
+<p>最终构造分区文件如下：</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@hadoop3 ~<span class="token punctuation">]</span><span class="token comment"># hdfs dfs -ls -R -h hdfs://hadoop1:9000/bi/ods/ods_start_log/dt=20210721</span>
+drwxr-xr-x   - root supergroup          <span class="token number">0</span> <span class="token number">2022</span>-10-22 <span class="token number">12</span>:29 hdfs://hadoop1:9000/bi/ods/ods_start_log/dt<span class="token operator">=</span><span class="token number">20210721</span>/.hive-staging_hive_2022-10-22_12-29-16_934_837446341335257460-1
+drwxr-xr-x   - root supergroup          <span class="token number">0</span> <span class="token number">2022</span>-10-22 <span class="token number">12</span>:29 hdfs://hadoop1:9000/bi/ods/ods_start_log/dt<span class="token operator">=</span><span class="token number">20210721</span>/.hive-staging_hive_2022-10-22_12-29-16_934_837446341335257460-1/-ext-10001
+drwxr-xr-x   - root supergroup          <span class="token number">0</span> <span class="token number">2022</span>-10-22 <span class="token number">12</span>:29 hdfs://hadoop1:9000/bi/ods/ods_start_log/dt<span class="token operator">=</span><span class="token number">20210721</span>/.hive-staging_hive_2022-10-22_12-29-16_934_837446341335257460-1/_tmp.-ext-10002
+-rwxr-xr-x   <span class="token number">3</span> root supergroup    <span class="token number">246.0</span> M <span class="token number">2022</span>-10-25 <span class="token number">12</span>:18 hdfs://hadoop1:9000/bi/ods/ods_start_log/dt<span class="token operator">=</span><span class="token number">20210721</span>/000000_1
+-rwxr-xr-x   <span class="token number">3</span> root supergroup     <span class="token number">94.1</span> M <span class="token number">2022</span>-10-25 <span class="token number">12</span>:18 hdfs://hadoop1:9000/bi/ods/ods_start_log/dt<span class="token operator">=</span><span class="token number">20210721</span>/000001_0
+</code></pre> 
+<p>文件的块大小如下，为256M</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@hadoop3 ~<span class="token punctuation">]</span><span class="token comment"># hadoop fs -stat "%o %r" hdfs://hadoop1:9000/bi/ods/ods_start_log/dt=20210721/000001_0</span>
+<span class="token number">268435456</span> <span class="token number">3</span>
+<span class="token punctuation">[</span>root@hadoop3 ~<span class="token punctuation">]</span><span class="token comment"># hadoop fs -stat "%o %r" hdfs://hadoop1:9000/bi/ods/ods_start_log/dt=20210721/000000_1</span>
+<span class="token number">268435456</span> <span class="token number">3</span>
+</code></pre> 
+<p>orc文件的stripe个数如下：<br> 94m的文件有2个stripe, 246m的文件有11个stripe</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>root@hadoop3 ~<span class="token punctuation">]</span><span class="token comment"># hive --orcfiledump hdfs://hadoop1:9000/bi/ods/ods_start_log/dt=20210721/000001_0 | less</span>
+
+Processing data <span class="token function">file</span> hdfs://hadoop1:9000/bi/ods/ods_start_log/dt<span class="token operator">=</span><span class="token number">20210721</span>/000001_0 <span class="token punctuation">[</span>length: <span class="token number">98673168</span><span class="token punctuation">]</span>
+Structure <span class="token keyword">for</span> hdfs://hadoop1:9000/bi/ods/ods_start_log/dt<span class="token operator">=</span><span class="token number">20210721</span>/000001_0
+File Version: <span class="token number">0.12</span> with ORC_135
+Rows: <span class="token number">3043150</span>
+Compression: ZLIB
+Compression size: <span class="token number">262144</span>
+Type: struct<span class="token operator">&lt;</span>str:string<span class="token operator">&gt;</span>
+
+Stripe Statistics:
+  Stripe <span class="token number">1</span>:
+    Column <span class="token number">0</span>: count: <span class="token number">2020000</span> hasNull: <span class="token boolean">false</span>
+    Column <span class="token number">1</span>: count: <span class="token number">2020000</span> hasNull: <span class="token boolean">false</span> min: <span class="token number">2021</span>-09-16 <span class="token number">16</span>:26:46.194 <span class="token punctuation">[</span>main<span class="token punctuation">]</span> INFO  com.lagou.ecommerce.AppStart - <span class="token punctuation">{<!-- --></span><span class="token string">"app_active"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"name"</span><span class="token builtin class-name">:</span><span class="token string">"app_active"</span>,<span class="token string">"json"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"entry"</span><span class="token builtin class-name">:</span><span class="token string">"1"</span>,<span class="token string">"action"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span>,<span class="token string">"error_code"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span><span class="token punctuation">}</span>,<span class="token string">"time"</span>:1595347200000<span class="token punctuation">}</span>,<span class="token string">"attr"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"area"</span><span class="token builtin class-name">:</span><span class="token string">"三亚"</span>,<span class="token string">"uid"</span><span class="token builtin class-name">:</span><span class="token string">"2F10092A1723314"</span>,<span class="token string">"app_v"</span><span class="token builtin class-name">:</span><span class="token string">"1.1.2"</span>,<span class="token string">"event_type"</span><span class="token builtin class-name">:</span><span class="token string">"common"</span>,<span class="token string">"device_id"</span><span class="token builtin class-name">:</span><span class="token string">"1FB872-9A1001723314"</span>,<span class="token string">"os_type"</span><span class="token builtin class-name">:</span><span class="token string">"0.8.8"</span>,<span class="token string">"channel"</span><span class="token builtin class-name">:</span><span class="token string">"WS"</span>,<span class="token string">"language"</span><span class="token builtin class-name">:</span><span class="token string">"chinese"</span>,<span class="token string">"brand"</span><span class="token builtin class-name">:</span><span class="token string">"iphone-1"</span><span class="token punctuation">}</span><span class="token punctuation">}</span> max: <span class="token number">2021</span>-09-16 <span class="token number">16</span>:28:48.696 <span class="token punctuation">[</span>main<span class="token punctuation">]</span> INFO  com.lagou.ecommerce.AppStart - <span class="token punctuation">{<!-- --></span><span class="token string">"app_active"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"name"</span><span class="token builtin class-name">:</span><span class="token string">"app_active"</span>,<span class="token string">"json"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"entry"</span><span class="token builtin class-name">:</span><span class="token string">"2"</span>,<span class="token string">"action"</span><span class="token builtin class-name">:</span><span class="token string">"1"</span>,<span class="token string">"error_code"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span><span class="token punctuation">}</span>,<span class="token string">"time"</span>:1596124800000<span class="token punctuation">}</span>,<span class="token string">"attr"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"area"</span><span class="token builtin class-name">:</span><span class="token string">"铜川"</span>,<span class="token string">"uid"</span><span class="token builtin class-name">:</span><span class="token string">"2F10092A10999969"</span>,<span class="token string">"app_v"</span><span class="token builtin class-name">:</span><span class="token string">"1.1.7"</span>,<span class="token string">"event_type"</span><span class="token builtin class-name">:</span><span class="token string">"common"</span>,<span class="token string">"device_id"</span><span class="token builtin class-name">:</span><span class="token string">"1FB872-9A10010999969"</span>,<span class="token string">"os_type"</span><span class="token builtin class-name">:</span><span class="token string">"2.0"</span>,<span class="token string">"channel"</span><span class="token builtin class-name">:</span><span class="token string">"BL"</span>,<span class="token string">"language"</span><span class="token builtin class-name">:</span><span class="token string">"chinese"</span>,<span class="token string">"brand"</span><span class="token builtin class-name">:</span><span class="token string">"iphone-5"</span><span class="token punctuation">}</span><span class="token punctuation">}</span> sum: <span class="token number">748218740</span>
+  Stripe <span class="token number">2</span>:
+    Column <span class="token number">0</span>: count: <span class="token number">1023150</span> hasNull: <span class="token boolean">false</span>
+    Column <span class="token number">1</span>: count: <span class="token number">1023150</span> hasNull: <span class="token boolean">false</span> min: <span class="token number">2021</span>-09-16 <span class="token number">16</span>:26:32.958 <span class="token punctuation">[</span>main<span class="token punctuation">]</span> INFO  com.lagou.ecommerce.AppStart - <span class="token punctuation">{<!-- --></span><span class="token string">"app_active"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"name"</span><span class="token builtin class-name">:</span><span class="token string">"app_active"</span>,<span class="token string">"json"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"entry"</span><span class="token builtin class-name">:</span><span class="token string">"1"</span>,<span class="token string">"action"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span>,<span class="token string">"error_code"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span><span class="token punctuation">}</span>,<span class="token string">"time"</span>:1595260800000<span class="token punctuation">}</span>,<span class="token string">"attr"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"area"</span><span class="token builtin class-name">:</span><span class="token string">"乳山"</span>,<span class="token string">"uid"</span><span class="token builtin class-name">:</span><span class="token string">"2F10092A727865"</span>,<span class="token string">"app_v"</span><span class="token builtin class-name">:</span><span class="token string">"1.1.19"</span>,<span class="token string">"event_type"</span><span class="token builtin class-name">:</span><span class="token string">"common"</span>,<span class="token string">"device_id"</span><span class="token builtin class-name">:</span><span class="token string">"1FB872-9A100727865"</span>,<span class="token string">"os_type"</span><span class="token builtin class-name">:</span><span class="token string">"9.7.7"</span>,<span class="token string">"channel"</span><span class="token builtin class-name">:</span><span class="token string">"HA"</span>,<span class="token string">"language"</span><span class="token builtin class-name">:</span><span class="token string">"chinese"</span>,<span class="token string">"brand"</span><span class="token builtin class-name">:</span><span class="token string">"Huawei-3"</span><span class="token punctuation">}</span><span class="token punctuation">}</span> max: <span class="token number">2021</span>-09-16 <span class="token number">16</span>:28:35.297 <span class="token punctuation">[</span>main<span class="token punctuation">]</span> INFO  com.lagou.ecommerce.AppStart - <span class="token punctuation">{<!-- --></span><span class="token string">"app_active"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"name"</span><span class="token builtin class-name">:</span><span class="token string">"app_active"</span>,<span class="token string">"json"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"entry"</span><span class="token builtin class-name">:</span><span class="token string">"2"</span>,<span class="token string">"action"</span><span class="token builtin class-name">:</span><span class="token string">"1"</span>,<span class="token string">"error_code"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span><span class="token punctuation">}</span>,<span class="token string">"time"</span>:1596038400000<span class="token punctuation">}</span>,<span class="token string">"attr"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"area"</span><span class="token builtin class-name">:</span><span class="token string">"深圳"</span>,<span class="token string">"uid"</span><span class="token builtin class-name">:</span><span class="token string">"2F10092A9999986"</span>,<span class="token string">"app_v"</span><span class="token builtin class-name">:</span><span class="token string">"1.1.2"</span>,<span class="token string">"event_type"</span><span class="token builtin class-name">:</span><span class="token string">"common"</span>,<span class="token string">"device_id"</span><span class="token builtin class-name">:</span><span class="token string">"1FB872-9A1009999986"</span>,<span class="token string">"os_type"</span><span class="token builtin class-name">:</span><span class="token string">"0.4.6"</span>,<span class="token string">"channel"</span><span class="token builtin class-name">:</span><span class="token string">"LD"</span>,<span class="token string">"language"</span><span class="token builtin class-name">:</span><span class="token string">"chinese"</span>,<span class="token string">"brand"</span><span class="token builtin class-name">:</span><span class="token string">"Huawei-6"</span><span class="token punctuation">}</span><span class="token punctuation">}</span> sum: <span class="token number">378150821</span>
+
+File Statistics:
+  Column <span class="token number">0</span>: count: <span class="token number">3043150</span> hasNull: <span class="token boolean">false</span>
+  Column <span class="token number">1</span>: count: <span class="token number">3043150</span> hasNull: <span class="token boolean">false</span> min: <span class="token number">2021</span>-09-16 <span class="token number">16</span>:26:32.958 <span class="token punctuation">[</span>main<span class="token punctuation">]</span> INFO  com.lagou.ecommerce.AppStart - <span class="token punctuation">{<!-- --></span><span class="token string">"app_active"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"name"</span><span class="token builtin class-name">:</span><span class="token string">"app_active"</span>,<span class="token string">"json"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"entry"</span><span class="token builtin class-name">:</span><span class="token string">"1"</span>,<span class="token string">"action"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span>,<span class="token string">"error_code"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span><span class="token punctuation">}</span>,<span class="token string">"time"</span>:1595260800000<span class="token punctuation">}</span>,<span class="token string">"attr"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"area"</span><span class="token builtin class-name">:</span><span class="token string">"乳山"</span>,<span class="token string">"uid"</span><span class="token builtin class-name">:</span><span class="token string">"2F10092A727865"</span>,<span class="token string">"app_v"</span><span class="token builtin class-name">:</span><span class="token string">"1.1.19"</span>,<span class="token string">"event_type"</span><span class="token builtin class-name">:</span><span class="token string">"common"</span>,<span class="token string">"device_id"</span><span class="token builtin class-name">:</span><span class="token string">"1FB872-9A100727865"</span>,<span class="token string">"os_type"</span><span class="token builtin class-name">:</span><span class="token string">"9.7.7"</span>,<span class="token string">"channel"</span><span class="token builtin class-name">:</span><span class="token string">"HA"</span>,<span class="token string">"language"</span><span class="token builtin class-name">:</span><span class="token string">"chinese"</span>,<span class="token string">"brand"</span><span class="token builtin class-name">:</span><span class="token string">"Huawei-3"</span><span class="token punctuation">}</span><span class="token punctuation">}</span> max: <span class="token number">2021</span>-09-16 <span class="token number">16</span>:28:48.696 <span class="token punctuation">[</span>main<span class="token punctuation">]</span> INFO  com.lagou.ecommerce.AppStart - <span class="token punctuation">{<!-- --></span><span class="token string">"app_active"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"name"</span><span class="token builtin class-name">:</span><span class="token string">"app_active"</span>,<span class="token string">"json"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"entry"</span><span class="token builtin class-name">:</span><span class="token string">"2"</span>,<span class="token string">"action"</span><span class="token builtin class-name">:</span><span class="token string">"1"</span>,<span class="token string">"error_code"</span><span class="token builtin class-name">:</span><span class="token string">"0"</span><span class="token punctuation">}</span>,<span class="token string">"time"</span>:1596124800000<span class="token punctuation">}</span>,<span class="token string">"attr"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"area"</span><span class="token builtin class-name">:</span><span class="token string">"铜川"</span>,<span class="token string">"uid"</span><span class="token builtin class-name">:</span><span class="token string">"2F10092A10999969"</span>,<span class="token string">"app_v"</span><span class="token builtin class-name">:</span><span class="token string">"1.1.7"</span>,<span class="token string">"event_type"</span><span class="token builtin class-name">:</span><span class="token string">"common"</span>,<span class="token string">"device_id"</span><span class="token builtin class-name">:</span><span class="token string">"1FB872-9A10010999969"</span>,<span class="token string">"os_type"</span><span class="token builtin class-name">:</span><span class="token string">"2.0"</span>,<span class="token string">"channel"</span><span class="token builtin class-name">:</span><span class="token string">"BL"</span>,<span class="token string">"language"</span><span class="token builtin class-name">:</span><span class="token string">"chinese"</span>,<span class="token string">"brand"</span><span class="token builtin class-name">:</span><span class="token string">"iphone-5"</span><span class="token punctuation">}</span><span class="token punctuation">}</span> sum: <span class="token number">1126369561</span>
+
+Stripes:
+  Stripe: offset: <span class="token number">3</span> data: <span class="token number">65480370</span> rows: <span class="token number">2020000</span> tail: <span class="token number">46</span> index: <span class="token number">21746</span>
+    Stream: <span class="token function">column</span> <span class="token number">0</span> section ROW_INDEX start: <span class="token number">3</span> length <span class="token number">34</span>
+    Stream: <span class="token function">column</span> <span class="token number">1</span> section ROW_INDEX start: <span class="token number">37</span> length <span class="token number">21712</span>
+    Stream: <span class="token function">column</span> <span class="token number">1</span> section DATA start: <span class="token number">21749</span> length <span class="token number">64216148</span>
+    Stream: <span class="token function">column</span> <span class="token number">1</span> section LENGTH start: <span class="token number">64237897</span> length <span class="token number">1264222</span>
+    Encoding <span class="token function">column</span> <span class="token number">0</span>: DIRECT
+    Encoding <span class="token function">column</span> <span class="token number">1</span>: DIRECT_V2
+  Stripe: offset: <span class="token number">65502165</span> data: <span class="token number">33158620</span> rows: <span class="token number">1023150</span> tail: <span class="token number">46</span> index: <span class="token number">11309</span>
+    Stream: <span class="token function">column</span> <span class="token number">0</span> section ROW_INDEX start: <span class="token number">65502165</span> length <span class="token number">29</span>
+    Stream: <span class="token function">column</span> <span class="token number">1</span> section ROW_INDEX start: <span class="token number">65502194</span> length <span class="token number">11280</span>
+    Stream: <span class="token function">column</span> <span class="token number">1</span> section DATA start: <span class="token number">65513474</span> length <span class="token number">32518042</span>
+    Stream: <span class="token function">column</span> <span class="token number">1</span> section LENGTH start: <span class="token number">98031516</span> length <span class="token number">640578</span>
+    Encoding <span class="token function">column</span> <span class="token number">0</span>: DIRECT
+    Encoding <span class="token function">column</span> <span class="token number">1</span>: DIRECT_V2
+
+File length: <span class="token number">98673168</span> bytes
+Padding length: <span class="token number">0</span> bytes
+Padding ratio: <span class="token number">0</span>%
+
+</code></pre> 
+<p><img src="https://images2.imgbox.com/2e/69/GGgg0g96_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="2_HiveTableScanExecorc_138"></a>2 HiveTableScanExec读取orc表分析</h2> 
+<p>根据driver端日志分析，最早是在 <code>OrcInputFormat </code>中生成split, 最终调度task读取orc表 生成 <code>HadoopRDD.cala</code></p> 
+<pre><code class="prism language-log">22/10/27 23:46:59 INFO BlockManagerInfo: Added broadcast_0_piece0 in memory on LAPTOP-NDJFRBI4:57758 (size: 24.3 KiB, free: 4.0 GiB)
+22/10/27 23:46:59 INFO SparkContext: Created broadcast 0 from 
+---------这里开始在OrcInputFormat 计算生成split, 一个split对应一个task, 所以是在driver或者master执行，和大数据移动计算，而不是移动数据思想呼应。
+22/10/27 23:46:59 INFO OrcInputFormat: ORC pushdown predicate: null
+22/10/27 23:46:59 INFO deprecation: mapred.input.dir is deprecated. Instead, use mapreduce.input.fileinputformat.inputdir
+22/10/27 23:46:59 INFO OrcInputFormat: Using column configuration variables columns [str] / columns.types [string] (isAcidRead false)
+22/10/27 23:47:00 INFO OrcCodecPool: Got brand-new codec ZLIB
+22/10/27 23:47:00 INFO OrcCodecPool: Got brand-new codec ZLIB
+22/10/27 23:47:00 INFO OrcInputFormat: FooterCacheHitRatio: 0/2
+22/10/27 23:47:00 INFO SparkContext: Starting job: sql at SparkSqlHive.scala:17
+22/10/27 23:47:00 INFO DAGScheduler: Got job 0 (sql at SparkSqlHive.scala:17) with 3 output partitions
+22/10/27 23:47:00 INFO DAGScheduler: Final stage: ResultStage 0 (sql at SparkSqlHive.scala:17)
+22/10/27 23:47:00 INFO DAGScheduler: Parents of final stage: List()
+22/10/27 23:47:00 INFO DAGScheduler: Missing parents: List()
+22/10/27 23:47:00 INFO DAGScheduler: Submitting ResultStage 0 (MapPartitionsRDD[5] at sql at SparkSqlHive.scala:17), which has no missing parents
+22/10/27 23:47:00 INFO MemoryStore: Block broadcast_1 stored as values in memory (estimated size 228.3 KiB, free 4.0 GiB)
+22/10/27 23:47:00 INFO MemoryStore: Block broadcast_1_piece0 stored as bytes in memory (estimated size 81.8 KiB, free 4.0 GiB)
+22/10/27 23:47:00 INFO BlockManagerInfo: Added broadcast_1_piece0 in memory on LAPTOP-NDJFRBI4:57758 (size: 81.8 KiB, free: 4.0 GiB)
+22/10/27 23:47:00 INFO SparkContext: Created broadcast 1 from broadcast at DAGScheduler.scala:1223
+22/10/27 23:47:00 INFO DAGScheduler: Submitting 3 missing tasks from ResultStage 0 (MapPartitionsRDD[5] at sql at SparkSqlHive.scala:17) (first 15 tasks are for partitions Vector(0, 1, 2))
+22/10/27 23:47:00 INFO TaskSchedulerImpl: Adding task set 0.0 with 3 tasks
+22/10/27 23:47:00 INFO TaskSetManager: Starting task 0.0 in stage 0.0 (TID 0, LAPTOP-NDJFRBI4, executor driver, partition 0, ANY, 7546 bytes)
+22/10/27 23:47:00 INFO TaskSetManager: Starting task 1.0 in stage 0.0 (TID 1, LAPTOP-NDJFRBI4, executor driver, partition 1, ANY, 7546 bytes)
+22/10/27 23:47:00 INFO Executor: Running task 1.0 in stage 0.0 (TID 1)
+22/10/27 23:47:00 INFO Executor: Running task 0.0 in stage 0.0 (TID 0)
+----------------------注意这里开始调度执行 task
+22/10/27 23:47:00 INFO HadoopRDD: Input split: OrcSplit [hdfs://hadoop1:9000/bi/ods/ods_start_log/dt=20210721/000000_1, start=130975043, length=126979143, isOriginal=true, fileLength=257955207, hasFooter=false, hasBase=true, deltas=[]]
+22/10/27 23:47:00 INFO HadoopRDD: Input split: OrcSplit [hdfs://hadoop1:9000/bi/ods/ods_start_log/dt=20210721/000000_1, start=3, length=130975040, isOriginal=true, fileLength=257955207, hasFooter=false, hasBase=true, deltas=[]]
+22/10/27 23:47:00 INFO OrcInputFormat: Using column configuration variables columns [str] / columns.types [string] (isAcidRead false)
+</code></pre> 
+<h3>
+<a id="21_OrcInputFormatgenerateSplitsInfo_173"></a>2.1 于是来到<code>OrcInputFormat#generateSplitsInfo</code>
+</h3> 
+<p>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat#generateSplitsInfo</p> 
+<pre><code class="prism language-scals">static List&lt;OrcSplit&gt; generateSplitsInfo(Configuration conf, Context context)
+      throws IOException {
+      // 对应打印日志的地方
+    if (LOG.isInfoEnabled()) {
+      LOG.info("ORC pushdown predicate: " + context.sarg);
+    }
+    ....
+        for (SplitStrategy&lt;?&gt; splitStrategy : splitStrategies) {
+          if (isDebugEnabled) {
+            LOG.debug("Split strategy: {}", splitStrategy);
+          }
+
+          // Hack note - different split strategies return differently typed lists, yay Java.
+          // This works purely by magic, because we know which strategy produces which type.
+          if (splitStrategy instanceof ETLSplitStrategy) {
+          //---------------------  生成splitFutures，用于异步生成split--------------------------
+            scheduleSplits((ETLSplitStrategy)splitStrategy,
+                context, splitFutures, strategyFutures, splits);
+          } else {
+            @SuppressWarnings("unchecked")
+            List&lt;OrcSplit&gt; readySplits = (List&lt;OrcSplit&gt;)splitStrategy.getSplits();
+            splits.addAll(readySplits);
+          }
+        }
+      }
+
+      // Run the last combined strategy, if any.
+      if (combinedCtx != null &amp;&amp; combinedCtx.combined != null) {
+        scheduleSplits(combinedCtx.combined, context, splitFutures, strategyFutures, splits);
+        combinedCtx.combined = null;
+      }
+
+      // complete split futures
+      for (Future&lt;Void&gt; ssFuture : strategyFutures) {
+         ssFuture.get(); // Make sure we get exceptions strategies might have thrown.
+      }
+      // All the split strategies are done, so it must be safe to access splitFutures.
+      for (Future&lt;List&lt;OrcSplit&gt;&gt; splitFuture : splitFutures) {
+       //---------------------  等待splitFuture 执行完成，获得split，详见下面SplitGenerator的call方法--------------------------
+        splits.addAll(splitFuture.get());
+      }
+    } catch (Exception e) {
+      cancelFutures(pathFutures);
+      cancelFutures(strategyFutures);
+      cancelFutures(splitFutures);
+      throw new RuntimeException("ORC split generation failed with exception: " + e.getMessage(), e);
+    }
+
+    if (context.cacheStripeDetails) {
+      LOG.info("FooterCacheHitRatio: " + context.cacheHitCounter.get() + "/"
+          + context.numFilesCounter.get());
+    }
+
+    if (isDebugEnabled) {
+      for (OrcSplit split : splits) {
+        LOG.debug(split + " projected_columns_uncompressed_size: "
+            + split.getColumnarProjectionSize());
+      }
+    }
+    return splits;
+  }
+</code></pre> 
+<h3>
+<a id="22_OrcInputFormatscheduleSplits_splitfuture_238"></a>2.2 于是重点进<code>OrcInputFormat#scheduleSplits</code> 看，如何生成splitfuture</h3> 
+<p>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat#scheduleSplits</p> 
+<pre><code class="prism language-scala">  <span class="token keyword">private</span> static void scheduleSplits<span class="token punctuation">(</span>ETLSplitStrategy splitStrategy<span class="token punctuation">,</span> Context context<span class="token punctuation">,</span>
+      List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Future</span><span class="token punctuation">&lt;</span><span class="token class-name">List</span><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> splitFutures<span class="token punctuation">,</span> List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Future</span><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> strategyFutures<span class="token punctuation">,</span>
+      List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span></span> splits<span class="token punctuation">)</span> throws IOException <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 重点看这里</span>
+    Future<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Void</span><span class="token punctuation">&gt;</span></span> ssFuture <span class="token operator">=</span> splitStrategy<span class="token punctuation">.</span>generateSplitWork<span class="token punctuation">(</span>context<span class="token punctuation">,</span> splitFutures<span class="token punctuation">,</span> splits<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>ssFuture <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token keyword">return</span><span class="token punctuation">;</span>
+    strategyFutures<span class="token punctuation">.</span>add<span class="token punctuation">(</span>ssFuture<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+</code></pre> 
+<p><code>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat.ETLSplitStrategy#generateSplitWork</code></p> 
+<h3>
+<a id="23__OrcInputFormatETLSplitStrategyrunGetSplitsSync_251"></a>2.3 进入 <code>OrcInputFormat.ETLSplitStrategy#runGetSplitsSync</code>
+</h3> 
+<p>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat.ETLSplitStrategy#runGetSplitsSync</p> 
+<pre><code class="prism language-scala"><span class="token keyword">private</span> void runGetSplitsSync<span class="token punctuation">(</span>List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Future</span><span class="token punctuation">&lt;</span><span class="token class-name">List</span><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> splitFutures<span class="token punctuation">,</span>
+        List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span></span> splits<span class="token punctuation">,</span> UserGroupInformation ugi<span class="token punctuation">)</span> throws IOException <span class="token punctuation">{<!-- --></span>
+      UserGroupInformation tpUgi <span class="token operator">=</span> ugi <span class="token operator">==</span> <span class="token keyword">null</span> <span class="token operator">?</span> UserGroupInformation<span class="token punctuation">.</span>getCurrentUser<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">:</span> ugi<span class="token punctuation">;</span>
+      List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">SplitInfo</span><span class="token punctuation">&gt;</span></span> splitInfos <span class="token operator">=</span> getSplits<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Future</span><span class="token punctuation">&lt;</span><span class="token class-name">List</span><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> localListF <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+      List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span></span> localListS <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+      <span class="token keyword">for</span> <span class="token punctuation">(</span>SplitInfo splitInfo <span class="token operator">:</span> splitInfos<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// SplitGenerator是一个callable类</span>
+        SplitGenerator sg <span class="token operator">=</span> <span class="token keyword">new</span> SplitGenerator<span class="token punctuation">(</span>splitInfo<span class="token punctuation">,</span> tpUgi<span class="token punctuation">,</span> allowSyntheticFileIds<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>sg<span class="token punctuation">.</span>isBlocking<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">if</span> <span class="token punctuation">(</span>localListS <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            localListS <span class="token operator">=</span> <span class="token keyword">new</span> ArrayList<span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>splits<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+          <span class="token punctuation">}</span>
+          <span class="token comment">// Already called in doAs, so no need to doAs here.</span>
+          localListS<span class="token punctuation">.</span>addAll<span class="token punctuation">(</span>sg<span class="token punctuation">.</span>call<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token keyword">if</span> <span class="token punctuation">(</span>localListF <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            localListF <span class="token operator">=</span> <span class="token keyword">new</span> ArrayList<span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>splits<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+          <span class="token punctuation">}</span>
+          <span class="token comment">// 创建futuretask</span>
+          localListF<span class="token punctuation">.</span>add<span class="token punctuation">(</span>Context<span class="token punctuation">.</span>threadPool<span class="token punctuation">.</span>submit<span class="token punctuation">(</span>sg<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>localListS <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        synchronized <span class="token punctuation">(</span>splits<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          splits<span class="token punctuation">.</span>addAll<span class="token punctuation">(</span>localListS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>localListF <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        synchronized <span class="token punctuation">(</span>splitFutures<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          splitFutures<span class="token punctuation">.</span>addAll<span class="token punctuation">(</span>localListF<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+       <span class="token punctuation">}</span>
+     <span class="token punctuation">}</span>
+   <span class="token punctuation">}</span>
+</code></pre> 
+<p><code>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat.SplitGenerator</code><br> <code>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat.SplitGenerator#call</code><br> <code>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat.SplitGenerator#callInternal</code></p> 
+<h3>
+<a id="24_OrcInputFormatSplitGeneratorgenerateSplitsFromStripes_294"></a>2.4 （重点）进入<code>OrcInputFormat.SplitGenerator#generateSplitsFromStripes</code>
+</h3> 
+<p>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat.SplitGenerator#generateSplitsFromStripes<br> <strong>通过orc文件的stripe 生成split，是以stripe 为基本单位，组装成spllt, 而不会继续分割stripe</strong></p> 
+<pre><code class="prism language-scala">    <span class="token keyword">private</span> List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span></span> generateSplitsFromStripes<span class="token punctuation">(</span>boolean<span class="token punctuation">[</span><span class="token punctuation">]</span> includeStripe<span class="token punctuation">)</span> throws IOException <span class="token punctuation">{<!-- --></span>
+      List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span></span> splits <span class="token operator">=</span> <span class="token keyword">new</span> ArrayList<span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>stripes<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+      <span class="token comment">// after major compaction, base files may become empty base files. Following sequence is an example</span>
+      <span class="token comment">// 1) insert some rows</span>
+      <span class="token comment">// 2) delete all rows</span>
+      <span class="token comment">// 3) major compaction</span>
+      <span class="token comment">// 4) insert some rows</span>
+      <span class="token comment">// In such cases, consider entire base delta file as an orc split (similar to what BI strategy does)</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>stripes <span class="token operator">==</span> <span class="token keyword">null</span> <span class="token operator">||</span> stripes<span class="token punctuation">.</span>isEmpty<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        splits<span class="token punctuation">.</span>add<span class="token punctuation">(</span>createSplit<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> file<span class="token punctuation">.</span>getLen<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> orcTail<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// if we didn't have predicate pushdown, read everything</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>includeStripe <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          includeStripe <span class="token operator">=</span> <span class="token keyword">new</span> boolean<span class="token punctuation">[</span>stripes<span class="token punctuation">.</span>size<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+          Arrays<span class="token punctuation">.</span>fill<span class="token punctuation">(</span>includeStripe<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        OffsetAndLength current <span class="token operator">=</span> <span class="token keyword">new</span> OffsetAndLength<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        int idx <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>StripeInformation stripe <span class="token operator">:</span> stripes<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+          idx<span class="token operator">++</span><span class="token punctuation">;</span>
+
+          <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>includeStripe<span class="token punctuation">[</span>idx<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// create split for the previous unfinished stripe</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>current<span class="token punctuation">.</span>offset <span class="token operator">!=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+              splits<span class="token punctuation">.</span>add<span class="token punctuation">(</span>createSplit<span class="token punctuation">(</span>current<span class="token punctuation">.</span>offset<span class="token punctuation">,</span> current<span class="token punctuation">.</span>length<span class="token punctuation">,</span> orcTail<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+              current<span class="token punctuation">.</span>offset <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            continue<span class="token punctuation">;</span>
+          <span class="token punctuation">}</span>
+
+          current <span class="token operator">=</span> generateOrUpdateSplit<span class="token punctuation">(</span>
+            splits<span class="token punctuation">,</span> current<span class="token punctuation">,</span> stripe<span class="token punctuation">.</span>getOffset<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> stripe<span class="token punctuation">.</span>getLength<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> orcTail<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        generateLastSplit<span class="token punctuation">(</span>splits<span class="token punctuation">,</span> current<span class="token punctuation">,</span> orcTail<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+      <span class="token comment">// Add uncovered ACID delta splits.</span>
+      splits<span class="token punctuation">.</span>addAll<span class="token punctuation">(</span>deltaSplits<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      <span class="token keyword">return</span> splits<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="25__OrcInputFormatSplitGeneratorgenerateOrUpdateSplit_341"></a>2.5 （重点）进入** <code>OrcInputFormat.SplitGenerator#generateOrUpdateSplit</code>
+</h3> 
+<p>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat.SplitGenerator#generateOrUpdateSplit</p> 
+<pre><code class="prism language-scala"><span class="token keyword">private</span> OffsetAndLength generateOrUpdateSplit<span class="token punctuation">(</span>
+        List<span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">OrcSplit</span><span class="token punctuation">&gt;</span></span> splits<span class="token punctuation">,</span> OffsetAndLength current<span class="token punctuation">,</span> long offset<span class="token punctuation">,</span>
+        long length<span class="token punctuation">,</span> OrcTail orcTail<span class="token punctuation">)</span> throws IOException <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// if we are working on a stripe, over the min stripe size, and</span>
+      <span class="token comment">// crossed a block boundary, cut the input split here.</span>
+       <span class="token comment">// current.offset ： 表示当前组合stripe的偏移</span>
+       <span class="token comment">// offset : 表示传进来stripe的偏移</span>
+       <span class="token comment">// blockSize : 表示hdfs文件的block大小，是文件自带属性</span>
+       <span class="token comment">// 当 maxSize 特别大的时候，current.offset不变，current.length，offset逐渐增大，当offset大于blockSize，即满足第1个判断条件，就以block大小来划分</span>
+       <span class="token comment">// context.minSize,context.maxSize 正是传进去的参数</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>current<span class="token punctuation">.</span>offset <span class="token operator">!=</span> <span class="token operator">-</span><span class="token number">1</span> <span class="token operator">&amp;&amp;</span> current<span class="token punctuation">.</span>length <span class="token operator">&gt;</span> context<span class="token punctuation">.</span>minSize <span class="token operator">&amp;&amp;</span>
+          <span class="token punctuation">(</span>current<span class="token punctuation">.</span>offset <span class="token operator">/</span> blockSize <span class="token operator">!=</span> offset <span class="token operator">/</span> blockSize<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        splits<span class="token punctuation">.</span>add<span class="token punctuation">(</span>createSplit<span class="token punctuation">(</span>current<span class="token punctuation">.</span>offset<span class="token punctuation">,</span> current<span class="token punctuation">.</span>length<span class="token punctuation">,</span> orcTail<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        current<span class="token punctuation">.</span>offset <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+      <span class="token comment">// if we aren't building a split, start a new one.</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>current<span class="token punctuation">.</span>offset <span class="token operator">==</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        current<span class="token punctuation">.</span>offset <span class="token operator">=</span> offset<span class="token punctuation">;</span>
+        current<span class="token punctuation">.</span>length <span class="token operator">=</span> length<span class="token punctuation">;</span>
+      <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        current<span class="token punctuation">.</span>length <span class="token operator">=</span> <span class="token punctuation">(</span>offset <span class="token operator">+</span> length<span class="token punctuation">)</span> <span class="token operator">-</span> current<span class="token punctuation">.</span>offset<span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+        <span class="token comment">// 如果stripe累加大小大于 mapreduce.input.fileinputformat.split.maxsize，就开始分割成1个split</span>
+      <span class="token keyword">if</span> <span class="token punctuation">(</span>current<span class="token punctuation">.</span>length <span class="token operator">&gt;=</span> context<span class="token punctuation">.</span>maxSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        splits<span class="token punctuation">.</span>add<span class="token punctuation">(</span>createSplit<span class="token punctuation">(</span>current<span class="token punctuation">.</span>offset<span class="token punctuation">,</span> current<span class="token punctuation">.</span>length<span class="token punctuation">,</span> orcTail<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        current<span class="token punctuation">.</span>offset <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+      <span class="token punctuation">}</span>
+      <span class="token keyword">return</span> current<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h3>
+<a id="26__374"></a>2.6 总结一下，调用关系如下：</h3> 
+<p><img src="https://images2.imgbox.com/1a/20/5nfPBg8O_o.png" alt="在这里插入图片描述"></p> 
+<p>其中context.minSize,context.maxSize定义如下 ：</p> 
+<p><code>org.apache.hadoop.hive.ql.io.orc.OrcInputFormat.Context#Context(org.apache.hadoop.conf.Configuration, int, org.apache.hadoop.hive.ql.io.orc.ExternalCache.ExternalFooterCachesByConf)</code></p> 
+<pre><code class="prism language-scala">      minSize <span class="token operator">=</span> HiveConf<span class="token punctuation">.</span>getLongVar<span class="token punctuation">(</span>conf<span class="token punctuation">,</span> ConfVars<span class="token punctuation">.</span>MAPREDMINSPLITSIZE<span class="token punctuation">,</span> DEFAULT_MIN_SPLIT_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+      maxSize <span class="token operator">=</span> HiveConf<span class="token punctuation">.</span>getLongVar<span class="token punctuation">(</span>conf<span class="token punctuation">,</span> ConfVars<span class="token punctuation">.</span>MAPREDMAXSPLITSIZE<span class="token punctuation">,</span> DEFAULT_MAX_SPLIT_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/24/99/i52NQbAP_o.png" alt="在这里插入图片描述">默认情况下</p> 
+<p>mapreduce.input.fileinputformat.split.minsize=1<br> mapreduce.input.fileinputformat.split.maxsize= 256M</p> 
+<p><strong>因此，默认情况下，切片大小=blocksize。因为一般文件的block大小为128M, 是小于mapreduce.input.fileinputformat.split.maxsize默认值的</strong></p> 
+<p>根据orc文件的stripe，结合参数配置，最终生成split</p> 
+<p><img src="https://images2.imgbox.com/e4/54/4xVpaGpm_o.png" alt="请添加图片描述"></p> 
+<p>结论： <strong>因此使用 <code>"spark.hadoop.mapreduce.input.fileinputformat.split.maxsize"</code> 能够控制生成split个数，进而控制读取的map task数量</strong></p> 
+<blockquote> 
+ <p>小疑问：为什么设置<code>spark.hadoop.mapreduce.input.fileinputformat.split.maxsize</code> 最后怎么生效成<code>mapreduce.input.fileinputformat.split.maxsize</code>？<br> 答案在 <code>org.apache.spark.deploy.SparkHadoopUtil#appendSparkHadoopConfigs</code> 中，创建Sparkcontext时，，将spark.hadoop开头的参数截取后面部分，设置为hadoop的参数</p> 
+</blockquote> 
+<p>以下为设置<code>"spark.hadoop.mapreduce.input.fileinputformat.split.maxsize"</code>为<code>"67108864"</code>时，spark sql 读取orc文件的示意图</p> 
+<p><img src="https://images2.imgbox.com/f6/5c/hZ5bBTX9_o.png" alt="在这里插入图片描述"></p> 
+<h2>
+<a id="3_408"></a>3、总结</h2> 
+<p>（1）通过orc文件的stripe 生成split，是以stripe 为基本单位，组装成spllt, 而不会继续分割stripe<br> （2）默认情况下，split大小=文件blocksize。因为一般文件的block大小为128M, 是小于mapreduce.input.fileinputformat.split.maxsize默认值256M<br> （3）当使用 <code>"spark.hadoop.mapreduce.input.fileinputformat.split.maxsize"</code> 小于自身文件block值时，能够提高生成split个数，进而提高读取的map task数量</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

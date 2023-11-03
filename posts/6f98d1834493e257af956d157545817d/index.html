@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【云原生丨Kubernetes系列⑧】深入研究影响 Pod 中容器生命周期的因素 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【云原生丨Kubernetes系列⑧】深入研究影响 Pod 中容器生命周期的因素</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h1>
+<a id="_0"></a>前言</h1> 
+<blockquote> 
+ <p>我们知道 Pod 是 Kubernetes 集群中的最⼩单元，⽽ Pod 是有容器组组成的，所以在讨论 Pod 的⽣命周期的时候我们可以先来讨论下容器的⽣命周期。</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/27/27/4SPrE33m_o.png" alt="在这里插入图片描述"><br> </p>
+<div class="toc">
+ <h3>文章目录</h3>
+ <ul>
+<li><a href="#_0">前言</a></li>
+<li><a href="#Pod_Hook_8">Pod Hook</a></li>
+<li>
+<ul>
+<li><a href="#_24">环境准备</a></li>
+<li><a href="#_44">优雅删除资源对象</a></li>
+</ul>
+  </li>
+<li><a href="#_98">健康检查</a></li>
+</ul>
+</div>
+<p></p> 
+<hr> 
+<h1>
+<a id="Pod_Hook_8"></a>Pod Hook</h1> 
+<p>Pod Hook 是由 kubelet 发起的，当容器中的进程启动前或者容器中的进程终⽌之前运⾏，这是包含在容器的⽣命周期之中。我们可以同时为 Pod 中的所有容器都配置 hook。</p> 
+<p><strong>Kubernetes 为我们提供了两种钩⼦函数：</strong></p> 
+<ul>
+<li>PostStart：这个钩⼦在容器创建后⽴即执⾏。但是，并不能保证钩⼦将在容器 ENTRYPOINT 之前运 ⾏，因为没有参数传递给处理程序。主要⽤于资源部署、环境准备等。不过需要注意的是如果钩 ⼦花费太⻓时间以⾄于不能运⾏或者挂起， 容器将不能达到 running 状态。</li>
+<li>PreStop：这个钩⼦在容器终⽌之前⽴即被调⽤。它是阻塞的，意味着它是同步的， 所以它必须 在删除容器的调⽤发出之前完成。主要⽤于优雅关闭应⽤程序、通知其他系统等。如果钩⼦在执 ⾏期间挂起， Pod阶段将停留在 running 状态并且永不会达到 failed 状态。</li>
+</ul> 
+<p>如果 PostStart 或者 PreStop 钩⼦失败， 它会杀死容器。所以我们应该让钩⼦函数尽可能的轻量。当 然有些情况下，⻓时间运⾏命令是合理的， ⽐如在停⽌容器之前预先保存状态。</p> 
+<p><strong>另外我们有两种⽅式来实现上⾯的钩⼦函数：</strong></p> 
+<ul>
+<li>Exec - ⽤于执⾏⼀段特定的命令，不过要注意的是该命令消耗的资源会被计⼊容器。</li>
+<li>HTTP - 对容器上的特定的端点执⾏ HTTP 请求。</li>
+</ul> 
+<hr> 
+<h2>
+<a id="_24"></a>环境准备</h2> 
+<p>以下示例中，定义了⼀个Nginx Pod，其中设置了 PostStart 钩⼦函数，即在容器创建成功后，写⼊⼀句话到 <code>/usr/share/message</code> ⽂件中。</p> 
+<pre><code class="prism language-go">apiVersion<span class="token punctuation">:</span> v1 
+kind<span class="token punctuation">:</span> Pod 
+metadata<span class="token punctuation">:</span> 
+name<span class="token punctuation">:</span> hook<span class="token operator">-</span>demo1 
+spec<span class="token punctuation">:</span> 
+containers<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> hook<span class="token operator">-</span>demo1 
+image<span class="token punctuation">:</span> nginx 
+lifecycle<span class="token punctuation">:</span> 
+postStart<span class="token punctuation">:</span> 
+exec<span class="token punctuation">:</span> 
+command<span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"/bin/sh"</span><span class="token punctuation">,</span> <span class="token string">"-c"</span><span class="token punctuation">,</span> "echo Hello from the postStart handler <span class="token operator">&gt;</span> <span class="token operator">/</span>usr<span class="token operator">/</span>share<span class="token operator">/</span>m 
+essage"<span class="token punctuation">]</span> 
+</code></pre> 
+<hr> 
+<h2>
+<a id="_44"></a>优雅删除资源对象</h2> 
+<p>当⽤户请求删除含有 pod 的资源对象时（如Deployment等），K8S 为了让应⽤程序优雅关闭（即让应⽤程序完成正在处理的请求后，再关闭软件），K8S提供两种信息通知：</p> 
+<ul>
+<li>默认：K8S 通知 node 执⾏ <code>docker stop</code> 命令，docker 会先向容器中 PID 为1的进程发送系统信号 SIGTERM ，然后等待容器中的应⽤程序终⽌执⾏，如果等待时间达到设定的超时时间，或者默认超时时间（30s），会继续发送 SIGKILL 的系统信号强⾏ kill 掉进程。</li>
+<li>使⽤ pod ⽣命周期（利⽤ PreStop 回调函数），它执⾏在发送终⽌信号之前。</li>
+</ul> 
+<p>默认所有的优雅退出时间都在30秒内。<code>kubectl delete</code> 命令⽀持<code> --grace-period=&lt;seconds&gt;</code> 选项，这 个选项允许⽤户⽤他们⾃⼰指定的值覆盖默认值。值’0’代表 强制删除 pod. 在 kubectl 1.5 及以上的版 本⾥，执⾏强制删除时必须同时指定 <code>--force --grace-period=0</code> 。</p> 
+<p>强制删除⼀个 pod 是从集群状态还有 etcd ⾥⽴刻删除这个 pod。 当 Pod 被强制删除时， api 服务器 不会等待来⾃ Pod 所在节点上的 kubelet 的确认信息：pod 已经被终⽌。在 API ⾥ pod 会被⽴刻删 除，在节点上， pods 被设置成⽴刻终⽌后，在强⾏杀掉前还会有⼀个很⼩的宽限期。</p> 
+<p>以下示例中，定义了⼀个Nginx Pod，其中设置了 PreStop 钩⼦函数，即在容器退出之前，优雅的关闭 Nginx:</p> 
+<pre><code class="prism language-go">apiVersion<span class="token punctuation">:</span> v1 
+kind<span class="token punctuation">:</span> Pod 
+metadata<span class="token punctuation">:</span> 
+name<span class="token punctuation">:</span> hook<span class="token operator">-</span>demo2 
+spec<span class="token punctuation">:</span> 
+containers<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> hook<span class="token operator">-</span>demo2 
+image<span class="token punctuation">:</span> nginx 
+lifecycle<span class="token punctuation">:</span> 
+preStop<span class="token punctuation">:</span> 
+exec<span class="token punctuation">:</span> 
+command<span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"/usr/sbin/nginx"</span><span class="token punctuation">,</span><span class="token string">"-s"</span><span class="token punctuation">,</span><span class="token string">"quit"</span><span class="token punctuation">]</span> 
+<span class="token operator">--</span><span class="token operator">-</span> 
+apiVersion<span class="token punctuation">:</span> v1 
+kind<span class="token punctuation">:</span> Pod 
+metadata<span class="token punctuation">:</span> 
+name<span class="token punctuation">:</span> hook<span class="token operator">-</span>demo2 
+labels<span class="token punctuation">:</span> 
+app<span class="token punctuation">:</span> hook 
+spec<span class="token punctuation">:</span> 
+containers<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> hook<span class="token operator">-</span>demo2 
+image<span class="token punctuation">:</span> nginx 
+ports<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> webport 
+containerPort<span class="token punctuation">:</span> <span class="token number">80</span> 
+volumeMounts<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> message 
+mountPath<span class="token punctuation">:</span> <span class="token operator">/</span>usr<span class="token operator">/</span>share<span class="token operator">/</span> 
+lifecycle<span class="token punctuation">:</span> 
+preStop<span class="token punctuation">:</span> 
+exec<span class="token punctuation">:</span> 
+command<span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token char">'/bin/sh'</span><span class="token punctuation">,</span> <span class="token char">'-c'</span><span class="token punctuation">,</span> 'echo Hello from the preStop Handler <span class="token operator">&gt;</span> <span class="token operator">/</span>usr<span class="token operator">/</span>share<span class="token operator">/</span>mes 
+sage'<span class="token punctuation">]</span> 
+volumes<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> message 
+hostPath<span class="token punctuation">:</span> 
+path<span class="token punctuation">:</span> <span class="token operator">/</span>tmp 
+</code></pre> 
+<p>另外 Hook 调⽤的⽇志没有暴露个给 Pod 的 event，所以只能通过 <code>describe </code>命令来获取，如果有错误 将可以看到 <code>FailedPostStartHook</code> 或 <code>FailedPreStopHook</code> 这样的 event。</p> 
+<hr> 
+<h1>
+<a id="_98"></a>健康检查</h1> 
+<p>除了上⾯这两个钩⼦函数以外，还有⼀项配置会影响到容器的⽣命周期的，那就是健康检查的探针。</p> 
+<p>在 Kubernetes 集群当中，我们可以通过配置 <code>liveness probe</code> （存活探针）和 <code>readiness probe</code> （可读性探针）来影响容器的⽣存周期。</p> 
+<ul>
+<li>kubelet 通过使⽤ liveness probe 来确定你的应⽤程序是否正在运⾏，通俗点将就是是否还活着。⼀般来 说，如果你的程序⼀旦崩溃了， Kubernetes 就会⽴刻知道这个程序已经终⽌了，然后就会重启这个程序。⽽我 们的 liveness probe 的⽬的就是来捕获到当前应⽤程序还没有终⽌，还没有崩溃，如果出现了这些情况，那么 就重启处于该状态下的容器，使应⽤程序在存在 bug 的情况下依然能够继续运⾏下去。</li>
+<li>kubelet 使⽤ readiness probe 来确定容器是否已经就绪可以接收流量过来了。这个探针通俗点讲就是说是 否准备好了，现在可以开始⼯作了。只有当 Pod 中的容器都处于就绪状态的时候 kubelet 才会认定该 Pod 处 于就绪状态，因为⼀个 Pod 下⾯可能会有多个容器。当然 Pod 如果处于⾮就绪状态，那么我们就会将他从我们 的⼯作队列(实际上就是我们后⾯需要重点学习的 Service)中移除出来，这样我们的流量就不会被路由到这个 Pod ⾥⾯来了。</li>
+</ul> 
+<p><strong>和前⾯的钩⼦函数⼀样的，我们这两个探针的⽀持两种配置⽅式</strong>：</p> 
+<ul>
+<li>exec：执⾏⼀段命令</li>
+<li>http：检测某个 http 请求</li>
+<li>tcpSocket：使⽤此配置， kubelet 将尝试在指定端⼝上打开容器的套接字。如果可以建⽴连接，容器被认为 是健康的，如果不能就认为是失败的。实际上就是检查端⼝</li>
+</ul> 
+<p>我们先来给⼤家演示下存活探针的使⽤⽅法，⾸先我们⽤ exec 执⾏命令的⽅式来检测容器的存活，如下:</p> 
+<pre><code class="prism language-go">apiVersion<span class="token punctuation">:</span> v1 
+kind<span class="token punctuation">:</span> Pod 
+metadata<span class="token punctuation">:</span> 
+name<span class="token punctuation">:</span> liveness<span class="token operator">-</span>exec 
+labels<span class="token punctuation">:</span> 
+test<span class="token punctuation">:</span> liveness 
+spec<span class="token punctuation">:</span> 
+containers<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> liveness 
+image<span class="token punctuation">:</span> busybox 
+args<span class="token punctuation">:</span> 
+<span class="token operator">-</span> <span class="token operator">/</span>bin<span class="token operator">/</span>sh 
+<span class="token operator">-</span> <span class="token operator">-</span>c 
+<span class="token operator">-</span> touch <span class="token operator">/</span>tmp<span class="token operator">/</span>healthy<span class="token punctuation">;</span> sleep <span class="token number">30</span><span class="token punctuation">;</span> rm <span class="token operator">-</span>rf <span class="token operator">/</span>tmp<span class="token operator">/</span>healthy<span class="token punctuation">;</span> sleep <span class="token number">600</span> 
+livenessProbe<span class="token punctuation">:</span> 
+exec<span class="token punctuation">:</span> 
+command<span class="token punctuation">:</span> 
+<span class="token operator">-</span> cat 
+<span class="token operator">-</span> <span class="token operator">/</span>tmp<span class="token operator">/</span>healthy 
+initialDelaySeconds<span class="token punctuation">:</span> <span class="token number">5</span> 
+periodSeconds<span class="token punctuation">:</span> <span class="token number">5</span> 
+</code></pre> 
+<p>我们这⾥需要⽤到⼀个新的属性： <code>livenessProbe</code> ，下⾯通过 exec 执⾏⼀段命令，其 中 periodSeconds 属性表示让 kubelet 每隔5秒执⾏⼀次存活探针，也就是每5秒执⾏⼀次上⾯的 <code>cat /tmp/healthy</code> 命令，如果命令执⾏成功了，将返回0，那么 kubelet 就会认为当前这个容器是存活的并且很监控，如果返回的是⾮0值，那么 kubelet 就会把该容器杀掉然后重启它。另外⼀个属性 <code>initialDelaySeconds</code> 表示在第⼀次执⾏探针的时候要等待5秒，这样能够确保我们的容器能够有⾜够的时间启动起来。</p> 
+<p>另外我们在容器启动的时候，执⾏了如下命令：</p> 
+<pre><code class="prism language-go">☁ ~ <span class="token operator">/</span>bin<span class="token operator">/</span>sh <span class="token operator">-</span>c <span class="token string">"touch /tmp/healthy; sleep 30; rm -rf /tmp/healthy; sleep 600"</span>
+</code></pre> 
+<p>意思是说在容器最开始的30秒内有⼀个 <code>/tmp/healthy</code> ⽂件，在这30秒内执⾏ <code>cat /tmp/healthy</code> 命令 都会返回⼀个成功的返回码。30秒后，我们删除这个⽂件，现在执⾏ <code>cat /tmp/healthy</code> 是不是就会失败了，这个时候就会重启容器了。</p> 
+<p>我们来创建下该 Pod ，在30秒内，查看 Pod 的 Event ：</p> 
+<pre><code class="prism language-go">☁ ~ kubectl describe pod liveness<span class="token operator">-</span>exec
+</code></pre> 
+<p>我们可以观察到容器是正常启动的，在隔⼀会⼉，⽐如40s后，再查看下 Pod 的 Event ，在最下⾯有⼀条信息显示 liveness probe 失败了，容器被删掉并重新创建。</p> 
+<p>然后通过 <code>kubectl get pod liveness-exec</code> 可以看到 RESTARTS 值加1了。</p> 
+<p>同样的，我们还可以使⽤ HTTP GET 请求来配置我们的存活探针，我们这⾥使⽤⼀个 liveness 镜像来验证演示下</p> 
+<pre><code class="prism language-go">apiVersion<span class="token punctuation">:</span> v1 
+kind<span class="token punctuation">:</span> Pod 
+metadata<span class="token punctuation">:</span> 
+labels<span class="token punctuation">:</span> 
+test<span class="token punctuation">:</span> liveness 
+name<span class="token punctuation">:</span> liveness<span class="token operator">-</span>http 
+spec<span class="token punctuation">:</span> 
+containers<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> liveness 
+image<span class="token punctuation">:</span> cnych<span class="token operator">/</span>liveness 
+args<span class="token punctuation">:</span> 
+<span class="token operator">-</span> <span class="token operator">/</span>server 
+livenessProbe<span class="token punctuation">:</span> 
+httpGet<span class="token punctuation">:</span> 
+path<span class="token punctuation">:</span> <span class="token operator">/</span>healthz 
+port<span class="token punctuation">:</span> <span class="token number">8080</span> 
+httpHeaders<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> X<span class="token operator">-</span>Custom<span class="token operator">-</span>Header 
+value<span class="token punctuation">:</span> Awesome 
+initialDelaySeconds<span class="token punctuation">:</span> <span class="token number">3</span> 
+periodSeconds<span class="token punctuation">:</span> <span class="token number">3</span> 
+</code></pre> 
+<p>同样的，根据<code>periodSeconds</code>属性我们可以知道 kubelet 需要每隔3秒执⾏⼀次 <code>liveness probe </code>，该探针将向容器中的 server 的8080端⼝发送⼀个 HTTP GET 请求。如果 server 的 /healthz 路径的 handler 返回⼀个成功的返回码， kubelet 就会认定该容器是活着的并且很健康,如果返回失败的返回码， kubelet 将杀掉该容器并重启它。。<code> initialDelaySeconds</code> 指定 kubelet 在该执⾏第⼀次探测之前需要等待3秒钟。</p> 
+<p>通常来说，任何⼤于200⼩于400的返回码都会认定是成功的返回码。其他返回码都会被认为是失败的返回码。</p> 
+<p>我们可以来查看下上⾯的 healthz 的实现：</p> 
+<pre><code class="prism language-go">http<span class="token punctuation">.</span><span class="token function">HandleFunc</span><span class="token punctuation">(</span><span class="token string">"/healthz"</span><span class="token punctuation">,</span> <span class="token keyword">func</span><span class="token punctuation">(</span>w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r <span class="token operator">*</span>http<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> 
+duration <span class="token operator">:=</span> time<span class="token punctuation">.</span><span class="token function">Now</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Sub</span><span class="token punctuation">(</span>started<span class="token punctuation">)</span> 
+<span class="token keyword">if</span> duration<span class="token punctuation">.</span><span class="token function">Seconds</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">10</span> <span class="token punctuation">{<!-- --></span> 
+w<span class="token punctuation">.</span><span class="token function">WriteHeader</span><span class="token punctuation">(</span><span class="token number">500</span><span class="token punctuation">)</span> 
+w<span class="token punctuation">.</span><span class="token function">Write</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token function">byte</span><span class="token punctuation">(</span>fmt<span class="token punctuation">.</span><span class="token function">Sprintf</span><span class="token punctuation">(</span><span class="token string">"error: %v"</span><span class="token punctuation">,</span> duration<span class="token punctuation">.</span><span class="token function">Seconds</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> 
+<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span> 
+w<span class="token punctuation">.</span><span class="token function">WriteHeader</span><span class="token punctuation">(</span><span class="token number">200</span><span class="token punctuation">)</span> 
+w<span class="token punctuation">.</span><span class="token function">Write</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token function">byte</span><span class="token punctuation">(</span><span class="token string">"ok"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> 
+<span class="token punctuation">}</span> 
+<span class="token punctuation">}</span><span class="token punctuation">)</span> 
+</code></pre> 
+<p>⼤概意思就是最开始前10s返回状态码200，10s过后就返回500的 <code>status_code </code>了。所以当容器启动3 秒后， kubelet 开始执⾏健康检查。第⼀次健康监测会成功，因为是在10s之内，但是10秒后，健康 检查将失败，因为现在返回的是⼀个错误的状态码了，所以 kubelet 将会杀掉和重启容器。</p> 
+<p>同样的，我们来创建下该 Pod 测试下效果，10秒后，查看 Pod 的 event，确认 <code>liveness probe</code> 失败并重启了容器。</p> 
+<pre><code class="prism language-go">☁ ~ kubectl describe pod liveness<span class="token operator">-</span>http
+</code></pre> 
+<p>然后我们来通过端⼝的⽅式来配置存活探针，使⽤此配置， kubelet 将尝试在指定端⼝上打开容器的套接字。 如果可以建⽴连接，容器被认为是健康的，如果不能就认为是失败的。</p> 
+<pre><code class="prism language-go">apiVersion<span class="token punctuation">:</span> v1 
+kind<span class="token punctuation">:</span> Pod 
+metadata<span class="token punctuation">:</span> 
+name<span class="token punctuation">:</span> goproxy 
+labels<span class="token punctuation">:</span> 
+app<span class="token punctuation">:</span> goproxy 
+spec<span class="token punctuation">:</span> 
+containers<span class="token punctuation">:</span> 
+<span class="token operator">-</span> name<span class="token punctuation">:</span> goproxy 
+image<span class="token punctuation">:</span> cnych<span class="token operator">/</span>goproxy 
+ports<span class="token punctuation">:</span> 
+<span class="token operator">-</span> containerPort<span class="token punctuation">:</span> <span class="token number">8080</span> 
+readinessProbe<span class="token punctuation">:</span> 
+tcpSocket<span class="token punctuation">:</span> 
+port<span class="token punctuation">:</span> <span class="token number">8080</span> 
+initialDelaySeconds<span class="token punctuation">:</span> <span class="token number">5</span> 
+periodSeconds<span class="token punctuation">:</span> <span class="token number">10</span> 
+livenessProbe<span class="token punctuation">:</span> 
+tcpSocket<span class="token punctuation">:</span> 
+port<span class="token punctuation">:</span> <span class="token number">8080</span> 
+initialDelaySeconds<span class="token punctuation">:</span> <span class="token number">15</span> 
+periodSeconds<span class="token punctuation">:</span> <span class="token number">20</span> 
+</code></pre> 
+<p>我们可以看到，TCP 检查的配置与 HTTP 检查⾮常相似，只是将 httpGet 替换成了 tcpSocket 。</p> 
+<p>另外除了上⾯的 <code>initialDelaySeconds </code>和 <code>periodSeconds</code> 属性外，探针还可以配置如下⼏个参数：</p> 
+<ul>
+<li>
+<strong>timeoutSeconds</strong>：探测超时时间，默认1秒，最⼩1秒。</li>
+<li>
+<strong>successThreshold</strong>：探测失败后，最少连续探测成功多少次才被认定为成功。默认是 1，但是如果是<code>livene ss</code>则必须是 1。最⼩值是 1。</li>
+<li>
+<strong>failureThreshold</strong>：探测成功后，最少连续探测失败多少次才被认定为失败。默认是 3，最⼩值是 1。</li>
+</ul> 
+<hr> 
+<p><img src="https://images2.imgbox.com/f0/4e/5301Zv5k_o.png" alt="在这里插入图片描述"></p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

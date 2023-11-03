@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>RxJava使用与原理分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">RxJava使用与原理分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h2>一、事件分发流程：</h2> 
+<p>常规创建Observable观察者：</p> 
+<pre><code>Observable.create(new ObservableOnSubscribe&lt;String&gt;() {
+            @Override
+            public void subscribe(@NonNull ObservableEmitter&lt;String&gt; emitter) throws Exception {
+                emitter.onNext("");
+                emitter.onComplete();
+            }
+        }).flatMap(new Function&lt;String, ObservableSource&lt;String&gt;&gt;() {
+            @Override
+            public ObservableSource&lt;String&gt; apply(@NonNull String s) throws Exception {
+                   System.out.println("我们这里需要重写的方法");
+                   return Observable.just("");
+            }
+        }).observeOn(Schedulers.io())
+                .subscribeOn(Schedulers.newThread())
+                .subscribe(new Observer&lt;String&gt;() {
+                    @Override
+                    public void onSubscribe(@NonNull Disposable d) {
+                        System.out.println("方法一：onSubscribe");
+                    }
+
+                    @Override
+                    public void onNext(@NonNull String s) {
+                        System.out.println("方法二：onNext");
+                    }
+
+                    @Override
+                    public void onError(@NonNull Throwable e) {
+                        System.out.println("方法三：onError");
+                    }
+
+                    @Override
+                    public void onComplete() {
+                        System.out.println("方法四：onComplete");
+                    }
+                });
+    }</code></pre> 
+<p>从Observable.create()点进去，通过一个静态方法，追踪到</p> 
+<pre><code>  public final class ObservableCreate&lt;T&gt; extends Observable&lt;T&gt; {
+    final ObservableOnSubscribe&lt;T&gt; source;
+
+    public ObservableCreate(ObservableOnSubscribe&lt;T&gt; source) {
+        this.source = source;
+    }
+
+  }</code></pre> 
+<p>这里构造方法中保存的source就是外部传进来的ObservableOnSubscribe，存储下来后，当外部调用subscribe时，会执行到Observable的subscribeActual方法，而ObservableCreate实现了该方法，</p> 
+<pre><code>@Override
+    protected void subscribeActual(Observer&lt;? super T&gt; observer) {
+        CreateEmitter&lt;T&gt; parent = new CreateEmitter&lt;T&gt;(observer);
+        observer.onSubscribe(parent);
+
+        try {
+            source.subscribe(parent);
+        } catch (Throwable ex) {
+            Exceptions.throwIfFatal(ex);
+            parent.onError(ex);
+        }
+    }</code></pre> 
+<p>这里做了三件事情：</p> 
+<p>1、创建分发器CreateEmitter对象，</p> 
+<p>2、回调生命周期给观察者，</p> 
+<p>3、执行subscribe方法，并传入CreateEmitter对象，</p> 
+<p>解释一：创建CreateEmitter用来把对象句柄传递给外部使用，同时把观察者和被观察者关联起来，这里的CreateEmitter就是被观察者，而Observer对象则属于观察者</p> 
+<p>解释二：这里的observer.onSubscribe(parent)，则是执行了 “System.out.println("方法一：onSubscribe")”，在整个处理流开始执行之前，把生命周期回调给了订阅者</p> 
+<p>解释三：通过source.subscribe(parent)，把分发器传递给被观察着用来发送事件，这里的subscribe，就是调用了外部传入的ObservableOnSubscribe对象，通知被观察者开始发送事件，这里会执行到”System.out.println("开始发送事件")“，我们可以通过subscribe中传递过来的emitter对象进行事件的分发处理</p> 
+<p>当我们调用emitter.onNext("")时，可以理解为被观察者发送了一个事件出来，因为CreateEmitter实现了ObservableEmitter，因此这里会回调到CreateEmitter的onNext方法，代码如下：</p> 
+<pre><code>    static final class CreateEmitter&lt;T&gt;
+    extends AtomicReference&lt;Disposable&gt;
+    implements ObservableEmitter&lt;T&gt;, Disposable {
+
+        private static final long serialVersionUID = -3434801548987643227L;
+
+        final Observer&lt;? super T&gt; observer;
+
+        CreateEmitter(Observer&lt;? super T&gt; observer) {
+            this.observer = observer;
+        }
+        
+
+        // 会回调到这里
+        @Override
+        public void onNext(T t) {
+            if (t == null) {
+                onError(new NullPointerException("onNext called with null. Null values are generally not allowed in 2.x operators and sources."));
+                return;
+            }
+            if (!isDisposed()) {
+                observer.onNext(t);
+            }
+        }</code></pre> 
+<p>在onNext内部，CreateEmitter会调用观察者对象的onNext方法，把事件(也就是数据)传递给观察者，也就是会执行到前面demo中的System.out.println("方法二：onNext");方法，同时我们也可以从代码中看到，当判空时，会执行到onError()方法，这里同样会调用观察者的onError()方法，把事件传递出去</p> 
+<h2>二、订阅与取消</h2> 
+<p>在CreateEmitter的每次回调中，我们都可以看到isDisposed()的判断，这个判断是用来检测观察者是否已取消订阅。如果观察者取消订阅的话，那么就不会把执行结果通知到观察者，这里的典型使用场景：在activity中请求网络数据，当数据请求回来后刷新界面，但是如果数据请求回来前用户手动关闭了activity的话。当数据请求回来后，因为activity内部的view已经被销毁，会出现控件报空指针的问题，在这里我们可以通过dispose()方法取消事件的回调传递，这里涉及到一个类：DisposableHelper</p> 
+<pre><code>public enum DisposableHelper implements Disposable {
+    /**
+     * The singleton instance representing a terminal, disposed state, don't leak it.
+     */
+    DISPOSED
+    ;
+
+    /**
+     * Checks if the given Disposable is the common {@link #DISPOSED} enum value.
+     * @param d the disposable to check
+     * @return true if d is {@link #DISPOSED}
+     */
+    public static boolean isDisposed(Disposable d) {
+        return d == DISPOSED;
+    }
+ }</code></pre> 
+<p>DisposableHelper是一个枚举类，有一个DISPOSED枚举类型，用来记录观察者当前的状态，当执订阅者执行，代码如下：</p> 
+<pre><code>   @Override
+   public void dispose() {
+          DisposableHelper.dispose(this);
+   }
+</code></pre> 
+<p>其内部实现为：</p> 
+<pre><code>   public static boolean dispose(AtomicReference&lt;Disposable&gt; field) {
+        Disposable current = field.get();
+        Disposable d = DISPOSED;
+        if (current != d) {
+            current = field.getAndSet(d);
+            if (current != d) {
+                if (current != null) {
+                    current.dispose();
+                }
+                return true;
+            }
+        }
+        return false;
+    }</code></pre> 
+<p>通过这里把观察者的状态设置为DISPOSED，用来标志观察者已取消订阅，在被观察者每次执行生命周期时，通过对观察者的状态判断，用以确定是否需要把数据回调给被观察者</p> 
+<h2>三、线程调度：</h2> 
+<p>这里通过observeOn举例说明：</p> 
+<pre><code>    @CheckReturnValue
+    @SchedulerSupport(SchedulerSupport.CUSTOM)
+    public final Observable&lt;T&gt; observeOn(Scheduler scheduler, boolean delayError, int bufferSize) {
+        // 省略非关键代码
+        return RxJavaPlugins.onAssembly(new ObservableObserveOn&lt;T&gt;(this, scheduler, delayError, bufferSize));
+    }</code></pre> 
+<p>ObservableObserveOn实现了AbstractObservableWithUpstream，进而实现了Observable</p> 
+<p>这里可以追踪到ObservableObserveOn的源码中，可以看到：</p> 
+<pre><code>public ObservableObserveOn(ObservableSource&lt;T&gt; source, Scheduler scheduler, boolean delayError, int bufferSize) {
+        super(source);
+        // 省略非关键代码
+    }</code></pre> 
+<p>它的构造器调用了super()，而super内部则保存了前一个观察者对象：</p> 
+<pre><code>abstract class AbstractObservableWithUpstream&lt;T, U&gt; extends Observable&lt;U&gt; implements HasUpstreamObservableSource&lt;T&gt; {
+    AbstractObservableWithUpstream(ObservableSource&lt;T&gt; source) {
+        this.source = source;
+    }
+}</code></pre> 
+<p>当我们调用subcribe()时，内部会执行到ObservableObserveOn如下方法：</p> 
+<pre><code>    @Override
+    protected void subscribeActual(Observer&lt;? super T&gt; observer) {
+        // 这里的if用来判断是否调度为当前线程，如果是，则不需要调度器来切换新线程
+        if (scheduler instanceof TrampolineScheduler) {
+            source.subscribe(observer);
+        } else {
+            Scheduler.Worker w = scheduler.createWorker();
+            source.subscribe(new ObserveOnObserver&lt;T&gt;(observer, w, delayError, bufferSize));
+        }
+    }</code></pre> 
+<p>通过 scheduler.createWorker()来切换到指定的线程，此时外部调用onNext()时，会执行到这里，在指定线程进行处理：</p> 
+<pre><code> @Override
+ public void onNext(T t) {
+    if (done) {
+         return;
+    }
+
+  if (sourceMode != QueueDisposable.ASYNC) {
+       queue.offer(t);
+    }
+       schedule();
+ }
+
+// 省略非关键代码
+
+void schedule() {
+   if (getAndIncrement() == 0) {
+       worker.schedule(this);
+      }
+}</code></pre> 
+<p>schedule是一个抽象方法，我们选择一个具体实现NewThreadWorker，这个NewThreadWorker是用来切换新线程的，我们定位到它的具体实现，看下内部是怎么处理的：</p> 
+<pre><code>    public ScheduledRunnable scheduleActual(final Runnable run, long delayTime, @NonNull TimeUnit unit, @Nullable DisposableContainer parent) {
+        // 省略非关键代码
+        try {
+            if (delayTime &lt;= 0) {
+                f = executor.submit((Callable&lt;Object&gt;)sr);
+            } else {
+                f = executor.schedule((Callable&lt;Object&gt;)sr, delayTime, unit);
+            }
+            sr.setFuture(f);
+        } catch (RejectedExecutionException ex) {
+            // 省略非关键代码
+        }
+        return sr;
+    }</code></pre> 
+<p>ObserveOnObserver继承了Runnable，这个executor.submit((Callable&lt;Object&gt;)sr)；就是线程池中用来提交任务的方法，线程池内部会调用runnable的run方法，从而调用到：</p> 
+<pre><code>@Override
+public void run() {
+     if (outputFused) {
+         drainFused();
+     } else {
+         drainNormal();
+     }
+}</code></pre> 
+<p>接着：</p> 
+<pre><code>void drainNormal() {
+	// 省略非关键代码
+	for (;;) {
+		if (checkTerminated(done, q.isEmpty(), a)) {
+			return;
+		}
+
+		// 省略非关键代码
+			a.onNext(v);
+
+		missed = addAndGet(-missed);
+		if (missed == 0) {
+			break;
+		}
+	}
+}</code></pre> 
+<p>实现生命周期的回调，类似的，其它生命周期回调也是同样的流程</p> 
+<p>补充一下线程调度的各参数说明：</p> 
+<table border="1" cellpadding="1" cellspacing="1"><tbody>
+<tr>
+<td>参数类型</td>
+<td>解释</td>
+<td>使用场景</td>
+</tr>
+<tr>
+<td>Schedulers.immediate()</td>
+<td>当前线程 = 不指定线程</td>
+<td>默认</td>
+</tr>
+<tr>
+<td>AndroidSchedulers.mainThread()</td>
+<td>Android主线程</td>
+<td>操作UI</td>
+</tr>
+<tr>
+<td>Schedulers.newThread()</td>
+<td>常规新线程</td>
+<td>耗时等操作</td>
+</tr>
+<tr>
+<td>Schedulers.io()</td>
+<td>io操作线程</td>
+<td>网络请求、读写文件等io密集型操作</td>
+</tr>
+<tr>
+<td>Schedulers.computation()</td>
+<td>CPU计算操作线程</td>
+<td>大量计算操作</td>
+</tr>
+</tbody></table>
+<h2>四、流式转换：</h2> 
+<p>当我们调用flatMap()时，经过重重方法重载，最终会走到这里</p> 
+<pre><code>    @CheckReturnValue
+    @SchedulerSupport(SchedulerSupport.NONE)
+    public final &lt;R&gt; Observable&lt;R&gt; flatMap(Function&lt;? super T, ? extends ObservableSource&lt;? extends R&gt;&gt; mapper,
+        // 省略非关键代码
+        return RxJavaPlugins.onAssembly(new ObservableFlatMap&lt;T, R&gt;(this, mapper, delayErrors, maxConcurrency, bufferSize));
+    }</code></pre> 
+<p>我们点击去ObservableFlatMap，可以看到，它最终也是实现了Observable类，那么前面分析过，当外部调用subscribe()时，会到这里：</p> 
+<pre><code>    @Override
+    public void subscribeActual(Observer&lt;? super U&gt; t) {
+        // 省略非关键代码
+        source.subscribe(new MergeObserver&lt;T, U&gt;(t, mapper, delayErrors, maxConcurrency, bufferSize));
+    }</code></pre> 
+<p>我们从MergeObserver类追进去，可以看到，当外部调用onNext()时，会走到这里：</p> 
+<pre><code>@Override
+ public void onNext(T t) {
+  // 省略非关键代码
+  try {
+    p = ObjectHelper.requireNonNull(mapper.apply(t), "The mapper returned a null ObservableSource");
+  } catch (Throwable e) {
+   // 省略非关键代码
+    }
+ }</code></pre> 
+<p>重点在mapper.apply(t)这一行，点击去可以看到这是一个抽象方法，那么它的具体实现在哪里呢？一步一步的回溯，发现这个mapper就是我们外部传入的new Function&lt;String, ObservableSource&lt;String&gt;&gt;()，那么这个apply就是外部我们需要重写的方法，也就是这个打印这个log的位置：System.out.println("我们这里需要重写的方法")；至此，整个回路追踪可以完整串联起来</p> 
+<p>解释：其它省略的方法内容，因为flatMap可以执行多个，省略的代码就是循环执行的分发流程，我们只追寻主要流程，这些分支流程没有详细区分</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

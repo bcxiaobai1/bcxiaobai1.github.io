@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Spark SQL join的三种实现方式 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Spark SQL join的三种实现方式</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h1>
+<a id="_2"></a>引言</h1> 
+<p>join是SQL中的常用操作，良好的表结构能够将数据分散到不同的表中，使其符合某种规范(mysql三大范式)，可以最大程度的减少数据冗余，更新容错等，而建立表和表之间关系的最佳方式就是join操作。</p> 
+<p>对于Spark来说有3种Join的实现，每种Join对应的不同的应用场景(SparkSQL自动决策使用哪种实现范式)：</p> 
+<p>1.Broadcast Hash Join：适合一张很小的表和一张大表进行Join；</p> 
+<p>2.Shuffle Hash Join：适合一张小表(比上一个大一点)和一张大表进行Join；</p> 
+<p>2.Sort Merge Join：适合两张大表进行Join；</p> 
+<p>前两者都是基于Hash Join的，只不过Hash Join之前需要先shuffle还是先brocadcast。下面详细解释一下这三种Join的具体原理。</p> 
+<h2>
+<a id="Hash_Join_16"></a>Hash Join</h2> 
+<p>先来看看这样一条SQL语句：select * from order,item where item.id = order.i_id，参与join的两张表是order和item，join key分别是item.id以及order.i_id。现在假设Join采用的是hash join算法，整个过程会经历三步：</p> 
+<p>1.确定Build Table以及Probe Table：这个概念比较重要，Build Table会被构建成以join key为key的hash table，而Probe Table使用join key在这张hash table表中寻找符合条件的行，然后进行join链接。Build表和Probe表是Spark决定的。通常情况下，小表会被作为Build Table，较大的表会被作为Probe Table。</p> 
+<p>2.构建Hash Table：依次读取Build Table(item)的数据，对于每一条数据根据Join Key(item.id)进行hash，hash到对应的bucket中(类似于HashMap的原理)，最后会生成一张HashTable，HashTable会缓存在内存中，如果内存放不下会dump到磁盘中。</p> 
+<p>3.匹配：生成Hash Table后，在依次扫描Probe Table(order)的数据，使用相同的hash函数(在spark中，实际上就是要使用相同的partitioner)在Hash Table中寻找hash(join key)相同的值，如果匹配成功就将两者join在一起。</p> 
+<p>这里有两个问题需要关注：</p> 
+<p>1.hash join性能如何？很显然，hash join基本都只扫描两表一次，可以认为O(a+b)，较之最极端的是笛卡尔积运算O(a*b)；</p> 
+<p>2.为什么Build Table选择小表？道理很简单，因为构建Hash Table时，最好可以把数据全部加载到内存中，因为这样效率才最高，这也决定了hash join只适合于较小的表，如果是两个较大的表的场景就不适用了。</p> 
+<p>上文说，hash join是传统数据库中的单机join算法，在分布式环境在需要经过一定的分布式改造，说到底就是尽可能利用分布式计算资源进行并行计算，提高总体效率，hash join分布式改造一般有以下两种方案：</p> 
+<p>1.broadcast hash join：将其中一张较小的表通过广播的方式，由driver发送到各个executor，大表正常被分成多个区，每个分区的数据和本地的广播变量进行join(相当于每个executor上都有一份小表的数据，并且这份数据是在内存中的，过来的分区中的数据和这份数据进行join)。broadcast适用于表很小，可以直接被广播的场景；</p> 
+<p>2.shuffle hash join：一旦小表比较大，此时就不适合使用broadcast hash join了。这种情况下，可以对两张表分别进行shuffle，将相同key的数据分到一个分区中，然后分区和分区之间进行join。相当于将两张表都分成了若干小份，小份和小份之间进行hash join，充分利用集群资源。</p> 
+<h2>
+<a id="Broadcast_Hash_Join_39"></a>Broadcast Hash Join</h2> 
+<p>大家都知道，在数据库的常见模型中(比如星型模型或者雪花模型)，表一般分为两种：事实表和维度表，维度表一般指固定的、变动较少的表，例如联系人、物品种类，一般数据有限；而事实表一遍记录流水，比如销售清单等，通过随着时间的增长不断增长。</p> 
+<p>因为join操作是对两个表中key相同的记录进行连接，在SparkSQL中，对两个表做join的最直接的方式就是先根据key进行分区，再在每个分区中把key相同的记录拿出来做连接操作，但这样不可避免的涉及到shuffle，而shuffle是spark中比较耗时的操作，我们应该尽可能的设计spark应用使其避免大量的shuffle操作。</p> 
+<p>Broadcast Hash Join的条件有以下几个：</p> 
+<p>1.被广播的表需要小于spark.sql.autoBroadcastJoinThreshold所配置的信息，默认是10M；</p> 
+<p>2.基表不能被广播，比如left outer join时，只能广播右表。</p> 
+<p>看起来广播是一个比较理想的方案，但它有没有缺点呢？缺点也是很明显的，这个方案只能广播较小的表，否则数据的冗余传输就是远大于shuffle的开销；另外，广播时需要被广播的表collect到driver端，当频繁的广播出现时，对driver端的内存也是一个考验。</p> 
+<p>broadcast hash join可以分为两步：</p> 
+<p>1.broadcast阶段：将小表广播到所有的executor上，广播的算法有很多，最简单的是先发给driver，driver再统一分发给所有的executor，要不就是基于bittorrete的p2p思路；</p> 
+<p>2.hash join阶段：在每个executor上执行 hash join，小表构建为hash table，大表的分区数据匹配hash table中的数据；</p> 
+<h2>
+<a id="Shuffle_Hash_Join_59"></a>Shuffle Hash Join</h2> 
+<p>当一侧的表比较小时，我们可以选择将其广播出去以避免shuffle，提高性能。但因为被广播的表首先被collect到driver端，然后被冗余的发送给各个executor上，所以当表比较大是，采用broadcast join会对driver端和executor端造成较大的压力。</p> 
+<p>我们可以通过将大表和小表都进行shuffle分区，然后对相同节点上的数据的分区应用hash join，即先将较小的表构建为hash table，然后遍历较大的表，在hash table中寻找可以匹配的hash值，匹配成功进行join连接。这样既在一定程度上减少了driver广播表的压力，也减少了executor端读取整张广播表的内存消耗。</p> 
+<p>Sshuffle Hash Join分为两步：</p> 
+<p>1.对两张表分别按照join key进行重分区(分区函数相同的时候，相同的相同分区中的key一定是相同的)，即shuffle，目的是为了让相同join key的记录分到对应的分区中；</p> 
+<p>2.对对应分区中的数据进行join，此处先将小表分区构建为一个hash表，然后根据大表中记录的join key的hash值拿来进行匹配，即每个节点山单独执行hash算法。</p> 
+<p>Shuffle Hash Join的条件有以下几个：</p> 
+<ol>
+<li> <p>分区的平均大小不超过spark.sql.autoBroadcastJoinThreshold所配置的值，默认是10M</p> </li>
+<li> <p>基表不能被广播，比如left outer join时，只能广播右表</p> </li>
+<li> <p>一侧的表要明显小于另外一侧，小的一侧将被广播（明显小于的定义为3倍小，此处为经验值）</p> </li>
+</ol> 
+<p>看到这里，可以初步总结出来如果两张小表join可以直接使用单机版hash join；如果一张大表join一张极小表，可以选择broadcast hash join算法；而如果是一张大表join一张小表，则可以选择shuffle hash join算法；那如果是两张大表进行join呢？</p> 
+<h2>
+<a id="Sort_Merge_Join_82"></a>Sort Merge Join</h2> 
+<p>上面介绍的方式只对于两张表有一张是小表的情况适用，而对于两张大表，但当两个表都非常大时，显然无论哪种都会对计算内存造成很大的压力。这是因为join时两者采取都是hash join，是将一侧的数据完全加载到内存中，使用hash code取join key相等的记录进行连接。</p> 
+<p>当两个表都非常大时，SparkSQL采用了一种全新的方案来对表进行Join，即Sort Merge Join。这种方式不用将一侧数据全部加载后再进行hash join，但需要在join前将数据进行排序。</p> 
+<p>首先将两张表按照join key进行重新shuffle，保证join key值相同的记录会被分在相应的分区，分区后对每个分区内的数据进行排序，排序后再对相应的分区内的记录进行连接。可以看出，无论分区有多大，Sort Merge Join都不用把一侧的数据全部加载到内存中，而是即用即丢；因为两个序列都有有序的，从头遍历，碰到key相同的就输出，如果不同，左边小就继续取左边，反之取右边。从而大大提高了大数据量下sql join的稳定性。</p> 
+<p>SparkSQL对两张大表join采用了全新的算法－sort-merge join，整个过程分为三个步骤：</p> 
+<ol>
+<li> <p>shuffle阶段：将两张大表根据join key进行重新分区，两张表数据会分布到整个集群，以便分布式并行处理；</p> </li>
+<li> <p>sort阶段：对单个分区节点的两表数据，分别进行排序；</p> </li>
+<li> <p>merge阶段：对排好序的两张分区表数据执行join操作。join操作很简单，分别遍历两个有序序列，碰到相同join key就merge输出，否则取更小一边</p> </li>
+</ol>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

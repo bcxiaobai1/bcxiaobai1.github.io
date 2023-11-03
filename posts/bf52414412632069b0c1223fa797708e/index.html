@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>UE5 Lumen实时全局光照系统简单分析 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">UE5 Lumen实时全局光照系统简单分析</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-dark">
+                    
+                        
+                    
+                    <h2>
+<a id="_0"></a>前言</h2> 
+<p>  做这个调研分析的时间应该在去年（2022）十二月初的几天时间，主要是通过UE官方的<a href="https://www.youtube.com/watch?v=QdV_e-U7_pQ">直播讲解</a>和在SIGGRAPH 2021（<a href="https://www.youtube.com/watch?v=2GYXuM10riw&amp;t=42s">Radiance Caching for Real-Time Global Illumination</a>）及2022（<a href="https://advances.realtimerendering.com/s2022/SIGGRAPH2022-Advances-Lumen-Wright%20et%20al.pdf">Lumen: Real-time Global Illumination in Unreal Engine 5</a>）的两次分享进行学习了解。没有看具体源码，所以文章内容全部为个人理解，同时Lumen经过后续更新，似乎一些方法也已经被更换。</p> 
+<h2>
+<a id="Lumen_2"></a>什么是Lumen</h2> 
+<p>  Lumen是UE5的实时全局光照（Realtime Global Illumination）解决方案，核心为一套实时的软光线追踪系统，但同时也支持硬件光追，本文的关注点也在其软光追部分。</p> 
+<p><img src="https://images2.imgbox.com/7c/24/Z2awifJ0_o.png" alt="" width="550" height="300"><br>   简单来说Lumen实现实时GI的主要方式是就是在屏幕空间全局光照（SSGI）的基础上使用有向距离场（SDF）加速光线与场景求交，并通过Surface Cache存储材质光照信息，即基本过程如下：</p> 
+<ol>
+<li>使用SSGI进行光线追踪，得到一部分像素的全局光照信息</li>
+<li>对于SSGI未命中的像素，通过使用屏幕空间探针插值来获得全局光照信息（屏幕空间探针发射多条射线对场景进行追踪）。这里也使用了稀疏的世界空间探针处理远光以降低噪点</li>
+<li>光线追踪部分使用了场景的距离场进行求交，并通过Surface Cache获得光照信息（Surface Cache在运行时会有选择的进行更新）</li>
+</ol> 
+<h2>
+<a id="SSGI_11"></a>SSGI</h2> 
+<p>  屏幕空间全局光照的做法就是利用屏幕空间的深度、法线等信息进行光线追踪，Lumen中使用了层次Z缓冲（Hierarchical Z Buffer）的结构来加速求交。当然，SSGI最大的问题自然是无法获得屏幕外的信息（就像SSR实现的水面，低下头倒影也跟着屏幕上方被裁切掉了）。</p> 
+<h2>
+<a id="_14"></a>屏幕空间探针</h2> 
+<p>  只是SSGI并不能满足全局光照的需求，于是就还需要在场景中进行光线追踪。传统的方式是对屏幕上的每一个像素发射一条或多条射线与场景求交，而Lumen认为这种方式噪声相对较大，于是采用了在屏幕空间的物体表面每隔一定距离放置探针的方式，并在探针处追踪较多的光线，并对采样的Radiance进行缓存。探针先是稀疏均匀放置的，但如果某一像素不能使用周围探针进行插值，则会在该像素位置放置探针（如下图所示）。</p> 
+<p><img src="https://images2.imgbox.com/04/5c/k4Wks4Wj_o.png" alt="" width="650" height="230"><br> 最后探针会进行一个3x3的卷积降噪，并最终将光照结果插值到像素上。同时这里也使用了BRDF以及上一帧的光照信息进行重要性采样，从而提高了采样的效果。</p> 
+<p><img src="https://images2.imgbox.com/9c/de/vHRatieq_o.png" alt="" width="650" height="300"></p> 
+<h2>
+<a id="_23"></a>世界空间探针</h2> 
+<p>  只是屏幕空间探针仍然不能很好的解决远光问题，因此lumen引入了世界空间探针，在世界空间更稀疏的放置探针，但采样了更多方向的光。此时lumen将屏幕空间探针追踪距离设置为一个较短范围内，更远的距离使用世界空间探针，但为了防止漏光，世界空间探针追踪的方向可能和屏幕空间探针的方向不同，虽然这也引入了一定的偏差。</p> 
+<p><img src="https://images2.imgbox.com/2d/bc/s1qwZPF8_o.png" alt="" width="250" height="250"></p> 
+<h2>
+<a id="Mesh_SDFSurface_Cache_27"></a>Mesh SDF与Surface Cache</h2> 
+<p>  前边提到了需要在场景中进行光线追踪，Lumen采用有向距离场SDF得到空间一个点到物体表面的最近距离（当在物体内部时，距离为负），使用RayMarching快速获得光线与场景的交点。因为通常模型都是三角面表示的，因此模型对应的距离场需要额外计算，而且表示精度会有一定损失。Lumen为每个静态网格单独生成Mesh SDF，在模型导入的时候被生成。</p> 
+<p><img src="https://images2.imgbox.com/7a/02/MTDXMlBw_o.png" alt="" width="600" height="250"></p> 
+
+  Mesh SDF，可以看到场景中的物体表示是分离开的 
+   
+<p>  SDF只提供了交点和法线，不能提供光线交点的材质光照等信息，同时也需要对一些昂贵的计算进行缓存，于是Lumen采用了Surface Cache来存储物体的材质光照信息。简单来说，一个网格体被多个轴对齐的Mesh Card捕捉并存储。</p> 
+<p><img src="https://images2.imgbox.com/a2/33/ZPm1xshS_o.png" alt="" width="550" height="250"><br> Surface Cache在运行时会不断更新，但并不是每帧都全部更新，而是根据与上次使用时间、上次更新时间相关的优先级选择其中的一部分。对于Surface Cache直接光照的计算会复用shadow maps，不能解决的部分向光源追踪光线判断是否在阴影中。间接光照则类似于上述讲到的屏幕空间探针，Lumen会以一定密度在表面放置探针并追踪光线，将结果插值至周围纹素。</p> 
+<h2>
+<a id="Global_SDFVoxel_Lighting_39"></a>Global SDF与Voxel Lighting</h2> 
+<p>  上述内容理论上其实已经能够跑通了，但场景中通常存在大量的网格体，遍历所有Mesh SDF进行RayMarching代价过于昂贵，于是Lumen又为整个场景生成了一个Global SDF（动态物体与静态物体分别缓存，在运行时仅更新变化的部分）。</p> 
+<p><img src="https://images2.imgbox.com/89/d3/2a9s3leh_o.png" alt="" width="600" height="250"></p> 
+
+  Global SDF，精度更低但求交更快 
+   
+<p>相比于Mesh SDF， Global SDF精度要更低，Lumen选择在近距离追踪时采用Mesh SDF（在场景单元格内维护了从该单元格出发求交，所需求交的物体，因此只会求交一部分物体），在远距离追踪时采用Global SDF。但，这里就又出现了一个问题…Surface Cache是基于物体的，当光线与Global SDF求交时，找到了交点却不知道这是哪个网格体被击中了，无法对物体surface cache进行采样。因此Lumen又使用了Voxel Lighting，将相机周围体素化并将Surface Cache中的光照信息存储在里面，这样在与GDF求得交点后就可以对应至Voxel获得光照信息。</p> 
+<p><img src="https://images2.imgbox.com/26/ae/KZApJzBQ_o.png" alt="" width="300" height="250"></p> 
+<h2>
+<a id="_50"></a>总结</h2> 
+<p>  所以Lumen的核心思路就是在SSGI的基础上对SDF的表达的场景进行更快的光线追踪，同时选择性的更新场景中的光照信息以降低压力，并使用屏幕探针和世界探针来进一步降低噪声。其中使用了Mesh Card捕捉物体表面并存储在Surface Cache中，Surface Cache用来提供SDF无法提供的物体表面材质、光照信息，体素化场景则是用来在更大场景中提供光照信息。</p> 
+<p>（再次说明：这是经过个人理解的旧的Lumen方案，其中可能存在错误，参考见前言部分）</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>【SSO单点登录】分布式Session存在问题&amp;amp;&amp;amp; spring-session的设计之妙 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【SSO单点登录】分布式Session存在问题&amp;amp;&amp;amp; spring-session的设计之妙</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+                <div id="content_views" class="htmledit_views">
+                    <h1>?本篇速览</h1> 
+<ul>
+<li> <p>session存在的问题</p> 
+  <ul><li>分布式session如何解决 
+    <ul><li>nginx的ip_hash</li></ul>
+</li></ul>
+</li>
+<li> <p>spring-session</p> 
+  <ul>
+<li>查询的原理&amp;源码</li>
+<li>过期的原理&amp;源码 
+    <ul>
+<li>扩展redis过期策略</li>
+<li>为何spring-session要如此设计数据结构</li>
+</ul>
+</li>
+</ul>
+</li>
+<li> <p>token取代session，实现服务端到客户端的跨变</p> </li>
+</ul>
+<h1>?session存在的问题</h1> 
+<ol>
+<li>服务端需要存储session，占用内存高</li>
+<li>不同服务器，无法共享session【分布式的场景】，这种情况下通常需要借助redis等数据库来做存储</li>
+</ol>
+<blockquote> 
+ <p>没有什么是加一层解决不了的hhh</p> 
+</blockquote> 
+<h2>分布式session如何解决</h2> 
+<p>当我们用nginx做负载均衡时，用户在A服务器登录了，A服务器存储了session，客户端也存储了cookie，其中有JSESSIONID。</p> 
+<p>此时负载均衡，访问B服务器的话，B服务器是没有这个session的，客户端的cookie里边JSESSIONID也就找不到对应的session，相当于没有登录，此时如何解决呢？</p> 
+<h3>nginx的ip_hash</h3> 
+<p>用nginx的ip_hash可以使得某个ip的用户，只固定访问某个特定的服务器，这样就不会跑到其他服务器，也就不需要考虑session共享的问题了</p> 
+<blockquote> 
+ <p>但与此同时，这又违背了Nginx负载均衡的初衷，请求都固定打到某一台服务器，宕机就不好办了，于是我们有了spring-session</p> 
+</blockquote> 
+<h1>?spring session</h1> 
+<h2>查询的原理</h2> 
+<p>当请求进来的时候，SessionRepositoryFilter 会先拦截到请求，将 request 和 response 对象转换成 SessionRepositoryRequestWrapper 和SessionRepositoryResponseWrapper 。后续当第一次调用 request 的getSession方法时，会调用到 SessionRepositoryRequestWrapper 的<code>getSession</code>方法。</p> 
+<p>这个方法是被重写过的，逻辑是先从 request 的属性中查找，如果找不到；再查找一个key值是"SESSION"的 Cookie，通过这个 Cookie 拿到 <strong>SessionId</strong> 去 Redis 中查找，如果查不到，就直接创建一个RedisSession 对象，同步到 Redis 中。</p> 
+<p>说的简单点就是：拦截请求，将之前在服务器内存中进行 Session 创建销毁的动作，改成在 Redis 中创建。</p> 
+<h3>具体源码</h3> 
+<pre><code>
+    /**
+     * HttpServletRequest getSession()实现
+     */
+    @Override
+    public HttpSessionWrapper getSession() {
+        return getSession(true);
+    }
+
+    @Override
+    public HttpSessionWrapper getSession(boolean create) {
+        HttpSessionWrapper currentSession = getCurrentSession();
+        if (currentSession != null) {
+            return currentSession;
+        }
+        //从当前请求获取sessionId
+        String requestedSessionId = getRequestedSessionId();
+        if (requestedSessionId != null
+                &amp;&amp; getAttribute(INVALID_SESSION_ID_ATTR) == null) {
+            S session = getSession(requestedSessionId);
+            if (session != null) {
+                this.requestedSessionIdValid = true;
+                currentSession = new HttpSessionWrapper(session, getServletContext());
+                currentSession.setNew(false);
+                setCurrentSession(currentSession);
+                return currentSession;
+            }
+            else {
+                // This is an invalid session id. No need to ask again if
+                // request.getSession is invoked for the duration of this request
+                if (SESSION_LOGGER.isDebugEnabled()) {
+                    SESSION_LOGGER.debug(
+                            "No session found by id: Caching result for getSession(false) for this HttpServletRequest.");
+                }
+                setAttribute(INVALID_SESSION_ID_ATTR, "true");
+            }
+        }
+        if (!create) {
+            return null;
+        }
+        if (SESSION_LOGGER.isDebugEnabled()) {
+            SESSION_LOGGER.debug(
+                    "A new session was created. To help you troubleshoot where the session was created we provided a StackTrace (this is not an error). You can prevent this from appearing by disabling DEBUG logging for "
+                            + SESSION_LOGGER_NAME,
+                    new RuntimeException(
+                            "For debugging purposes only (not an error)"));
+        }
+        //为当前请求创建session
+        S session = SessionRepositoryFilter.this.sessionRepository.createSession();
+        //更新时间
+        session.setLastAccessedTime(System.currentTimeMillis());
+        //对Spring session 进行包装(包装成HttpSession)
+        currentSession = new HttpSessionWrapper(session, getServletContext());
+        setCurrentSession(currentSession);
+        return currentSession;
+    }
+
+    /**
+     * 根据sessionId获取session
+     */
+    private S getSession(String sessionId) {
+        S session = SessionRepositoryFilter.this.sessionRepository
+                .getSession(sessionId);
+        if (session == null) {
+            return null;
+        }
+        session.setLastAccessedTime(System.currentTimeMillis());
+        return session;
+    }
+
+    /**
+     * 从当前请求获取sessionId
+     */
+    @Override
+    public String getRequestedSessionId() {
+        return SessionRepositoryFilter.this.httpSessionStrategy
+                .getRequestedSessionId(this);
+    }
+
+    private void setCurrentSession(HttpSessionWrapper currentSession) {
+        if (currentSession == null) {
+            removeAttribute(CURRENT_SESSION_ATTR);
+        }
+        else {
+            setAttribute(CURRENT_SESSION_ATTR, currentSession);
+        }
+    }
+    /**
+     * 获取当前请求session
+     */
+    @SuppressWarnings("unchecked")
+    private HttpSessionWrapper getCurrentSession() {
+        return (HttpSessionWrapper) getAttribute(CURRENT_SESSION_ATTR);
+    }
+
+复制代码</code></pre> 
+<p><em>查询我们搞懂了，很简单，其实就是透明的包装，我们拿还是直接用session.getAttributes()，那相应的也带来了问题</em></p> 
+<ol><li>每次拿的都是本地session缓存中的，如何保证redis和本地session缓存尽量同步呢？我们看看spring-session是怎么处理的</li></ol>
+<h2>redis中存储的数据结构</h2> 
+<p><code>redis</code>中每个session存储了三条信息。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/e3/7a/R6BatFoU_o.png"></p> 
+<ul>
+<li> <p>spring:session:expirations 为set结构， 存储1620393360000 时间点过期的 <strong>spring:session:sessions:expires</strong> 键值</p> </li>
+<li> <p>第二个用来存储Session的详细信息，这个key的过期时间为Session的最大过期时间 + 5分钟。如果默认的最大过期时间为30分钟，则这个key的过期时间为35分钟。</p> </li>
+</ul>
+<p>spring:session:sessions为hash结构，主要内容：包括Session的过期时间间隔、最近的访问时间、attributes</p> 
+<pre><code> hgetall spring:session:sessions:1b8b2340-da25-4ca6-864c-4af28f033327
+ 1) "creationTime"
+ 2) "\\xac\\xed\\x00\\x05sr\\x00\\x0ejava.lang.Long;\\x8b\\xe4\\x90\\xcc\\x8f#\\xdf\\x02\\x00\\x01J\\x00\\x05valuexr\\x00\\x10java.lang.Number\\x86\\xac\\x95\\x1d\\x0b\\x94\\xe0\\x8b\\x02\\x00\\x00xp\\x00\\x00\\x01j\\x9b\\x83\\x9d\\xfd"
+ 3) "maxInactiveInterval"
+ 4) "\\xac\\xed\\x00\\x05sr\\x00\\x11java.lang.Integer\\x12\\xe2\\xa0\\xa4\\xf7\\x81\\x878\\x02\\x00\\x01I\\x00\\x05valuexr\\x00\\x10java.lang.Number\\x86\\xac\\x95\\x1d\\x0b\\x94\\xe0\\x8b\\x02\\x00\\x00xp\\x00\\x00\\a\\b"
+ 5) "lastAccessedTime"
+ 6) "\\xac\\xed\\x00\\x05sr\\x00\\x0ejava.lang.Long;\\x8b\\xe4\\x90\\xcc\\x8f#\\xdf\\x02\\x00\\x01J\\x00\\x05valuexr\\x00\\x10java.lang.Number\\x86\\xac\\x95\\x1d\\x0b\\x94\\xe0\\x8b\\x02\\x00\\x00xp\\x00\\x00\\x01j\\x9b\\x83\\x9d\\xfd"
+
+复制代码</code></pre> 
+<ul><li>第三个用来表示Session在Redis中的过期，这个key-val<strong>不存储任何有用数据【存储一个空值】</strong>，只是表示Session过期而设置。这个key在Redis中的过期时间即为Session的过期时间间隔。</li></ul>
+<p>处理一个session为什么要存储三条数据，而不是一条呢！对于session的实现，需要<strong>监听它的创建、过期等事件</strong>，redis可以<strong>监听某个key的变化</strong>，当key发生变化时，可以快速做出相应的处理。</p> 
+<p>Redis中过期key的策略有两种：</p> 
+<ul>
+<li>当访问时发现其过期，此时才删除，触发事件【惰性删除】</li>
+<li>Redis后台逐步查找过期的键【定时删除】</li>
+</ul>
+<ol><li>当访问时发现其过期，才会产生过期事件，这就意味着，如果一直没有访问的话，过期事件一直不会触发，session也就一直不会销毁。</li></ol>
+<blockquote> 
+ <p>也就是：<strong>无法保证key的过期时间抵达后立即生成过期事件</strong>【把session给销毁】。 这也侧面说明了，前端访问的时候，是先拿服务器的Tocamt本地缓存，而不是拿redis，也就导致了，redis的键一直没有被访问，即使expire到了，也还是没被及时访问，没法触发过期事件</p> 
+</blockquote> 
+<h2>?扩展 -- redis的过期策略</h2> 
+<p>redis 是一个存储键值数据库系统，那它源码中是如何存储所有键值对的呢？</p> 
+<p>Redis 本身是一个典型的 key-value 内存存储数据库，因此所有的 key、value 都保存在之前学习过的 Dict 结构中。不过在其 database 结构体中，<strong>有两个 Dict：一个用来记录 key-value；另一个用来记录 key-TTL。</strong></p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/92/94/0oNWdjbq_o.png"></p> 
+<p>内部结构</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/9b/0d/idNZM1CJ_o.png"></p> 
+<ul>
+<li>dict 是 hash 结构，用来存放所有的 键值对</li>
+<li>expires 也是 hash 结构，用来存放所有设置了 过期时间的 键值对，不过它的 value 值是过期时间</li>
+</ul>
+<p>这里有两个问题需要我们思考：</p> 
+<ul>
+<li>Redis 是如何知道一个 key 是否过期呢？</li>
+<li>利用两个 Dict 分别记录 key-value 对及 key-ttl 对，是不是 TTL 到期就立即删除了呢？</li>
+</ul>
+<h3>惰性删除</h3> 
+<p>惰性删除：顾明思议并不是在 TTL 到期后就立刻删除，而是在访问一个 key 的时候，检查该 key 的存活时间，如果已经过期才执行删除。</p> 
+<h3>周期删除</h3> 
+<p>周期删除：通过一个定时任务，周期性的抽样部分过期的 key，然后执行删除。执行周期有两种：</p> 
+<ul>
+<li>Redis 服务初始化函数 initServer () 中设置定时任务，按照 server.hz 的频率来执行过期 key 清理，模式为 SLOW</li>
+<li>Redis 的每个事件循环前会调用 beforeSleep () 函数，执行过期 key 清理，模式为 FAST</li>
+</ul>
+<p>SLOW 模式规则：</p> 
+<ul>
+<li>执行频率受 server.hz 影响，默认为 10，即每秒执行 10 次，每个执行周期 100ms。</li>
+<li>执行清理耗时不超过一次执行周期的 25%. 默认 slow 模式耗时不超过 25ms</li>
+<li>逐个遍历 db，逐个遍历 db 中的 bucket，抽取 20 个 key 判断是否过期</li>
+<li>如果没达到时间上限（25ms）并且过期 key 比例大于 10%，再进行一次抽样，否则结束</li>
+</ul>
+<p>FAST 模式规则（过期 key 比例小于 10% 不执行 ）：</p> 
+<ul>
+<li>执行频率受 beforeSleep () 调用频率影响，但两次 FAST 模式间隔不低于 2ms</li>
+<li>执行清理耗时不超过 1ms</li>
+<li>逐个遍历 db，逐个遍历 db 中的 bucket，抽取 20 个 key 判断是否过期</li>
+<li>如果没达到时间上限（1ms）并且过期 key 比例大于 10%，再进行一次抽样，否则结束</li>
+</ul>
+<h2>spring-session解决过期事件不及时触发的方法</h2> 
+<p>spring-session为了能够及时的产生Session过期时的过期事件，所以增加了：</p> 
+<pre><code>spring:session:sessions:expires:726de8fc-c045-481a-986d-f7c4c5851a67
+spring:session:expirations:1620393360000
+复制代码</code></pre> 
+<p>spring-session中有个<strong>定时任务</strong>，每个整分钟都会查询相应的spring:session:expirations:【整分钟的时间戳 中的过期SessionId】</p> 
+<p>?然后<strong>再访问一次</strong>这个SessionId，即spring:session:sessions:expires:SessionId ，【相当于<strong>主动访问这个key</strong> ，此时会触发redis的过期发生】——即本地缓存的Session过期事件。</p> 
+<p><em>可能有同学会问？这不跟redis的第二个过期策略一样吗，都是去扫一遍，有必要这里再扫吗？</em></p> 
+<ul><li>关于这个我的理解是：redis中毕竟存储的不仅仅是session，扫描扫到session的周期可能需要很长，所以我们要专门做一个处理session的定时任务，用一个set，只存储session，而且1min就触发一次，保证尽可能同步</li></ul>
+<h3>具体源码</h3> 
+<p>定时任务代码</p> 
+<pre><code>@Scheduled(cron = "0 * * * * *")
+public void cleanupExpiredSessions() {
+	this.expirationPolicy.cleanExpiredSessions();
+}
+复制代码</code></pre> 
+<p><strong>定时任务每整分运行</strong>，执行cleanExpiredSessions方法。expirationPolicy是RedisSessionExpirationPolicy实例，是RedisSession过期策略。</p> 
+<pre><code>public void cleanExpiredSessions() {
+    // 获取当前时间戳
+	long now = System.currentTimeMillis();
+	// 时间滚动至整分，去掉秒和毫秒部分
+	long prevMin = roundDownMinute(now);
+	if (logger.isDebugEnabled()) {
+		logger.debug("Cleaning up sessions expiring at " + new Date(prevMin));
+	}
+	// 根据整分时间获取过期键集合，如：spring:session:expirations:1439245080000
+	String expirationKey = getExpirationKey(prevMin);
+	// 获取所有的所有的过期session
+	Set&lt;Object&gt; sessionsToExpire = this.redis.boundSetOps(expirationKey).members();
+	// 删除过期Session键集合
+	this.redis.delete(expirationKey);
+	// touch访问所有已经过期的session，触发Redis键空间通知消息
+	for (Object session : sessionsToExpire) {
+		String sessionKey = getSessionKey((String) session);
+		touch(sessionKey);
+	}
+}
+复制代码</code></pre> 
+<p>将时间戳滚动至整分</p> 
+<pre><code>static long roundDownMinute(long timeInMs) {
+	Calendar date = Calendar.getInstance();
+	date.setTimeInMillis(timeInMs);
+	// 清理时间错的秒位和毫秒位
+	date.clear(Calendar.SECOND);
+	date.clear(Calendar.MILLISECOND);
+	return date.getTimeInMillis();
+}
+复制代码</code></pre> 
+<p>获取过期Session的集合</p> 
+<pre><code>String getExpirationKey(long expires) {
+	return this.redisSession.getExpirationsKey(expires);
+}
+
+// 如：spring:session:expirations:1439245080000
+String getExpirationsKey(long expiration) {
+	return this.keyPrefix + "expirations:" + expiration;
+}
+复制代码</code></pre> 
+<p>调用Redis的Exists命令，访问过期Session键，触发Redis键空间消息</p> 
+<pre><code>/**
+ * By trying to access the session we only trigger a deletion if it the TTL is
+ * expired. This is done to handle
+ * https://github.com/spring-projects/spring-session/issues/93
+ *
+ * @param key the key
+ */
+private void touch(String key) {
+	this.redis.hasKey(key);
+}
+复制代码</code></pre> 
+<h1>?token取代session</h1> 
+<p>这个留到下篇，我们再来详讲嘞，简单说就是：</p> 
+<ol>
+<li>服务端不存储session了，不需要服务端来维护登录状态</li>
+<li>纯靠客户端来存储token，请求时带上token，后台服务器只需要校验</li>
+</ol>
+<blockquote> 
+ <p>客户端跟服务端，是1对多的关系，客户端只需要存储一份tokne即可，无需考虑共享问题 而若是服务端存【也就是session】，就需要考虑共享问题</p> 
+</blockquote>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

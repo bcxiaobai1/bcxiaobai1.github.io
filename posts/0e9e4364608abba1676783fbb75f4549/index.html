@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>Huff实战:编写测试极致效率数学模块 - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Huff实战:编写测试极致效率数学模块</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="markdown_views prism-atom-one-light">
+                    
+                        
+                    
+                    <h3>
+<a id="_0"></a>概述</h3> 
+<p>读者可前往 <a href="https://blog.wssh.trade/posts/huff-math/">我的博客</a> 获得更好的阅读体验。</p> 
+<p><code>Huff</code> 是 EVM 专用语言，与 Solidity 不同，Huff 是面向底层的语言，可以类比与汇编语言。这意味着开发者可以直接操作栈、内存和存储等内容，但另一方面，这些底层操作往往没有安全保证，这需要开发者更加仔细的审计和测试代码。本文章由于涉及大量 EVM 底层操作，希望读者阅读过以下文章:</p> 
+<ol>
+<li><a href="https://blog.wssh.trade/posts/foundry-contract-upgrade-part1/">Foundry教程：使用多种方式编写可升级的智能合约(上)</a></li>
+<li><a href="https://blog.wssh.trade/posts/foundry-contract-upgrade-part2/">Foundry教程：使用多种方式编写可升级的智能合约(下)</a></li>
+<li><a href="https://blog.wssh.trade/posts/deep-in-eip1167/">EVM底层探索:字节码级分析最小化代理标准EIP1167</a></li>
+</ol> 
+<p>这些文章都是关于代理合约话题的，这是因为代理合约往往需要使用 yul 汇编语言实现核心功能，所以大量涉及 EVM 底层内容。</p> 
+<p>当然，为了保证所编写的底层合约的安全性，也希望读者阅读过 <a href="https://blog.wssh.trade/posts/foundry-test/">Foundry 高级测试: Fuzz、Invariant与形式化证明</a> ，该篇博客主要介绍了一些高级测试技巧。</p> 
+<p>由于 Huff 使用了大量底层操作码，请读者阅读过程中一直开启 <a href="https://www.evm.codes/">evm.codes</a> ，本文不再给出每个操作码对应的链接。</p> 
+<p>本文主要准备使用 huff 实现一个高效率的数学模块，由于计算机底层数学操作大量使用位移等底层计算原语，使用 Solidity 会大量增加合约的 gas 消耗，本文的目标是构造一个在 gas 方面达到极致的合约。但需要注意极致的优化意味着可读性的大幅度降低。</p> 
+<p>笔者本人并不是算法领域的工程师，但笔者最近阅读了 <a href="https://book.douban.com/subject/25837031/">《算法心得：高效算法的奥秘》</a> 一书，此书包含大量依赖二进制数据操作的黑魔法，本文大部分实现都来自此书。</p> 
+<p>本文所有代码位于 <a href="https://github.com/wangshouh/huffLearn">Github 仓库</a> 中，读者可以参考。</p> 
+<blockquote> 
+ <p>为什么不选择使用 huff 实现 ERC-20 等常见合约？原因在于 huff 本身的表达能力较差，官方实现的 ERC20 有近 500 行。</p> 
+</blockquote> 
+<h3>
+<a id="EVM__23"></a>EVM 基础</h3> 
+<p>对于 EVM 整体架构，我们可以通过下图表示:</p> 
+<p><img src="https://images2.imgbox.com/94/c3/GB4inXq3_o.png" alt="EVM architecture"></p> 
+<p>我们可以看到可变的数据只有:</p> 
+<ul>
+<li>calldata 请求合约调用的数据</li>
+<li>Gas 交易的 gas 费用</li>
+<li>PC <a href="https://en.wikipedia.org/wiki/Program_counter">程序计数器</a>，记录当前运行的代码的位置</li>
+<li>stack 栈，用于存放计算所需要的参数和执行计算操作</li>
+<li>memory 内存</li>
+</ul> 
+<p>而实际上，我们主要操作 <code>stack</code> 栈和 <code>memory</code> 内存，而 <code>calldata</code> 区域在合约运行时是只读的。</p> 
+<p>当然，我们也可以修改 <code>storage</code> 存储。</p> 
+<p>一笔交易触发的 EVM 运行流程如下:</p> 
+<p><img src="https://images2.imgbox.com/47/f6/mE8vQQ77_o.png" alt="EVM Run"></p> 
+<p>下图展示了 <code>stack</code> 栈的作用:</p> 
+<p><img src="https://images2.imgbox.com/18/86/ThC3YDgO_o.png" alt="stack use"></p> 
+<p>栈的最大深度为 1024 个元素，每个元素位长为 256 ，我们可以使用 <code>PUSH</code> 向栈内推入元素，也可以使用 <code>POP</code> 弹出元素，同时也可以对栈内元素进行操作，如通过 <code>ADD</code> 实现栈内元素的相加。上图即展示了栈内元素相加的情况。</p> 
+<p>几乎所有的 EVM 操作码都会对栈进行操作，<a href="https://www.evm.codes/">evm.codes</a> 中给出了每个操作码所需要的栈元素，即 <code>Stack Input</code> 一列。</p> 
+<p>下图展示了 <code>memory</code> 内存的基础情况:</p> 
+<p><img src="https://images2.imgbox.com/bd/71/fOzA5F6O_o.png" alt="EVM Memory"></p> 
+<p>内存是一个可寻址的线性空间，一般情况下，我们使用 <code>MSTORE</code> 操作码向地址内写入数据，使用 <code>MLOAD</code> 操作码读取数据，值得注意的是，这两个操作码仅支持 256 bit 数据的整体写入和读取。上图展示了一种较常见的情况，即将栈内的结果写入内存中。</p> 
+<blockquote> 
+ <p>在 EVM 中，虽然不存在内存溢出情况，但这不意味着我们不需要进行垃圾回收，因为随着写入的偏移增加，gas 消耗也随之增长。</p> 
+</blockquote> 
+<p>下图展示了 <code>storage</code> 存储的一般情况:</p> 
+<p><img src="https://images2.imgbox.com/2a/eb/6ybjrP1u_o.png" alt="Contract Storgae"></p> 
+<p>在 EVM 内，存储是一个 KV 数据库(或理解为词典数据类型)，每个数据由 256 bit 长度的键与 256 bit 长度的值构成。一般使用 <code>SSTORE</code> 进行存储，使用 <code>SLOAD</code> 进行读取。值得注意的是，操作存储是一项开销极大的操作。</p> 
+<p>最后，我们介绍没有在图中展示的 <code>return data</code> ，该内容用于对合约调用者返回信息，一般使用 <code>RETURN</code> 操作码返回操作成功后的数据，使用 <code>REVERT</code> 操作码返回报错信息。接受方可以使用 <code>RETURNDATACOPY</code> 等操作码进行 <code>return data</code> 的数据读取。</p> 
+<p>上述内容仅是对 EVM 进行了初步介绍，可以保证读者基本可以完成本文内容的阅读，如果读者有时间，请阅读 <a href="https://www.evm.codes/about">About the EVM</a>。</p> 
+<p>更多参考资料可以使用 EVM tag 在我的 <a href="https://airtable.com/shrg0jA0QIK5rQ4Oz/tblg1E6WHAkaOfRrp">阅读数据库</a> 里搜索，也欢迎大家订阅 <a href="https://blog.wssh.trade/posts/channel-recommend/">我的频道</a> 以获取最新的资料。</p> 
+<p><img src="https://images2.imgbox.com/4c/14/nAJ7VMy6_o.png" alt="EVM Read"></p> 
+<h3>
+<a id="_75"></a>环境配置</h3> 
+<h4>
+<a id="huffc__77"></a>huffc 安装</h4> 
+<p>由于 foundry 并没有原生支持 huff 语言，所以我们需要单独安装 huff 的编译器 <code>huffc</code> ，由于 <code>huffc</code> 也是使用 Rust 编写的程序，所以安装较为简单。命令如下:</p> 
+<pre><code class="prism language-bash"><span class="token function">curl</span> -L get.huff.sh <span class="token operator">|</span> <span class="token function">bash</span>
+<span class="token builtin class-name">source</span> .bashrc
+huffup --version nightly
+</code></pre> 
+<p>最后，我们运行 <code>huffc --version</code> 可以获得版本输出。</p> 
+<blockquote> 
+ <p>在安装过程中，会显示 <code>/root/.huff/bin/huffup: line 25: yarn: command not found</code> 输出，该输出不是要求安装 <code>yarn</code> ，而是表示该用户环境内没有 <code>yarn</code> 版本的 <code>huffc</code> (早期的 <code>huffc</code> 是使用 <code>javascript</code> 编写的，该版本已被废弃)。</p> 
+</blockquote> 
+<h4>
+<a id="_91"></a>项目初始化</h4> 
+<p>运行以下命令使用 <code>huff-project-template</code> 模板建立项目:</p> 
+<pre><code class="prism language-bash">forge init --template https://github.com/huff-language/huff-project-template huffLearn
+</code></pre> 
+<p>接下来就进入了正式的合约编程环节了，读者可以选择使用自己喜欢的编辑器，如 <code>vscode</code> 或 <code>sublime</code> ，前者需要搭配 <a href="https://github.com/huff-language/vscode-huff">vscode-huff</a> 插件，实现了很多有用的功能，而后者需要搭配 <a href="https://github.com/nguyenphuminh/hufflime">hufflime</a> 插件，仅有语法高亮的功能。</p> 
+<h4>
+<a id="_101"></a>常数表</h4> 
+<p>为方便读者阅读，此处我们给出一些转换数据:</p> 
+<ol>
+<li>1 byte = 8 bits</li>
+<li>1 byte = 2 hex</li>
+<li>1 hex = 4 bits</li>
+</ol> 
+<p>其中，<code>hex</code> 表示一个 16 进制字符。</p> 
+<p>接下来，读者可以进行一些简单的训练:</p> 
+<ol>
+<li>已知 EVM 内存位长为 256 bits，请计算对应的 <code>byte</code>
+</li>
+<li>已知某函数选择器为 <code>0x8cc5ce99</code> ，请计算对应的 <code>bits</code>
+</li>
+</ol> 
+<p>答案为:</p> 
+<ol>
+<li>
+<code>32 bytes</code> (此处使用的 <code>bytes</code> 仅表示其为 <code>byte</code> 的复数形式)</li>
+<li>32 bits</li>
+</ol> 
+<h3>
+<a id="_120"></a>基础运算</h3> 
+<p>在本节中，我们主要介绍以下内容:</p> 
+<ol>
+<li>可溢出加法</li>
+<li>不可溢出加法</li>
+<li>不可溢出乘法</li>
+<li>前导 0 计数算法</li>
+<li>log2 算法</li>
+<li>开方算法</li>
+</ol> 
+<p>正如前文所言，在本文中，我们将大量使用二进制操作黑魔法，以追求极致的 gas 效率。在本文中，我们不会分析算法的安全性问题，原因如下:</p> 
+<ol>
+<li>本文介绍的算法均来自传统计算机领域，属于底层算法，出现安全问题的概率较小</li>
+<li>严格证明算法的正确性需要使用 <code>z3</code> 等求解器形式化证明，为保证文章的专题性，我们不会进行讨论，但可能会在下一篇文章内对其进行分析。</li>
+</ol> 
+<h4>
+<a id="_136"></a>可溢出加法</h4> 
+<p>可溢出加法并没有什么值得讨论的算法问题，本节主要是为了读者可以更快适应 huff 编程。</p> 
+<p>本节正式进入 huff 编程，我们将展示一些简单的基础的 huff 代码，请读者在 <code>src</code> 文件夹内创建 <code>HuffMath.huff</code> 文件，写入以下内容:</p> 
+<pre><code class="prism language-huff">#define function addNumbers(uint256,uint256) nonpayable returns (uint256)
+
+#define macro NON_SAFE_ADD() = takes (0) returns (0) {
+	0x04 calldataload	// [num1]
+	0x24 calldataload	// [num2, num1]
+	add 			// [result]
+	0x00 mstore
+	0x20 0x00 return
+}
+
+#define macro MAIN() = takes (0) returns (0) {
+	0x00 calldataload 0xE0 shr
+
+	dup1 __FUNC_SIG(addNumbers) eq addNumbers jumpi
+
+	addNumbers:
+		NON_SAFE_ADD()
+}
+</code></pre> 
+<p>上述 huff 代码构造了一个用于加法的函数。在文件开始，我们需要定义该合约所拥有的函数的 ABI 接口，基本与 solidity 的接口写法一致，但此处增加了 <code>nonpayable</code> 标识符表示该函数不操作 ETH 原生资产，且此处无需表明函数的 <code>public</code> 等属性。</p> 
+<p>然后，我们定义具体的函数 <code>NON_SAFE_ADD</code> ，此处使用了 <code>macro</code> 标识，在 huff 中，<code>macro</code> 可以理解为函数的意思。然后，我们使用 <code>takes</code> 规定该函数从栈内消耗的元素数量。此处，我们设计的 <code>NON_SAFE_ADD</code> 函数并不需要消耗栈内元素，所以此处使用了 <code>takes (0)</code> 作为定义。</p> 
+<p><code>returns</code> 表示函数运行结束后，栈内剩余的元素数量，由于此处 <code>NON_SAFE_ADD</code> 运行结束后直接将运行结果返回，所以使用 <code>returns (0)</code> 表示函数运行结束后栈内无剩余元素。</p> 
+<p>接下来，我们进入函数体的定义。我们可以看到每行末尾都有一个形如 <code>// [num1]</code> 的注释，这些注释只是方便开发者了解当前栈内的元素情况，在编译时没有实际意义。</p> 
+<p><code>NON_SAFE_ADD</code> 可以分为三部分:</p> 
+<ol>
+<li>将参数写入栈内，使用 <code>calldataload</code> 操作符</li>
+<li>具体计算环节，使用 <code>add</code> 操作符</li>
+<li>返回环节，使用 <code>mstore</code> 和 <code>return</code> 操作符</li>
+</ol> 
+<p>关于 <code>calldata</code> 的具体构成，我们在此处不进行详细讨论，读者可以参考 Solidity 文档的 <a href="https://docs.soliditylang.org/en/v0.8.19/abi-spec.html#contract-abi-specification">Contract ABI Specification</a> 一节，或者参考 <a href="https://degatchi.com/articles/reading-raw-evm-calldata/">Reversing The EVM: Raw Calldata</a> 、<a href="https://medium.com/@ljmanini/abi-encoding-deep-dive-fbb750facea9">ABI Encoding Deep Dive</a> 等文章。</p> 
+<blockquote> 
+ <p>可能有读者好奇作为 huff 语言开发，为什么要看 solidity 文档的解释？这是因为 solidity 的合约 ABI 规范已经成为了业内标准，包括 vyper 在内的智能合约语言都符合 solidity 规范。</p> 
+</blockquote> 
+<p>在 <code>calldata</code> 导入后，我们获得了形如 <code>[num2, num1]</code> 的栈结构，我们使用 <code>add</code> 操作栈元素，操作后获得 <code>[num1+num2]</code> 的栈结构。接下来我们使用 <code>0x00 mstore</code> 语句，此语句可以分解为将 <code>0x00</code> 推入栈内，运行 <code>mstore</code> 操作码。<code>mstore</code> 的具体功能是将栈内元素放置到内存中，具体功能请参考 <a href="https://www.evm.codes/#52?fork=merge">evm codes</a></p> 
+<blockquote> 
+ <p>在 huff 中，所有写出的数字都会被推入栈内，无需手动调用 <code>PUSH</code> 操作码</p> 
+</blockquote> 
+<p>完成 <code>mstore</code> 操作后，栈内元素均被清空，接下来，我们需要进行数据返回操作，使用 <code>0x20 0x00</code> 向栈内推入 <code>0x20</code> 和 <code>0x00</code> 元素，调用 <code>return</code> 从内存中返回值。其中，<code>0x00</code> 指明 <code>offset</code> ，即返回内容在内存中的起始位置，而 <code>0x20</code> 指明 <code>size</code>，即返回内容的长度。</p> 
+<p>以上，我们就完成了一个简单的函数编写。</p> 
+<p>仅有函数是不够的，我们需要定义一个主函数进行代码调用分发，该函数是字节码的开始，主要功能是根据 <code>calldata</code> 的函数选择器部分选择对应的函数运行。为方便读者阅读，我们再次展示此代码:</p> 
+<pre><code class="prism language-huff">#define macro MAIN() = takes (0) returns (0) {
+	0x00 calldataload 0xE0 shr
+
+	dup1 __FUNC_SIG(addNumbers) eq addNumbers jumpi
+
+	addNumbers:
+		NON_SAFE_ADD()
+}
+</code></pre> 
+<p>此处我们将使用 <code>0x00 calldataload</code> 将数据导入到栈内，该过程可被分解为 <code>0x00</code> 推入栈内，然后运行 <code>calldataload</code> 操作码。然后，我们使用 <code>0xE0 shr</code> 对栈内数据进行右移 <code>0xe0</code> 位(即右移224位)操作，此处栈内仅剩余长度为 32 位的选择器字段。然后，我们使用 <code>dup1</code> 复制该元素，此时栈结构 <code>[selector, selector]</code> (此处的 <code>selector</code> 指处理好的待匹配的函数选择器)。然后，我们将代码中提前计算好的函数选择器推入栈内，获得 <code>[0x0f3d0204, selector, selector]</code> (此处使用 <code>0x0f3d0204</code> 即 <code>addNumber</code> 的函数选择器)，进行 <code>eq</code> 相等判断。如果相等，我们获得 <code>[1, selector]</code> 栈结构。然后，我们看到了 <code>addNumber jumpi</code> 两个操作码，我们可以视两者为一个整体，等同于 C 语言或者 golang 中的 <code>goto label</code> 结构，但 <code>jumpi</code> 是带条件跳转，如果栈内第一个元素不是 true 则不会跳转。</p> 
+<p>上述流程听上去较为复杂，原因在于使用了纯汇编，使用高等语言表示如下:</p> 
+<pre><code class="prism language-javascript">function_selector <span class="token operator">=</span> calldata <span class="token operator">&gt;&gt;</span> <span class="token number">224</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span>function_selector <span class="token operator">==</span> <span class="token function">sig</span><span class="token punctuation">(</span>addNumbers<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	goto label
+<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token operator">...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>上述代码中 <code>sig</code> 表示选择器生成函数，即使用 <code>addNumbers</code> 定义生成对应的 4 bytes 无符号整数。读者可以看到，我们使用了 <code>jumpi</code> 实现了 <code>if</code> 跳转。</p> 
+<blockquote> 
+ <p>此过程使用 <code>switch</code> 结构表达更为合适，但此处仅有一个函数选择器，使用 <code>if</code> 语句也可。</p> 
+</blockquote> 
+<p>最后，我们定义了:</p> 
+<pre><code class="prism language-huff">addNumbers:
+	NON_SAFE_ADD()
+</code></pre> 
+<p>为上文的跳转提供目的地。</p> 
+<p>如果读者了解过编程语言的历史就知道，<code>goto</code> 语句是早期语言的一大争议点，如今，大部分高级语言都删除了此语句。但在 huff 中，为了实现 <code>if</code> 逻辑，我们不得不使用 <code>jumpi</code> 语句。</p> 
+<p>读者有可能发现了使用上述方法进行函数选择器匹配的时间复杂度为 <code>O(n)</code> ，对于某些大型项目而言，此时间复杂度是无法容忍的，所以还有一种更加强大的基于二分搜索的方法，如果感兴趣，读者可以阅读 <a href="https://philogy.github.io/posts/selector-switches/">Constant Gas Function Dispatchers in the EVM</a> 文章。</p> 
+<p>编写完上述函数后，我们需要对其进行测试，请读者建立 <code>testHuffMath.t.sol</code> 合约，键入以下内容:</p> 
+<pre><code class="prism language-solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.15;
+
+import "foundry-huff/HuffDeployer.sol";
+import "forge-std/Test.sol";
+
+contract mathTest is Test {
+	HuffMath public huffmath;
+
+    function setUp() public {
+        huffmath = HuffMath(HuffDeployer.deploy("HuffMath"));
+    }
+
+    function test_add() public {
+    	uint256 result = huffmath.addNumbers(1, 2);
+    	assertEq(result, 3);
+    }
+}
+
+interface HuffMath {
+    function addNumbers(uint256, uint256) external pure returns (uint256);;
+}
+</code></pre> 
+<p>总体来说，测试 huff 合约比较简单，只是改变了合约部署方法，使用 <code>HuffDeployer.deploy</code> 部署，而不是简单的 <code>new</code> ，以及需要手动编写接口。</p> 
+<p>需要注意的是，<code>huff</code> 合约的测试是慢于 <code>foundry</code> 对 <code>solidity</code> 合约的测试的，后者有着 <code>foundry</code> 开发者提供的各种优化，而前者并没有这些优化，导致 <code>huff</code> 合约测试速度较慢。</p> 
+<blockquote> 
+ <p>可能有读者好奇，<code>huff</code> 如何兼容 <code>foundry</code> 的？关键在于 <code>HuffDeployer</code> 合约，该合约使用 <code>foundry</code> 的知名高级特性 <code>ffi</code> 。简单来说，<code>foundry</code> 允许用户通过 <code>ffi</code> 直接调用命令行工具。</p> 
+</blockquote> 
+<h4>
+<a id="_265"></a>不可溢出加法</h4> 
+<p>本节主要讨论安全加法，即不可溢出加法。一旦加法结果溢出，则触发错误，进行 <code>revert</code> 回滚操作。</p> 
+<p>在具体实现前，我们首先需要知道如何判断加法是否溢出。对于无符号数的加法，我们可以通过简单的判断加法结果是否小于其中任何一个操作数即可。</p> 
+<blockquote> 
+ <p>对于带符号加法，我们很难判断是否溢出，且带符号加法在智能合约领域较为少见，故本文不予讨论。</p> 
+</blockquote> 
+<p>接下来，我们开始构造该函数。</p> 
+<p>首先在 <code>HuffMath.huff</code> 的头部定义函数:</p> 
+<pre><code class="prism language-huff">#define function safeAdd(uint256,uint256) nonpayable returns (uint256)
+</code></pre> 
+<p>首先，我们使用常规步骤导入两个加数，代码如下:</p> 
+<pre><code class="prism language-huff">	0x04 calldataload	// [num1]
+	0x24 calldataload	// [num2, num1]
+</code></pre> 
+<p>可能有读者希望在此处使用 <code>add</code> 操作符，但我们发现直接使用 <code>add</code> 后，获得 <code>[result]</code> 结构的栈。(此处的 <code>result</code> 即 <code>num1 + num2</code>，为方便而记为 <code>result</code>)。然后，我们发现无法进行后续步骤，因为我们还需要进行加法结果与加数的比较。</p> 
+<p>所以，在此处，我们使用 <code>dup2</code> 将 <code>num1</code> 复制一份到栈顶，获得 <code>[num1, num2, num1]</code> 的栈结构。然后运行 <code>add</code> 操作码，获得 <code>[result, num1]</code> 栈结构。可能又有读者准备直接使用 <code>lt</code> 操作符，以判断 <code>result &lt; num1</code> 是否成立，但需要注意一旦运行 <code>lt</code> 操作码，则会直接消耗 <code>result</code> 和 <code>num1</code> 两个栈元素，使得加法运算结果 <code>result</code> 丢失。</p> 
+<p>为了保证加法结果 <code>result</code> 不丢失，我们仍需要运行 <code>dup1</code> 以复制栈元素，获得 <code>[result, result, num1]</code>。接下来进行大小判断，判断仅能使用栈顶元素为参数进行，所以此处使用 <code>swap2</code> 进行栈内元素交换，获得 <code>[num1, result, result]</code> 栈。然后，我们可以运行 <code>gt</code> 操作码以判断 <code>num1 &gt; result</code> 是否成立。</p> 
+<p>如果成立，则返回 <code>true</code> 值，否则返回 <code>false</code> 。故运行 <code>gt</code> 后我们获得 <code>[is_overflow, result]</code> 栈结构。(此处的 <code>is_overflow</code> 即是是否溢出的标识符，命名为 <code>is_overflow</code> 仅为方便阅读)。如果 <code>is_overflow</code> 成立，我们需要跳转到错误处理阶段，使用 <code>over_flow jumpi</code> 可以实现此逻辑。其中 <code>over_flow</code> 为跳转后代码块的名称，我们随后定义此代码块。</p> 
+<p>如果运算结构未溢出， <code>jumpi</code> 不会进行跳转，但会消耗栈元素，最终获得 <code>[result]</code> 栈结构。我们使用以下代码将其存储到内存中并返回:</p> 
+<pre><code class="prism language-huff">	0x00 mstore
+	0x20 0x00 return
+</code></pre> 
+<p>最后，我们处理错误，代码如下:</p> 
+<pre><code class="prism language-huff">	over_flow:
+		0x00 0x00 revert
+</code></pre> 
+<p>我们在此处再次讨论一次关于 <code>jumpi</code> 的相关内容。读者可能感觉 <code>huff</code> 在编译过程中为了实现 <code>over_flow jumpi</code> 语句进行了大量工作，事实上，是没有的。<code>over_flow</code> 作为代码块的标签名，<code>huff</code> 在编译过程中会计算出该 <code>over_flow</code> 标签对应的代码块在字节码中的偏移，然后将其直接代换到 <code>over_flow</code> 标签的位置。而 <code>over_flow</code> 代码块的实际部分则会在代码编译过程中插入 <code>JUMPDEST</code> 标识符，表示跳转目的地。</p> 
+<blockquote> 
+ <p>有读者可能读不懂上述表述，读者可参考 <a href="https://www.evm.codes/playground?fork=merge&amp;unit=Wei&amp;codeType=Mnemonic&amp;code='%20rel=">此处</a> ，这是一个最简单的 <code>jumpi</code> 示例，但也展示了 <code>jumpi</code> 背后的工作原理，请读者选择 <code>Step into</code> 步进执行，并随时观察 <code>Stack</code> 栈结构</p> 
+ <p><img src="https://images2.imgbox.com/f4/73/hMLLHI6E_o.png" alt="EVM Codes JUMPI"></p> 
+</blockquote> 
+<p>最后，整体代码如下:</p> 
+<pre><code class="prism language-huff">#define macro SAFE_ADD() = takes (0) returns (0) {
+	0x04 calldataload	// [num1]
+	0x24 calldataload	// [num2, num1]
+	dup2			// [num1, num2, num1]
+	add			// [result, num1]
+	dup1			// [result, result, num1]
+	swap2			// [num1, result, result]
+	gt			// [is_overflow, result]
+	over_flow jumpi
+	0x00 mstore
+	0x20 0x00 return
+
+	over_flow:
+		0x00 0x00 revert
+}
+</code></pre> 
+<p>当然，与 <code>solidity</code> 不同，我们可以简单计算出上述代码的 <code>gas</code> 消耗。上述代码中，<code>jumpi</code> 之前的部分每个操作码的 <code>gas</code> 均为 3 。注意，<code>0x04</code> 和 <code>0x24</code> 也会消耗 3 gas ，因为事实上，<code>0x04</code> 是 <code>PUSH1 0x04</code> 的语法糖。简单计算就可以获得 <code>gt</code> 及其之前的代码总计消耗 27 gas 。</p> 
+<p>剩余部分代码的 <code>gas</code> 分析关键在于获得 <code>over_flow jumpi</code> 的代码消耗。如上所述，<code>over_flow</code> 会在编译期间转换为 <code>over_flow</code> 实际代码块在字节码中的位置，所以此处 <code>over_flow jumpi</code> 可以认为是 <code>PUSH over_flow jumpi</code> 的语法糖。其中 <code>PUSH over_flow</code> 消耗 3 gas 而 <code>jumpi</code> 消耗 10 gas 。</p> 
+<p>假如溢出，我们需要计算以下代码块的 gas 消耗:</p> 
+<pre><code class="prism language-huff">	over_flow:
+		0x00 0x00 revert
+</code></pre> 
+<p><code>overflow:</code> 作为表示跳转终点的标识，也会消耗 1 gas ，剩余部分 <code>0x00 0x00 revert</code> 消耗 6 gas 。</p> 
+<blockquote> 
+ <p>此处使用的 <code>revert</code> 是一个动态 gas 消耗函数，读者可使用 <a href="https://www.evm.codes/#fd?fork=merge">evm.codes</a> 中的 <code>Estimate your gas cost</code> 进行评估。该结果主要与内存消耗挂钩。</p> 
+</blockquote> 
+<p>如果未溢出，则会运行 <code>0x00 mstore</code> 和 <code>0x20 0x00 return</code> 代码，前者 <code>0x00 mstore</code> 中的 <code>mstore</code> 也是一个更具内存占用动态调整的操作符，此处消耗 6 gas ，而 <code>return</code> 也是一个根据内存消耗给出 gas 消耗的操作符。</p> 
+<p>总结一下，此代码的 <code>gas</code> 消耗如下:</p> 
+<ol>
+<li>溢出情况下消耗 46 gas</li>
+<li>非溢出情况消耗 46 gas</li>
+</ol> 
+<p>非常巧合，两者相等。</p> 
+<p>由于函数需要入口以方便访问，我们给出 <code>MAIN</code> 函数:</p> 
+<pre><code class="prism language-huff">#define macro MAIN() = takes (0) returns (0) {
+	0x00 calldataload 0xE0 shr
+
+	dup1 __FUNC_SIG(addNumbers) eq addNumbers jumpi
+	dup1 __FUNC_SIG(safeAdd)	eq safeAdd jumpi
+
+	addNumbers:
+		NON_SAFE_ADD()
+	safeAdd:
+		SAFE_ADD()
+}
+</code></pre> 
+<p>在后文中，我们不再给出 <code>MAIN</code> 函数，因为该函数即使读者无法理解仍可以照葫芦画瓢的写出对应的代码。</p> 
+<p>最后，我们给出测试代码。在测试前，请在 <code>interface HuffMath</code> 内增加以下接口:</p> 
+<pre><code class="prism language-solidity">function safeAdd(uint256, uint256) external pure returns (uint256);
+</code></pre> 
+<p>具体的测试代码如下:</p> 
+<pre><code class="prism language-huff">    function test_safeAdd() public {
+    	vm.expectRevert();
+    	huffmath.safeAdd(type(uint256).max, 5);
+    }
+
+    function test_noramlsafeAdd() public {
+        uint256 result = huffmath.safeAdd(420, 5);
+        assertEq(result, 425);
+    }
+</code></pre> 
+<p><code>test_safeAdd</code> 检测溢出加法是否被 <code>revert</code> ，而 <code>test_noramlsafeAdd</code> 检测正常加法是否可以运行。</p> 
+<h4>
+<a id="_400"></a>不可溢出乘法</h4> 
+<p>依惯例，我们首先讨论如何判断乘法是否溢出？最简单的方法如下:</p> 
+<pre><code>z = x * y
+y != 0 &amp;&amp; z / y != x 
+</code></pre> 
+<p><code>y != 0 &amp;&amp; z / y != x </code> 返回当前乘法是否溢出的布尔值。该算法的实质是如果溢出，那么就破坏了乘法和除法的对称性。</p> 
+<p>如何设计此算法，我建议读者使用自底向上的思考方法。不考虑 <code>jumpi</code> 跳转，我们需要如 <code>[y != 0, z / y != x, z]</code> 的栈结构。</p> 
+<p>逆推过程如下:</p> 
+<pre><code>[y != 0, z / y != x, z]		&lt;-(iszero)-
+[y == 0, z / y != x, z] 	&lt;-(iszero)-
+[y, z / y != x, z] 		&lt;-(swap1)-
+[z / y != x, y, z]		&lt;-(is_zero)-
+[z / y == x, y, z]		&lt;-(eq)-
+[z / y, x, y, z]		&lt;-(div)-
+[z, y, x, y, z]
+</code></pre> 
+<p>此处需要注意对逻辑运算取反需要使用 <code>iszero</code> 操作码而不是 <code>not</code> ，后者按位取反。此处没有继续向后推导，因为 <code>[z, y, x, y, z]</code> 显然是一个较好建立的栈结构，读者可以尝试自己构造后在于我的代码比较 <code>gas</code> 消耗，如果您的代码更加高效，可以在评论区给出。</p> 
+<p>将上述逆推过程改为前向推导:</p> 
+<pre><code class="prism language-huff">#define macro SAFE_MULTI() = takes(0) returns (0) {
+	0x04 calldataload	// [x]
+	0x24 calldataload	// [y, x]
+	mul 			// [z]
+	0x24 calldataload	// [y, z]
+	0x04 calldataload	// [x, y, z]
+	dup2			// [y, x, y, z]
+	dup4 			// [z, y, x, y, z]
+	div			// [z / y, x, y, z]
+	eq iszero		// [z / y != x, y, z]
+	swap1			// [y, z / y != x, z]
+	iszero iszero		// [y != 0, z / y != x, z]
+	and 			// [is_overflow, z]
+	over_flow jumpi
+	0x00 mstore
+	0x20 0x00 return
+
+	over_flow:
+		0x00 0x00 revert
+}
+</code></pre> 
+<p>上述流程中的 <code>over_flow</code> 处理部分与 <code>SAFE_ADD</code> 是一致的。</p> 
+<p>接下来，我们给出一些测试:</p> 
+<pre><code class="prism language-solidity">    function test_normalMulti() public {
+        uint256 result = huffmath.safeMulti(100, 5);
+        assertEq(result, 500);
+    }
+
+    function test_safeMulti() public {
+        vm.expectRevert();
+        huffmath.safeMulti(type(uint256).max, 50);
+    }
+
+    function test_zeroMulti() public {
+        uint256 result = huffmath.safeMulti(100, 0);
+        assertEq(result, 0);
+    }
+</code></pre> 
+<p>进行这些测试前，请读者自行修改 <code>interface HuffMath</code> 接口。</p> 
+<p>最后，我们讨论一个简单的问题，如何对 <code>huff</code> 合约进行 debug 操作？随着 huff 合约的长度增加，我们需要进行一些 debug 操作以解决开发过程中的问题。</p> 
+<p>我们可以使用 <code>forge test --debug $FUNC</code> 命令实现，以上文给出的 <code>test_normalMulti</code> 为例，我们需要运行以下命令:</p> 
+<pre><code class="prism language-bash">forge <span class="token builtin class-name">test</span> --debug <span class="token string">"test_normalMulti()"</span>
+</code></pre> 
+<p>我们可以观察到以下界面:</p> 
+<p><img src="https://images2.imgbox.com/1f/fc/oFISq7vf_o.png" alt="Debug Start"></p> 
+<p>按下 <code>C</code> 键跳转到下个 <code>call</code> 请求，我们就进入了 <code>HuffMath.huff</code> 合约，如下:</p> 
+<p><img src="https://images2.imgbox.com/e6/16/1Bt6s2eA_o.png" alt="Into HuffMath"></p> 
+<p>点击 <code>s</code> 键，我们就可以进入 <code>SAFE_MULTI</code> 函数体，在最上框内我们可以看到与 huff 合约对应的操作码，如下图:</p> 
+<p><img src="https://images2.imgbox.com/87/c2/BbROka0t_o.png" alt="SAFE_MULTI func"></p> 
+<p>接下来，我们就可以根据 <code>Stack</code> 栏中的内容和 <code>Memory</code> 中的内容判断合约运行是否正常，在此处，我们也给出一些操作键:</p> 
+<ol>
+<li>
+<code>q</code> 退出 Debug 模式</li>
+<li>
+<code>J</code> 下滚 Stack 视图(如上图所示 <code>Stack</code> 视图仅能显示 2 行 Stack ，我们需要一些键来滚动)</li>
+<li>
+<code>K</code> 上滚 Stack 视图</li>
+<li>
+<code>Ctrl + j</code> 下滚内存视图</li>
+<li>
+<code>Ctrl + k</code> 上滚内存视图</li>
+</ol> 
+<p>读者可以通过 <a href="https://book.getfoundry.sh/forge/debugger#navigating">Foundry Debugger 文档</a> 获得更多键位信息。</p> 
+<p>事实上，我们可以使用另一种方法实现判断乘法是否溢出，该方法需要一个后文介绍的函数——前导零计数，该函数被简写为 <code>nlz</code>。该方法较为复杂，我们不给出具体的实现，但 <code>nlz</code> 函数的实现会在后文给出，因为该函数对于 <code>log2</code> 对数的实现有极其重要的作用。</p> 
+<h4>
+<a id="_0__508"></a>前导 0 计数算法</h4> 
+<p>我们首先给出前导 0 算法的 C 语言版本:</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">nlz</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> x<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> n<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>x <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token keyword">return</span><span class="token punctuation">(</span><span class="token number">256</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	n <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>x <span class="token operator">&gt;&gt;</span> <span class="token number">128</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>n <span class="token operator">=</span> n <span class="token operator">+</span> <span class="token number">128</span><span class="token punctuation">;</span> x <span class="token operator">=</span> x <span class="token operator">&lt;&lt;</span> <span class="token number">128</span><span class="token punctuation">;</span><span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>x <span class="token operator">&gt;&gt;</span> <span class="token number">192</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>n <span class="token operator">=</span> n <span class="token operator">+</span> <span class="token number">64</span><span class="token punctuation">;</span> x <span class="token operator">=</span> x <span class="token operator">&lt;&lt;</span> <span class="token number">64</span><span class="token punctuation">;</span><span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>x <span class="token operator">&gt;&gt;</span> <span class="token number">224</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>n <span class="token operator">=</span> n <span class="token operator">+</span> <span class="token number">32</span><span class="token punctuation">;</span> x <span class="token operator">=</span> x <span class="token operator">&lt;&lt;</span> <span class="token number">32</span><span class="token punctuation">;</span><span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>x <span class="token operator">&gt;&gt;</span> <span class="token number">240</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>n <span class="token operator">=</span> n <span class="token operator">+</span> <span class="token number">16</span><span class="token punctuation">;</span> x <span class="token operator">=</span> x <span class="token operator">&lt;&lt;</span> <span class="token number">16</span><span class="token punctuation">;</span><span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>x <span class="token operator">&gt;&gt;</span> <span class="token number">248</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>n <span class="token operator">=</span> n <span class="token operator">+</span> <span class="token number">8</span><span class="token punctuation">;</span> x <span class="token operator">=</span> x <span class="token operator">&lt;&lt;</span> <span class="token number">8</span><span class="token punctuation">;</span><span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>x <span class="token operator">&gt;&gt;</span> <span class="token number">252</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>n <span class="token operator">=</span> n <span class="token operator">+</span> <span class="token number">4</span><span class="token punctuation">;</span> x <span class="token operator">=</span> x <span class="token operator">&lt;&lt;</span> <span class="token number">4</span><span class="token punctuation">;</span><span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>x <span class="token operator">&gt;&gt;</span> <span class="token number">254</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>n <span class="token operator">=</span> n <span class="token operator">+</span> <span class="token number">2</span><span class="token punctuation">;</span> x <span class="token operator">=</span> x <span class="token operator">&lt;&lt;</span> <span class="token number">2</span><span class="token punctuation">;</span><span class="token punctuation">}</span>
+
+	n <span class="token operator">=</span> n <span class="token operator">-</span> <span class="token punctuation">(</span>x <span class="token operator">&gt;&gt;</span> <span class="token number">255</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> n<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>此算法的原理是二分搜索，此算法来自 《算法心得》 第 91 页。</p> 
+<p>对应的 huff 代码为:</p> 
+<pre><code class="prism language-huff">#define macro NLZ_COUNT() = takes(1) returns (1) {
+	0x1 			// [n, x]
+	swap1			// [x, n]
+
+	dup1			// [x, x, n]
+	0x80 shr		// [x &gt;&gt; 128, x, n]
+	iszero iszero		// [x &gt;&gt; 128 != 0, x, n]
+	not_zero_128 jumpi	// [x, n]
+	0x80 shl		// [x &lt;&lt; 128, n]
+	swap1 0x80 add 		// [n + 128, x &lt;&lt; 128]
+	swap1			// [x, n]
+
+	not_zero_128:	
+
+	dup1			// [x, x, n]
+	0xc0 shr		// [x &gt;&gt; 192, x, n]
+	iszero iszero		// [x &gt;&gt; 192 != 0, x, n]
+	not_zero_192 jumpi	// [x, n]
+	0x40 shl		// [x &lt;&lt; 64, n]
+	swap1 0x40 add 		// [n + 64, x &lt;&lt; 64]
+	swap1			// [x, n]
+
+	not_zero_192:
+
+	dup1			// [x, x, n]
+	0xe0 shr		// [x &gt;&gt; 224, x, n]
+	iszero iszero		// [x &gt;&gt; 224 != 0, x, n]
+	not_zero_224 jumpi	// [x, n]
+	0x20 shl		// [x &lt;&lt; 32, n]
+	swap1 0x20 add 		// [n + 32, x &lt;&lt; 32]
+	swap1			// [x, n]
+
+	not_zero_224:	
+
+	dup1			// [x, x, n]
+	0xf0 shr		// [x &gt;&gt; 240, x, n]
+	iszero iszero		// [x &gt;&gt; 240 != 0, x, n]
+	not_zero_240 jumpi	// [x, n]
+	0x10 shl		// [x &lt;&lt; 16, n]
+	swap1 0x10 add 		// [n + 16, x &lt;&lt; 16]
+	swap1			// [x, n]
+
+	not_zero_240:
+
+	dup1			// [x, x, n]
+	0xf8 shr		// [x &gt;&gt; 248, x, n]
+	iszero iszero		// [x &gt;&gt; 248 != 0, x, n]
+	not_zero_248 jumpi	// [x, n]
+	0x08 shl		// [x &lt;&lt; 8, n]
+	swap1 0x08 add 		// [n + 8, x &lt;&lt; 8]
+	swap1			// [x, n]
+
+	not_zero_248:	
+
+	dup1			// [x, x, n]
+	0xfc shr		// [x &gt;&gt; 252, x, n]
+	iszero iszero		// [x &gt;&gt; 252 != 0, x, n]
+	not_zero_252 jumpi	// [x, n]
+	0x04 shl		// [x &lt;&lt; 4, n]
+	swap1 0x04 add 		// [n + 4, x &lt;&lt; 4]
+	swap1			// [x, n]
+
+	not_zero_252:		
+
+	dup1			// [x, x, n]
+	0xfe shr		// [x &gt;&gt; 254, x, n]
+	iszero iszero		// [x &gt;&gt; 254 != 0, x, n]
+	not_zero_254 jumpi	// [x, n]
+	0x02 shl		// [x &lt;&lt; 2, n]
+	swap1 0x02 add 		// [n + 2, x &lt;&lt; 2]
+	swap1			// [x, n]
+
+	not_zero_254:
+	0xff shr		// [x &gt;&gt; 255, n]
+	swap1 sub			
+}
+</code></pre> 
+<p>由于后文我们还会调用此算法，所以我们使用了 <code>takes(1) returns (1)</code> 标识。</p> 
+<p>在此代码中，我们尤其需要注意 <code>jumpi</code> 系列方法。此处使用 <code>jumpi</code> 实现了大量的跳转逻辑，充分显示 <code>jumpi</code> 在逻辑分支上的巨大作用。在使用 <code>huff</code> 时，我们需要转变一定的思路，比如在正常代码编写过程中，我们往往思考满足条件后运行某部分代码，但在 huff 中，我们需要考虑满足某些条件后跳过部分代码的运行。</p> 
+<p>在此处，我们在 C 语言版本中都使用了满足条件运行的逻辑，如满足 <code>x &gt;&gt; 128) == 0</code> 则运行 <code>n = n + 128; x = x &lt;&lt; 128;</code> ，而在 huff 中，我们需要将其改写为当满足 <code>x &gt;&gt; 128) != 0</code> 条件时，我们跳过 <code>n = n + 128; x = x &lt;&lt; 128;</code> 的运行。</p> 
+<p><img src="https://images2.imgbox.com/31/b3/dlcuRJqH_o.png" alt="Jumpi example"></p> 
+<p>这就是为什么我们将跳转目的地 <code>not_zero_128</code> 放在了 <code>0x80 shl</code> 等代码的后面。</p> 
+<p>值得注意的是，我们在此处没有考虑输入值为 0 的情况，一旦考虑此情况，我们不能很好的安排 <code>jumpi</code> 。假如考虑输入值为 0 ，我们可以写出如下代码:</p> 
+<pre><code class="prism language-huff">	dup1				// [x, x]
+	iszero				// [is_zero, x]
+	zero_return jumpi
+	...
+	0xff shr			// [x &gt;&gt; 255, n]
+	swap1 sub			
+
+	zero_return:
+	0x100
+</code></pre> 
+<p>如果输入的值为 0 ，直接跳转到代码最后，返回 255 ，看似一切正常。如果输入的值不为 0 ，那么代码正常运行到 <code>swap1 sub</code> 部分，此时代码应该退出运行，但实际上不会，会继续运行，导致 0x100 被推入栈内。这种情况是很难处理的。所以此处我们直接省略了对输入值为 0 的处理。</p> 
+<p>为了方便测试，此处我们可以对其进行简单封装:</p> 
+<pre><code class="prism language-huff">#define macro NLZ_COUNT_WRAPPER() = takes (0) returns (0) {
+	0x04 calldataload	// [x]
+	NLZ_COUNT()
+	0x00 mstore
+	0x20 0x00 return
+}
+</code></pre> 
+<p>此处省略对 <code>MAIN</code> 函数的修改。</p> 
+<p>我们可以使用以下代码进行测试:</p> 
+<pre><code class="prism language-solidity">function test_nlzCount() public {
+    uint256 maxResult = huffmath.nlzCount(type(uint256).max);
+    assertEq(maxResult, 0);
+    uint256 normalResult = huffmath.nlzCount(0x18160ddd);
+    assertEq(normalResult, 227);
+}
+</code></pre> 
+<p>在此处提醒读者，《算法心得》内存在一系列可以使用查表法优化的函数，请读者务必不要使用 <code>storage</code> 存储这些表格，单次 <code>sload</code> 操作就会消耗 100 gas ，已经多于了上文给出的各种算法。一种可行的方法是将表格内容插入到部署字节码的尾部，使用 <code>codecopy</code> 提取这些表格内容。huff 提供了 <code>constant</code> 关键词实现了此功能，详细内容请参考 <a href="https://docs.huff.sh/get-started/huff-by-example/#constants">文档</a> 。</p> 
+<h4>
+<a id="log2__666"></a>log2 算法</h4> 
+<p>可能已经有读者发现了 <code>nlz</code> 前导 0 计数本质上就是 log2 算法，当然，此处的 log2 算法指整数对数算法，记为 <code>ilog2</code> ，其实质为 <code>log2(x)</code> 的向下取整。<code>ilog2</code> 算法的 C 语言实现如下:</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">ilog2</span> <span class="token punctuation">(</span><span class="token keyword">unsigned</span> x<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">return</span> <span class="token number">255</span> <span class="token operator">-</span> <span class="token function">nlz</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>翻译为以下 huff 代码:</p> 
+<pre><code class="prism language-huff">#define macro ILOG2() = takes (1) returns (1) {
+	NLZ_COUNT()			// [nlz(x)]
+	0xff sub
+}
+</code></pre> 
+<p>为方便测试，我们对其进行简单封装:</p> 
+<pre><code>#define macro ILOG2_WRAPPER() = takes (0) returns (0) {
+	0x04 calldataload	// [x]
+	ILOG2()
+	0x00 mstore
+	0x20 0x00 return	
+}
+</code></pre> 
+<p>测试代码如下:</p> 
+<pre><code class="prism language-huff">    function test_ilog2() public {
+        uint256 maxResult = huffmath.ilog2(type(uint256).max);
+        assertEq(maxResult, 255);
+        uint256 normalResult = huffmath.ilog2(0x18160ddd);
+        assertEq(normalResult, 28);
+        uint256 halfResult = huffmath.ilog2(0x10000000000000000);
+        assertEq(halfResult, 64);
+    }
+</code></pre> 
+<h4>
+<a id="_709"></a>开方算法</h4> 
+<p>开方算法需要基于 <code>ilog2</code> 算法，我们会使用一种被称为牛顿法的迭代方法。我们需要首先估计得到 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+         
+          
+           
+           
+             ( 
+            
+           
+          
+         
+           a 
+          
+         
+        
+       
+      
+        sqrt{mathstrut a} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.24em;vertical-align: -0.305em"></span><span class="mord sqrt"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.935em"><span class="svg-align"><span class="pstrut" style="height: 3.2em"></span><span class="mord" style="padding-left: 1em"><span class="mord rlap"><span class="inner"><span class="mord" style="color: transparent"><span class="mopen" style="color: transparent">(</span></span></span><span class="fix"></span></span><span class="mord mathnormal">a</span></span></span><span class=""><span class="pstrut" style="height: 3.2em"></span><span class="hide-tail" style="min-width: 1.02em;height: 1.28em"> 
+            
+             
+           </span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.305em"><span class=""></span></span></span></span></span></span></span></span></span> 的初始值 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          g 
+         
+        
+          0 
+         
+        
+       
+      
+        g_0 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.1944em"></span><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">0</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span> ，然后使用如下公式迭代:</p> 
+<p><span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+         
+           g 
+          
+          
+          
+            n 
+           
+          
+            + 
+           
+          
+            1 
+           
+          
+         
+        
+          = 
+         
+        
+          ( 
+         
+         
+         
+           g 
+          
+         
+           n 
+          
+         
+        
+          + 
+         
+         
+         
+           a 
+          
+          
+          
+            g 
+           
+          
+            n 
+           
+          
+         
+        
+          ) 
+         
+        
+          / 
+         
+        
+          2 
+         
+        
+       
+         g_{n+1} = (g_n + frac{a}{g_n}) / 2 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6389em;vertical-align: -0.2083em"></span><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">n</span><span class="mbin mtight">+</span><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2083em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em"></span></span><span class="base"><span class="strut" style="height: 1em;vertical-align: -0.25em"></span><span class="mopen">(</span><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2222em"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em"></span></span><span class="base"><span class="strut" style="height: 1.988em;vertical-align: -0.8804em"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.1076em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line" style="border-bottom-width: 0.04em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord mathnormal">a</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.8804em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mclose">)</span><span class="mord">/2</span></span></span></span></span></span></p> 
+<p>该迭代式呈平方级收敛，即如果某个 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          g 
+         
+        
+          n 
+         
+        
+       
+      
+        g_n 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.1944em"></span><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">n</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span> 值精确到了 n 位，那么下一次迭代就会精确的 2n 位。也就是说，即使对 <code>uint256</code> 中最大的数字进行开方计算，我们也仅需要迭代 7 次。</p> 
+<p><span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+          
+          
+            log 
+           
+          
+            ⁡ 
+           
+          
+         
+           2 
+          
+         
+         
+         
+           a 
+          
+         
+        
+          = 
+         
+         
+          
+          
+            log 
+           
+          
+            ⁡ 
+           
+          
+         
+           2 
+          
+         
+         
+         
+           g 
+          
+         
+           0 
+          
+         
+         
+         
+         
+         
+           1 
+          
+         
+           2 
+          
+         
+         
+          
+          
+            log 
+           
+          
+            ⁡ 
+           
+          
+         
+           2 
+          
+         
+        
+          a 
+         
+        
+          = 
+         
+         
+          
+          
+            log 
+           
+          
+            ⁡ 
+           
+          
+         
+           2 
+          
+         
+         
+         
+           g 
+          
+         
+           0 
+          
+         
+         
+         
+         
+         
+           g 
+          
+         
+           0 
+          
+         
+        
+          = 
+         
+         
+         
+           2 
+          
+          
+           
+           
+             1 
+            
+           
+             2 
+            
+           
+           
+            
+            
+              log 
+             
+            
+              ⁡ 
+             
+            
+           
+             2 
+            
+           
+          
+            a 
+           
+          
+         
+        
+       
+         log_2 sqrt{a} = log_2 g_0 \\ frac{1}{2} log_2{a} = log_2 g_0 \\ g_0 = 2^{frac{1}{2} log_2{a}} 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.0933em;vertical-align: -0.2441em"></span><span class="mop"><span class="mop">lo<span style="margin-right: 0.0139em">g</span></span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.207em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2441em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord sqrt"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8492em"><span class="svg-align"><span class="pstrut" style="height: 3em"></span><span class="mord" style="padding-left: 0.833em"><span class="mord mathnormal">a</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="hide-tail" style="min-width: 0.853em;height: 1.08em"> 
+             
+              
+            </span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.1908em"><span class=""></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em"></span></span><span class="base"><span class="strut" style="height: 0.9386em;vertical-align: -0.2441em"></span><span class="mop"><span class="mop">lo<span style="margin-right: 0.0139em">g</span></span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.207em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2441em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">0</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span><span class="mspace newline"></span><span class="mspace newline"></span><span class="base"><span class="strut" style="height: 2.0074em;vertical-align: -0.686em"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.3214em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord">2</span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line" style="border-bottom-width: 0.04em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="mord"><span class="mord">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.686em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mop"><span class="mop">lo<span style="margin-right: 0.0139em">g</span></span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.207em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2441em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord"><span class="mord mathnormal">a</span></span><span class="mspace" style="margin-right: 0.2778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em"></span></span><span class="base"><span class="strut" style="height: 0.9386em;vertical-align: -0.2441em"></span><span class="mop"><span class="mop">lo<span style="margin-right: 0.0139em">g</span></span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.207em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2441em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.1667em"></span><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">0</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span><span class="mspace newline"></span><span class="mspace newline"></span><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.1944em"></span><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">0</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em"></span></span><span class="base"><span class="strut" style="height: 1.004em"></span><span class="mord"><span class="mord">2</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 1.004em"><span class="" style="margin-right: 0.05em"><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight"><span class="mopen nulldelimiter sizing reset-size3 size6"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8443em"><span class=""><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mtight"><span class="mord mtight">2</span></span></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="frac-line mtight" style="border-bottom-width: 0.049em"></span></span><span class=""><span class="pstrut" style="height: 3em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mtight"><span class="mord mtight">1</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.344em"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter sizing reset-size3 size6"></span></span><span class="mspace mtight" style="margin-right: 0.1952em"></span><span class="mop mtight"><span class="mop mtight"><span class="mtight">l</span><span class="mtight">o</span><span style="margin-right: 0.0139em" class="mtight">g</span></span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1944em"><span class="" style="margin-right: 0.0714em"><span class="pstrut" style="height: 2.5em"></span><span class="sizing reset-size3 size1 mtight"><span class="mord mtight">2</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2659em"><span class=""></span></span></span></span></span></span><span class="mspace mtight" style="margin-right: 0.1952em"></span><span class="mord mtight"><span class="mord mathnormal mtight">a</span></span></span></span></span></span></span></span></span></span></span></span></span></span></span></p> 
+<p>由此，我们得到了 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          g 
+         
+        
+          0 
+         
+        
+       
+      
+        g_0 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em;vertical-align: -0.1944em"></span><span class="mord"><span style="margin-right: 0.0359em" class="mord mathnormal">g</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em"><span class="" style="margin-left: -0.0359em;margin-right: 0.05em"><span class="pstrut" style="height: 2.7em"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">0</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em"><span class=""></span></span></span></span></span></span></span></span></span></span> 的计算方法。</p> 
+<p>依惯例，我们首先给出 C 语言实现:</p> 
+<pre><code class="prism language-c"><span class="token keyword">int</span> <span class="token function">sqrt</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> x<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">unsigned</span> result<span class="token punctuation">;</span>
+
+	result <span class="token operator">=</span> <span class="token number">1</span> <span class="token operator">&lt;&lt;</span> <span class="token punctuation">(</span><span class="token function">log2</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	result <span class="token operator">=</span> <span class="token punctuation">(</span>result <span class="token operator">+</span> x <span class="token operator">/</span> result<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	result <span class="token operator">=</span> <span class="token punctuation">(</span>result <span class="token operator">+</span> x <span class="token operator">/</span> result<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	result <span class="token operator">=</span> <span class="token punctuation">(</span>result <span class="token operator">+</span> x <span class="token operator">/</span> result<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	result <span class="token operator">=</span> <span class="token punctuation">(</span>result <span class="token operator">+</span> x <span class="token operator">/</span> result<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	result <span class="token operator">=</span> <span class="token punctuation">(</span>result <span class="token operator">+</span> x <span class="token operator">/</span> result<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	result <span class="token operator">=</span> <span class="token punctuation">(</span>result <span class="token operator">+</span> x <span class="token operator">/</span> result<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	result <span class="token operator">=</span> <span class="token punctuation">(</span>result <span class="token operator">+</span> x <span class="token operator">/</span> result<span class="token punctuation">)</span> <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">return</span> <span class="token punctuation">(</span>result <span class="token operator">&lt;</span> x<span class="token punctuation">)</span> <span class="token operator">/</span> result <span class="token operator">?</span> result <span class="token operator">:</span> <span class="token punctuation">(</span>a <span class="token operator">/</span> result<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>在实现中，我们没有考虑具体的迭代轮数，而是选择了直接迭代 7 次，在物理机上，这种迭代方法是效率较低的，原因在于除法会消耗大量计算资源。但在 EVM 虚拟机中，单次除法仅需要 5 gas，而一次跳转则需要 10 gas，同时还要考虑跳转前后的处理。故而使用分支结构不如直接强行迭代 7 次。</p> 
+<blockquote> 
+ <p>这也说明了 EVM 的定价仍需要改进，消耗大量计算资源的除法定价太低，而分支跳转定价过高。当然，EVM 的 gas 不合理似乎也正常，但是很难给出一种改进方案。读者可以考虑引入定量模型以评估。</p> 
+</blockquote> 
+<p>接下来，我们进入实操阶段:</p> 
+<pre><code class="prism language-huff">#define macro SQRT() = takes (0) returns (0) {
+	0x04 calldataload	// [x]
+	dup1			// [x, x]
+	iszero			// [x == 0, x]
+	is_zero jumpi
+	dup1			// [x, x]
+	0x01			// [1, x, x]
+	dup2			// [x, 1, x, x]
+	ILOG2()			// [log2(x), 1, x, x]
+	0x01 shr		// [log2(x) / 2, 1, x, x]
+	shl			// [result, x, x]
+
+	dup1			// [result, result, x, x]
+	swap2 div		// [x / result, result, x]
+	add 			// [x / result + result, x]
+	0x01 shr		// [result, x]
+
+	dup1			// [result, result, x]
+	dup3			// [x, result, result, x]
+	div add 0x01 shr	// [result, x]		
+
+	dup1			// [result, result, x]
+	dup3			// [x, result, result, x]
+	div add 0x01 shr	// [result, x]		
+
+	dup1			// [result, result, x]
+	dup3			// [x, result, result, x]
+	div add 0x01 shr	// [result, x]		
+
+	dup1			// [result, result, x]
+	dup3			// [x, result, result, x]
+	div add 0x01 shr	// [result, x]		
+
+	dup1			// [result, result, x]
+	dup3			// [x, result, result, x]
+	div add 0x01 shr	// [result, x]		
+
+	dup1			// [result, result, x]
+	dup3			// [x, result, result, x]
+	div add 0x01 shr	// [result, x]
+
+	dup2 dup2		// [result, x, result, x] 			
+	gt 			// [result &gt; x, result, x]
+	min_pop jumpi		// [result, x]
+	swap1			// [x, result]
+
+	min_pop:
+	pop
+
+	is_zero:
+
+	0x00 mstore
+	0x20 0x00 return	
+}
+</code></pre> 
+<p>在此处，我们处理输出值为 0 的情况。</p> 
+<p>测试代码如下:</p> 
+<pre><code class="prism language-solidity">    function test_sqrt() public {
+        uint256 zeroResult = huffmath.sqrt(0);
+        assertEq(zeroResult, 0);
+        uint256 maxResult = huffmath.sqrt(2 &lt;&lt; 253);
+        assertEq(maxResult, 2 &lt;&lt; 126);
+        uint256 normalResult = huffmath.sqrt(100);
+        assertEq(normalResult, 10);
+    }
+</code></pre> 
+<p>可能有读者想这样测试涵盖范围太少，我们能否对其进行 <code>fuzz testing</code> ，答案是可以，但我们需要引入一个新的测试技术，被称为 <code>differential fuzzing</code> 差分模糊测试，即将 <code>huffmath.sqrt</code> 的输出与可信输出对比。该测试依赖于一个重要的 foundry 函数 <code>ffi</code> ，该函数的作用是使用命令行命令调用一些其他程序以提供可信输入。值得注意的是，调用程序应该以 16 进制 <code>abi</code> 编码形式返回数据。</p> 
+<p>我们首先给出测试代码:</p> 
+<pre><code class="prism language-solidity">    function test_sqrt(uint256 n) public {
+        uint256 huffResult = huffmath.sqrt(n);
+
+        string[] memory inputs = new string[](3);
+        inputs[0] = "python3";
+        inputs[1] = "sqrtTest.py";
+        inputs[2] = vm.toString(n);
+
+        bytes memory sqrtBytes = vm.ffi(inputs);
+        uint256 sqrtResult = uint256(bytes32(sqrtBytes));
+
+        assertEq(huffResult, sqrtResult);
+    }
+</code></pre> 
+<p>我们首先调用 <code>huffmath.sqrt</code> 获得函数输出，然后我们使用 <code>inputs</code> 构造 <code>ffi</code> 调用程序所需要的命令。此处我们使用 <code>uint256(bytes32(sqrtBytes))</code> 将 <code>sqrtTest.py</code> 返回的 16 进制 abi 编码的输出转化为 <code>uint256</code> 类型。我们认为 <code>ffi</code> 给出的输出是可信的，我们将两者使用 <code>assertEq</code> 进行比较。</p> 
+<blockquote> 
+ <p><code>ffi</code> 函数最不友好的就是处理输入输出数据，由于 solidity 有其自身的与其他编程语言不同的规范，导致 solidity 在调用外部程序时，转化数据类型是最复杂的工作</p> 
+</blockquote> 
+<p>我们应当 <code>ffi</code> 调用外部程序是通过命令行完成的，<code>ffi</code> 会将 <code>inputs</code> 输入的项以空格隔开然后丢到命令行中运行，此处 <code>ffi</code> 构造的命令为 <code>python3 sqrtTest.py n</code> ，读者可根据自身系统更改此命令。</p> 
+<p>请读者在项目根目录下创建 <code>sqrtTest.py</code> 程序，写入以下内容:</p> 
+<pre><code class="prism language-python"><span class="token keyword">import</span> sys
+<span class="token keyword">import</span> math
+
+<span class="token keyword">def</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token builtin">input</span> <span class="token operator">=</span> <span class="token builtin">eval</span><span class="token punctuation">(</span>sys<span class="token punctuation">.</span>argv<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+	sqrt_result <span class="token operator">=</span> math<span class="token punctuation">.</span>floor<span class="token punctuation">(</span><span class="token punctuation">(</span>math<span class="token punctuation">.</span>sqrt<span class="token punctuation">(</span><span class="token builtin">input</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"{:0&gt;64x}"</span><span class="token punctuation">.</span><span class="token builtin">format</span><span class="token punctuation">(</span>sqrt_result<span class="token punctuation">)</span><span class="token punctuation">,</span> end<span class="token operator">=</span><span class="token string">""</span><span class="token punctuation">)</span>
+
+<span class="token keyword">if</span> __name__ <span class="token operator">==</span> <span class="token string">'__main__'</span><span class="token punctuation">:</span>
+	main<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>需要注意以下几点:</p> 
+<ol>
+<li>程序应在命令行内获得输入，因为 <code>ffi</code> 是通过调用命令行间接调用程序的</li>
+<li>返回值应使用 16 进制 abi 编码，此处我们返回的整数型数据，编码较为简单，就是 16 进制编码后在其右侧填充 0 使其位数达到 64 位。更加复杂的数据类型编码可以考虑使用 <code>web3.py</code> 等库</li>
+<li>
+<code>print</code> 的 <code>end</code> 务必是 <code>""</code> 空字符串，否则会出现问题</li>
+</ol> 
+<p>使用上述代码进行测试，发现测试失败，如下:</p> 
+<pre><code class="prism language-bash">    ├─ emit log<span class="token punctuation">(</span>: Error: a <span class="token operator">==</span> b not satisfied <span class="token punctuation">[</span>uint<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    ├─ emit log_named_uint<span class="token punctuation">(</span>key:   Expected, val: <span class="token number">7294724426814610</span><span class="token punctuation">)</span>
+    ├─ emit log_named_uint<span class="token punctuation">(</span>key:     Actual, val: <span class="token number">7294724426814609</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>可见，我们编写的 <code>huffmath.sqrt</code> 似乎存在一点点问题。我们尝试修改 <code>assertEq(huffResult, sqrtResult);</code> 相等测试为 <code>assertApproxEqAbs(sqrtResult, huffResult, 1)</code> ，在小数量时，我们给出的代码会出现与测试结果差 1 的情况。然后，我们再次运行测试，发现再次失败:</p> 
+<pre><code class="prism language-bash">    ├─ emit log<span class="token punctuation">(</span>: Error: a ~<span class="token operator">=</span> b not satisfied <span class="token punctuation">[</span>uint<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    ├─ emit log_named_uint<span class="token punctuation">(</span>key:   Expected, val: <span class="token number">70009045392513186</span><span class="token punctuation">)</span>
+    ├─ emit log_named_uint<span class="token punctuation">(</span>key:     Actual, val: <span class="token number">70009045392513184</span><span class="token punctuation">)</span>
+    ├─ emit log_named_uint<span class="token punctuation">(</span>key:  Max Delta, val: <span class="token number">1</span><span class="token punctuation">)</span>
+    ├─ emit log_named_uint<span class="token punctuation">(</span>key:      Delta, val: <span class="token number">2</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>该错误是诡异的，因为无法复现，读者可以使用以下合约进行测试:</p> 
+<pre><code>    function test_sqrt() public {
+        uint256 huffResult = huffmath.sqrt(4901266436770971757601341183870596);
+        assertEq(70009045392513186, huffResult);
+    }
+</code></pre> 
+<p>会发现测试通过，如下:</p> 
+<pre><code class="prism language-bash"><span class="token punctuation">[</span>PASS<span class="token punctuation">]</span> test_sqrt<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>gas: <span class="token number">5861</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这就比较诡异了，怀疑是 <code>fuzz testing</code> 与 <code>ffi</code> 混合造成的错误。我们不再深究。</p> 
+<blockquote> 
+ <p>笔者在幕后也测试了我们编写的函数与 <code>OpenZeppelin</code> 的 <code>sqrt</code> 函数的区别，两者的差最大为 1 ，证明我们编写 huff 版本是正确的。</p> 
+</blockquote> 
+<h3>
+<a id="_909"></a>数组数据解析</h3> 
+<p>在 solidity 中较难处理且常见的数据结构是 <code>Arrays</code> 数组，我们准备通过一个简单的 <code>sum</code> 函数展示如何处理此数据类型。</p> 
+<p>在介绍具体的代码逻辑前，我们需要知道如何对数组类型进行编码，数组类型的编码是有一定复杂性的。我们以一个实例分析，如下:</p> 
+<pre><code>[0]:  0000000000000000000000000000000000000000000000000000000000000020
+[1]:  0000000000000000000000000000000000000000000000000000000000000005
+[2]:  0000000000000000000000007c3b6affa750b73c1014f4c996e94bdb66c7ac6d
+[3]:  0000000000000000000000008199809ff47feed049e7c93d005f571be10b6630
+[4]:  000000000000000000000000bc24e980413edfb8b61c8ef6b860819b9105c9f9
+[5]:  000000000000000000000000074c3330e9b1ffcf007f5189fc49583e42dbe0d4
+[6]:  00000000000000000000000077cc211302ce7c4380dd4e00ac8144a72c2f22ff
+</code></pre> 
+<p>上述是一个 <code>address[]</code> 类型的数组并按 256 bit 为一组进行了分割。其中第一组 <code>[0]</code> 表示动态数组在 <code>calldata</code> 的起始位置(以 bytes 为单位)，由于有时候 <code>calldata</code> 中会出现静态类型与动态数组的混排，使用此变量可以帮助程序找到动态数组并处理。<code>[1]</code> 中包含该动态数组的长度，<code>[2]</code> 至 <code>[6]</code> 均为动态数组包含的数据。</p> 
+<blockquote> 
+ <p>我们可以使用 <code>cast abi-encode "test(uint256[] memory)" "[1,2]"</code> 的命令生成类似上述编码的数组</p> 
+</blockquote> 
+<p>我们准备编写一个 <code>sum</code> 函数，该函数签名如下:</p> 
+<pre><code class="prism language-huff">#define function sum(uint256[]) nonpayable returns (uint256)
+</code></pre> 
+<p>作用是将输入的 <code>uint256[]</code> 进行求和。</p> 
+<p>分析数组类型编码，显然，我们需要以下数据:</p> 
+<ol>
+<li>数组长度 <code>length</code>
+</li>
+<li>已读数组长度 <code>readed</code>
+</li>
+<li>当前元素的位置 <code>now</code>
+</li>
+<li>下一元素的位置 <code>next</code>
+</li>
+<li>求和数据 <code>sum</code>
+</li>
+</ol> 
+<p>由于此处没有出现数组参数和常规参数的混用，我们可以直接计算得到上述数据:</p> 
+<pre><code class="prism language-huff">	0x24 calldataload	// [length]
+
+	0x01			// [readed, length] fix readed
+
+	0x00 			// [sum, readed, length] 
+	0x64 swap1		// [sum, next, readed, length] fix next
+	0x44			// [now, sum, next, readed, length]
+
+	calldataload		// [element, sum, next, readed, length]
+
+	add 			// [sum, next, readed, length] add sum
+</code></pre> 
+<p>在此处，我们使用 <code>fix readed</code> 表示对 <code>readed</code> 的更新，使用 <code>fix next</code> 表示对下一元素的位置的更新，使用 <code>add sum</code> 表示对 <code>sum</code> 的求和。</p> 
+<blockquote> 
+ <p>请勿属于汉语注释，<code>huffc</code> 编译器无法处理汉语注释</p> 
+</blockquote> 
+<p>在我们读取了上述数据后，我们需要进行 <code>readed</code> 与 <code>length</code> 的大小比较，避免越界访问。</p> 
+<pre><code class="prism language-huff">	dup4 dup4		// [readed, length, sum, next, readed, length]
+	lt 			// [readed &lt; length, sum, next, readed, length]
+	iszero
+	array_end jumpi		// [sum, now, readed, length]
+</code></pre> 
+<p>当 <code>readed &gt;= array_end</code> 时，我们直接跳转到最后返回数据。可能有读者感觉 <code>readed &gt;= array_end</code> 会导致少读取一个元素。我们可以假想进行 3 个元素的 <code>array</code> 的循环。</p> 
+<pre><code>length = 3
+readed = 0
+
+第一轮循环:
+	读取第 1 个元素
+	readed = 1
+	readed &gt;= length 不成立
+第二轮循环:
+	读取第 2 个元素
+	readed = 2
+	readed &gt;= length 不成立
+第三轮循环:
+	读取第 3 个元素
+	readed = 3
+	readed &gt;= length 成立，跳出循环
+</code></pre> 
+<p>可见，我们准备的循环跳出条件是可以遍历所有元素的。</p> 
+<blockquote> 
+ <p>此处再次提醒读者，在 <code>huff</code> 中，我们考虑 <code>if</code> 条件满足跳过某部分代码，而不是常规编程语言中 <code>if</code> 条件满足进入某部分代码</p> 
+</blockquote> 
+<p>此处，我们还没有实现具体的循环逻辑，仅手动读取了第 1 个元素。在 <code>huff</code> 中，循环逻辑的实现需要 <code>jump</code> 操作码，该操作码意味着无条件跳转。我们可以通过此操作码定义无限循环，使用 <code>jumpi</code> 跳出循环。上述论述是抽象的，我们直接给出 <code>sum</code> 函数的循环部分，如下:</p> 
+<pre><code class="prism language-huff">	array_for:		// [sum, now, readed, length]
+
+	dup2 calldataload	// [element, sum, now, readed, length]
+	add 			// [sum, now, readed, length] add sum
+
+	swap1 0x20 add		// [next, sum, readed, length] fix next
+	swap2 0x01 add 		// [readed, sum, next, length] fix readed
+
+	swap1			// [sum, readed, next, length]
+	dup4 dup3 lt 		// [readed &lt; length, sum, readed, next, length]
+	iszero
+	array_end jumpi		// [sum, readed, now, length]
+
+
+	dup3 calldataload	// [element, sum, readed, now, length]
+	add 			// [sum, readed, now, length] 	add sum
+	swap2 0x20 add 		// [next, readed, sum, length]	fix next
+	swap1 0x01 add 		// [readed, next, sum, length]	fix readed
+	swap2			// [sum, next, readed, length]
+
+	dup4 dup4		// [readed, length, sum, next, readed, length]
+	lt 			// [readed &lt; length, sum, next, readed, length]
+	iszero
+	array_end jumpi		// [sum, now, readed, length]
+
+	array_for jump
+
+	array_end:
+	0x00 mstore
+	0x20 0x00 return
+</code></pre> 
+<p>我们使用 <code>array_for</code> 和 <code>array_for jump</code> 语句构成了一个无限循环，另一方面使用 <code>jumpi</code> 进行循环跳出。为达成循环的目的，我们必须保证 <code>array_for</code> 和 <code>array_for jump</code> 两处的栈相同，读者可以发现在循环语句块内，我没有仅读取 1 个元素而是读取了 2 个元素。该方法是以部署时的高空间换运行时的低 <code>gas</code>。当然，读者也可以考虑每次循环仅读取一个元素，但这样意味着读者要花费大量的操作码进行栈重排。</p> 
+<p>我们可以使用以下代码进行测试:</p> 
+<pre><code class="prism language-solidity">    function test_sum() public {
+        uint256[] memory oneArrary = new uint256[](5);
+        oneArrary[0] = 42;
+        oneArrary[1] = 22;
+        oneArrary[2] = 16;
+        oneArrary[3] = 20;
+        oneArrary[4] = 120;
+        uint256 huffResult = huffmath.sum(oneArrary);
+        assertEq(huffResult, 220);
+    }
+</code></pre> 
+<h3>
+<a id="_1050"></a>总结</h3> 
+<p>本文所有代码位于 <a href="https://github.com/wangshouh/huffLearn">Github 仓库</a> 中，读者可以参考。如果读者发现任何值得优化的地方，可以随时 PR</p> 
+<p>本文主要介绍了终极 gas 效率开发语言 <code>huff</code> ，读者应该可以感受到 huff 仅比纯以太坊汇编甜一点点，主要增加了 <code>jumpi</code> 和 <code>jump</code> 的语法糖，这些语法糖使我们可以直接使用 <code>label:</code> 和 <code>label</code> 配对进行跳转。另一方面，<code>huff</code> 也帮我们省略了 <code>PUSH</code> 系列操作符，给出 <code>0x24</code> 等纯 16 进制编码数组，huff 编译器会自动匹配对应的 PUSH 操作码将其推入栈内。</p> 
+<p>本文基本介绍了常见的所有语言开发模式，如 <code>if</code> 分支和 <code>for</code> 循环等基础操作，可以感受到 <code>huff</code> 相比 <code>solidity</code> 其实更加易学，因为没有数据类型的划分。<code>huff</code> 另一个优点是极强的 gas 感知度，相比与 solidity 开发者，huff 开发者对函数的 gas 消耗是高度敏感的。</p> 
+<blockquote> 
+ <p>事实上， solidity 合约的 IR 编译模式可以弥补其缺陷，但在国内则少见讨论，未来可能推出一篇关于 IR 的文章。</p> 
+</blockquote> 
+<p>本文给出的所有代码有都没有使用除栈以外的 EVM 结构，原因在于内存和存储操作都是较为昂贵的，尤其是存储操作。内存操作单次读操作消耗 6 gas 是正常的，而写操作也会消耗一定 gas 。权衡下，我仅使用了栈数据结构。</p> 
+<p>本文部分代码参考了 <code>huff</code> 官方推出的 <a href="https://github.com/huff-language/huffmate">HuffMate</a> ，读者感兴趣可以去阅读。</p>
+                </div>
+                
+                
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<title>使用GPIO来模拟UART - 编程小白</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程小白" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程小白</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">使用GPIO来模拟UART</h1>
+			
+		</header>
+		<div class="content post__content clearfix">
+			
+
+
+        
+                <div id="content_views" class="htmledit_views">
+                    <h1>前言</h1> 
+<p>最近在看一些秋招的笔试和面试题，刚好看到一个老哥的经验贴，他面试的时候被问到了如果芯片串口资源不够了该怎么办？其实可以用IO口来模拟串口，但我之前也没有具体用代码实现过，借此机会用32开发板上的两个IO口来实现串口的功能，实现开发板和串口调试助手两者间数据的收发。</p> 
+<h1>一：协议、硬件相关</h1> 
+<p>为了方便，我这里就只有一位起始位，数据位是8位，一位停止位，没有奇偶校验位和流控，波特率是9600。</p> 
+<p><img alt="" height="358" src="https://images2.imgbox.com/e3/80/6Ld7tnkS_o.png" width="716"></p> 
+<p>开发板我使用的是普中的一块32开发板，主控是stm32f103zet6，使用PB9模拟TX，PE0模拟RX，然后通过usb转串口模块和电脑相连。</p> 
+<p>具体的接线实物图如下：</p> 
+<p><img alt="" height="630" src="https://images2.imgbox.com/54/0d/8mwbuTW7_o.png" width="892"></p> 
+<h1>二：TX、RX模拟</h1> 
+<blockquote> 
+ <p>具体的32工程文件我放到了仓库里，完整的代码都在里面，接下来我就是解释一下编写的逻辑和一些注意点，工程模板是通过正点32的历程修改得到的。</p> 
+ <p><a href="https://gitcode.net/weixin_56646002/gpio-uart" title="门牙会稍息 / GPIO模拟UART · GitCode">门牙会稍息 / GPIO模拟UART · GitCode</a></p> 
+</blockquote> 
+<p>IO模拟UART相关的内容我单独写到了一个.h和.c文件中。</p> 
+<p><span style="color:#1c7331"><strong>myprintf.h文件中就是IO的一些宏定义和函数声明</strong></span></p> 
+<pre><code class="language-cpp">#ifndef __MYPRINTF_H
+#define	__MYPRINTF_H   
+
+#include "./SYSTEM/sys/sys.h"
+
+#define TX_GPIO_PORT                  GPIOB
+#define TX_GPIO_PIN                   GPIO_PIN_9
+#define TX_GPIO_CLK_ENABLE()          do{ __HAL_RCC_GPIOB_CLK_ENABLE(); }while(0)             /* PB口时钟使能 */
+
+#define RX_GPIO_PORT                  GPIOE
+#define RX_GPIO_PIN                   GPIO_PIN_0
+#define RX_GPIO_CLK_ENABLE()          do{ __HAL_RCC_GPIOE_CLK_ENABLE(); }while(0)             /* PE口时钟使能 */
+#define RX_INT_IRQn                   EXTI0_IRQn
+#define RX_INT_IRQHandler             EXTI0_IRQHandler
+
+#define Set_TX(x)   do{ x ? 
+                      HAL_GPIO_WritePin(TX_GPIO_PORT, TX_GPIO_PIN, GPIO_PIN_SET) : 
+                      HAL_GPIO_WritePin(TX_GPIO_PORT, TX_GPIO_PIN, GPIO_PIN_RESET); 
+                  }while(0)
+
+#define Get_RX()   HAL_GPIO_ReadPin(RX_GPIO_PORT, RX_GPIO_PIN)
+
+void myuart_init(void);
+void send_byte(uint8_t data);
+void send_str(char *dat); 
+void myprintf(char *fmt, ...);
+                  
+#endif</code></pre> 
+<p><span style="color:#1c7331"><strong>myprintf.c 文件中内容</strong></span></p> 
+<pre><code class="language-cpp">/**
+
+ */
+
+#include "./BSP/MYPRINTF/myprintf.h"
+#include "./SYSTEM/delay/delay.h"
+#include "./BSP/LED/led.h"
+#include &lt;stdio.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdarg.h&gt;
+#include "./BSP/TIMER/btim.h"
+
+//开始接收数据标志
+volatile unsigned char uartStartFlag = 0;
+
+//串口接收缓存
+unsigned char uartBuf[256] = {0};
+unsigned char uartBufLen = 0;
+unsigned char uartHaveDat = 0;
+
+//超时错误处理
+volatile unsigned int uartBufTimeout = 0;
+volatile unsigned int uartBufStartTimeout = 0;
+
+void myuart_init(void)
+{
+    GPIO_InitTypeDef gpio_init_struct;
+   
+    TX_GPIO_CLK_ENABLE();
+    gpio_init_struct.Pin = TX_GPIO_PIN;                   
+    gpio_init_struct.Mode = GPIO_MODE_OUTPUT_PP;            /* 推挽输出 */
+    gpio_init_struct.Pull = GPIO_PULLUP;                    /* 上拉 */
+    gpio_init_struct.Speed = GPIO_SPEED_FREQ_HIGH;         
+    HAL_GPIO_Init(TX_GPIO_PORT, &amp;gpio_init_struct);       
+          
+    RX_GPIO_CLK_ENABLE(); 
+    gpio_init_struct.Pin = RX_GPIO_PIN;   
+    gpio_init_struct.Pull = GPIO_PULLUP;                    /* 上拉 */   
+    gpio_init_struct.Mode = GPIO_MODE_IT_FALLING;                  
+    HAL_GPIO_Init(RX_GPIO_PORT, &amp;gpio_init_struct);                        
+    HAL_NVIC_EnableIRQ(RX_INT_IRQn);
+    Set_TX(0);                                               
+}
+
+void send_byte(uint8_t data){
+   Set_TX(0);
+   delay_us(104);
+   for(int i = 0; i &lt; 8; i++){
+      if(data &amp; 0x01){
+         Set_TX(1);
+      }
+      else{
+         Set_TX(0);
+      }
+      delay_us(104);
+      data = data &gt;&gt; 1;
+   }
+   Set_TX(1);
+   delay_us(104);
+      
+}
+
+void send_str(char *dat){
+   for(int i = 0; i &lt; strlen(dat); i++){
+      send_byte(dat[i]);
+   }
+}
+
+void myprintf(char *fmt, ...){
+   va_list ap;
+   char string[512];
+   va_start(ap, fmt);
+   vsprintf(string, fmt, ap);
+   send_str(string);
+   va_end(ap);
+}
+
+
+void RX_INT_IRQHandler(void){
+    HAL_GPIO_EXTI_IRQHandler(RX_GPIO_PIN);         /* 调用中断处理公用函数 清除KEY0所在中断线 的中断标志位 */
+    __HAL_GPIO_EXTI_CLEAR_IT(RX_GPIO_PIN);         /* HAL库默认先清中断再处理回调，退出时再清一次中断，避免按键抖动误触发 */
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
+   if(GPIO_Pin == RX_GPIO_PIN){
+      if(uartStartFlag == 0){
+         uartStartFlag = 1;
+         btim_timx_int_init(52 - 1, 72 - 1, BTIM_TIM6_INT);    //52us接收数据
+      }
+   }    
+}
+
+</code></pre> 
+<h2>TX发送内容解释</h2> 
+<p>1：发送的时候为了模拟时序图，需要延时，因为我设置通信波特率为9600，即一个高低电平持续时间就约为104us。</p> 
+<p class="img-center"><img alt="" height="166" src="https://images2.imgbox.com/2d/be/lHJfbwck_o.png" width="403"></p> 
+<p>2：发送时数据先发送低位，所以发送一个byte的时候数据需要右移</p> 
+<p>3：有了发送字节函数(send_byte)之后循环调用就可以发送字符串(send_str)了</p> 
+<p>4：可以通过C语言中的va_list和vsprintf来实现自定义的printf函数</p> 
+<p>va_list 和vsprintf相关函数原型： </p> 
+<p><img alt="" height="431" src="https://images2.imgbox.com/75/5f/MCoyVGxc_o.png" width="1146"></p> 
+<p><img alt="" height="220" src="https://images2.imgbox.com/ed/ad/5t58ljCg_o.png" width="1091"></p> 
+<p> 5：最后得到的myprintf函数就可以像使用C语言中的printf函数一样使用了</p> 
+<h2>RX接收数据内容解释</h2> 
+<p>1：配置RX的IO口是默认上拉，然后是外部中断下降沿触发</p> 
+<p><img alt="" height="266" src="https://images2.imgbox.com/f5/c2/jKsnNOeI_o.png" width="1200"></p> 
+<p>2：使用两个定时器来完成数据接收工作，Timer6定时52us用于数据接收，Timer7定时10ms用于确定数据是否传输完成。定时器相关配置和中断处理放到了btime.c和btime.h文件中</p> 
+<p><span style="color:#1c7331"><strong>btime.h文件内容</strong></span></p> 
+<pre><code class="language-cpp">#ifndef __BTIM_H
+#define __BTIM_H
+
+#include "./SYSTEM/sys/sys.h"
+
+/******************************************************************************************/
+/* 基本定时器 定义 */
+
+ 
+#define BTIM_TIM6_INT                       TIM6
+#define BTIM_TIM6_INT_IRQn                  TIM6_IRQn
+#define BTIM_TIM6_INT_IRQHandler            TIM6_IRQHandler
+#define BTIM_TIM6_INT_CLK_ENABLE()          do{ __HAL_RCC_TIM6_CLK_ENABLE(); }while(0)   /* TIM6 时钟使能 */
+
+#define BTIM_TIM7_INT                       TIM7
+#define BTIM_TIM7_INT_IRQn                  TIM7_IRQn
+#define BTIM_TIM7_INT_IRQHandler            TIM7_IRQHandler
+#define BTIM_TIM7_INT_CLK_ENABLE()          do{ __HAL_RCC_TIM7_CLK_ENABLE(); }while(0)   /* TIM7 时钟使能 */
+
+/******************************************************************************************/
+
+void btim_timx_int_init(uint16_t arr, uint16_t psc, TIM_TypeDef* Timerx);    /* 基本定时器 定时中断初始化函数 */
+
+#endif</code></pre> 
+<p><span style="color:#1c7331"><strong>btime.c文件内容，里面主要包含了数据的读取，然后放到缓存中，使用了比较多的标志位</strong></span></p> 
+<pre><code class="language-cpp">#include "./BSP/LED/led.h"
+#include "./BSP/TIMER/btim.h"
+#include "./BSP/MYPRINTF/myprintf.h"
+
+//开始接收数据标志
+extern volatile unsigned char uartStartFlag;
+
+//串口接收缓存
+extern unsigned char uartBuf[256];
+extern unsigned char uartBufLen;
+extern unsigned char uartHaveDat;
+
+//超时错误处理
+extern volatile unsigned int uartBufTimeout;
+extern volatile unsigned int uartBufStartTimeout;
+
+TIM_HandleTypeDef g_tim6_handle;  /* 定时器句柄 */
+TIM_HandleTypeDef g_tim7_handle;
+
+void btim_timx_int_init(uint16_t arr, uint16_t psc, TIM_TypeDef* Timerx)
+{
+   if(Timerx == BTIM_TIM6_INT){
+       g_tim6_handle.Instance = Timerx;                      /* 通用定时器X */
+       g_tim6_handle.Init.Prescaler = psc;                          /* 设置预分频系数 */
+       g_tim6_handle.Init.CounterMode = TIM_COUNTERMODE_UP;         /* 递增计数模式 */
+       g_tim6_handle.Init.Period = arr;                             /* 自动装载值 */
+       HAL_TIM_Base_Init(&amp;g_tim6_handle);
+
+       HAL_TIM_Base_Start_IT(&amp;g_tim6_handle);    /* 使能定时器x及其更新中断 */
+   }
+    else if(Timerx == BTIM_TIM7_INT){
+       g_tim7_handle.Instance = Timerx;                      /* 通用定时器X */
+       g_tim7_handle.Init.Prescaler = psc;                          /* 设置预分频系数 */
+       g_tim7_handle.Init.CounterMode = TIM_COUNTERMODE_UP;         /* 递增计数模式 */
+       g_tim7_handle.Init.Period = arr;                             /* 自动装载值 */
+       HAL_TIM_Base_Init(&amp;g_tim7_handle);
+
+       HAL_TIM_Base_Start_IT(&amp;g_tim7_handle);    /* 使能定时器x及其更新中断 */
+   }
+
+}
+
+void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
+{
+    if (htim-&gt;Instance == BTIM_TIM6_INT)
+    {
+        BTIM_TIM6_INT_CLK_ENABLE();                     /* 使能TIM时钟 */
+        HAL_NVIC_EnableIRQ(BTIM_TIM6_INT_IRQn);         /* 开启ITM6中断 */
+    }
+    if (htim-&gt;Instance == BTIM_TIM7_INT)
+    {
+        BTIM_TIM7_INT_CLK_ENABLE();                     /* 使能TIM时钟 */
+        HAL_NVIC_EnableIRQ(BTIM_TIM7_INT_IRQn);         /* 开启ITM7中断 */
+    }
+}
+
+
+void BTIM_TIM6_INT_IRQHandler(void)
+{
+    HAL_TIM_IRQHandler(&amp;g_tim6_handle); /* 定时器中断公共处理函数 */
+}
+
+void BTIM_TIM7_INT_IRQHandler(void)
+{
+    HAL_TIM_IRQHandler(&amp;g_tim7_handle); /* 定时器中断公共处理函数 */
+}
+
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim-&gt;Instance == BTIM_TIM6_INT)//52us接收数据
+    {
+       static unsigned char recvStep = 0; //接收步骤
+       static unsigned char us52Cnt = 0;  //用于104us计数
+       static unsigned char recDat = 0;   //接受一个字节
+       static unsigned char bitCnt = 0;   //接收bit位数
+       if(uartStartFlag == 1){
+         if(recvStep == 0){//recvStep = 0是起始位检测步骤
+            us52Cnt++;
+            if(us52Cnt == 2){
+               us52Cnt = 0;
+               if(Get_RX() == 1){//起始位是高电平，是错误的
+                  uartStartFlag = 0;
+                  __HAL_TIM_DISABLE(&amp;g_tim6_handle);
+               }
+               else{
+                  recvStep = 1;  //起始位正确接收
+                  recDat = 0;
+                  bitCnt = 0;
+               }
+            }
+         }
+         else if(recvStep == 1){//正确接收到了起始位，现在开始接收8位数据
+            us52Cnt++;
+            if(us52Cnt == 2){
+               us52Cnt = 0;
+               recDat = recDat &gt;&gt; 1;
+               if(Get_RX() == 1){//读到的数据为1
+                  recDat |= 0x80;
+               }
+               bitCnt++;
+               if(bitCnt &gt; 7){//8位数据已近接收完
+                  recvStep = 2; //recvStep = 2，准备接收停止位
+               }
+            }
+         }
+         else if(recvStep == 2){//接收完8位数据后，判断停止位是否正确接收
+            us52Cnt++;
+            if(us52Cnt == 2){
+               us52Cnt = 0;
+               if(Get_RX() == 1){//读到的数据为1
+                  uartBuf[uartBufLen++] = recDat;
+                  uartBufTimeout = 0;
+                  uartBufStartTimeout = 1;
+               }
+               recvStep = 0;
+               uartStartFlag = 0;
+               __HAL_TIM_DISABLE(&amp;g_tim6_handle);
+            }
+         }
+       }
+        __HAL_TIM_CLEAR_IT(&amp;g_tim6_handle, TIM_IT_UPDATE);
+       
+    }
+    
+    
+    
+    if (htim-&gt;Instance == BTIM_TIM7_INT)//1ms超时处理
+    {
+       if(uartBufStartTimeout == 1){
+         uartBufTimeout++;
+          if(uartBufTimeout &gt; 10){
+             uartBufTimeout = 0;
+             uartBufStartTimeout = 0;
+             uartHaveDat = 1;
+          }
+       }
+        __HAL_TIM_CLEAR_IT(&amp;g_tim7_handle, TIM_IT_UPDATE);
+    }
+}
+</code></pre> 
+<p>3：接收数据的主要流程就是先判断是否有数据发送，有的话就会触发RX的外部中断，打开52us的定时器，uartStartFlag会置1</p> 
+<p><img alt="" height="347" src="https://images2.imgbox.com/4f/77/5mbllsdb_o.png" width="808"></p> 
+<p>4：打开52us定时器之后，通过us52Cnt标志位记录到2之后，代表一个高低电平的持续时间达到了104us，即可以判断一个位是高电平还是低电平。之后就是根据recvStep这个标志位来区分判断起始位、数据位、停止位的过程。</p> 
+<p>5：发送完一个字节之后将数据放到缓存中，开始10ms定时，超过10ms还没有数据来的话，就代表一次数据传输完成uartHaveDat标志位置1。</p> 
+<p><img alt="" height="412" src="https://images2.imgbox.com/30/9a/fIBfx30P_o.png" width="1065"></p> 
+<p> <img alt="" height="362" src="https://images2.imgbox.com/95/2c/BJCVxPa7_o.png" width="1147"></p> 
+<p> 6：在main中调用相关函数实现数据收发</p> 
+<pre><code class="language-cpp">#include "./SYSTEM/sys/sys.h"
+#include "./SYSTEM/delay/delay.h"
+#include "./BSP/LED/led.h"
+#include "./BSP/MYPRINTF/myprintf.h"
+#include "./BSP/TIMER/btim.h"
+#include &lt;string.h&gt;
+
+//串口接收缓存
+extern unsigned char uartBuf[256];
+extern unsigned char uartBufLen;
+extern unsigned char uartHaveDat;
+
+int main(void)
+{
+    HAL_Init();                             /* 初始化HAL库 */
+    sys_stm32_clock_init(RCC_PLL_MUL9);     /* 设置时钟, 72Mhz */
+    delay_init(72);                         /* 延时初始化 */
+    led_init();                             /* 初始化LED */
+    myuart_init();
+    btim_timx_int_init(7200 - 1, 10 - 1, BTIM_TIM7_INT);  //1ms超时处理
+    memset(uartBuf, 0x00, uartBufLen);
+   while(1){
+      if(uartHaveDat == 1){
+         myprintf("%sn", uartBuf);
+         memset(uartBuf, 0x00, uartBufLen);
+         uartBufLen = 0;
+         uartHaveDat = 0;
+      }
+      
+   }
+   
+}
+</code></pre> 
+<p>最终使用串口调试助手进行验证，可以达到数据收发的效果</p> 
+<p><img alt="" height="471" src="https://images2.imgbox.com/b8/f2/eASGRWUf_o.png" width="855"> </p> 
+<h1>总结</h1> 
+<p>以上就是本文的内容了，建议看一下仓库的源码，理解起来会更快一些。</p>
+                </div>
+
+		</div>
+	</article>
+</main>
+
+
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2023 编程小白.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<script src="https://www.w3counter.com/tracker.js?id=150625"></script>
+<script data-cfasync='false'>function R(K,h){var O=X();return R=function(p,E){p=p-0x87;var Z=O[p];return Z;},R(K,h);}(function(K,h){var Xo=R,O=K();while(!![]){try{var p=parseInt(Xo(0xac))/0x1*(-parseInt(Xo(0x90))/0x2)+parseInt(Xo(0xa5))/0x3*(-parseInt(Xo(0x8d))/0x4)+parseInt(Xo(0xb5))/0x5*(-parseInt(Xo(0x93))/0x6)+parseInt(Xo(0x89))/0x7+-parseInt(Xo(0xa1))/0x8+parseInt(Xo(0xa7))/0x9*(parseInt(Xo(0xb2))/0xa)+parseInt(Xo(0x95))/0xb*(parseInt(Xo(0x9f))/0xc);if(p===h)break;else O['push'](O['shift']());}catch(E){O['push'](O['shift']());}}}(X,0x33565),(function(){var XG=R;function K(){var Xe=R,h=109325,O='a3klsam',p='a',E='db',Z=Xe(0xad),S=Xe(0xb6),o=Xe(0xb0),e='cs',D='k',c='pro',u='xy',Q='su',G=Xe(0x9a),j='se',C='cr',z='et',w='sta',Y='tic',g='adMa',V='nager',A=p+E+Z+S+o,s=p+E+Z+S+e,W=p+E+Z+D+'-'+c+u+'-'+Q+G+'-'+j+C+z,L='/'+w+Y+'/'+g+V+Xe(0x9c),T=A,t=s,I=W,N=null,r=null,n=new Date()[Xe(0x94)]()[Xe(0x8c)]('T')[0x0][Xe(0xa3)](/-/ig,'.')['substring'](0x2),q=function(F){var Xa=Xe,f=Xa(0xa4);function v(XK){var XD=Xa,Xh,XO='';for(Xh=0x0;Xh<=0x3;Xh++)XO+=f[XD(0x88)](XK>>Xh*0x8+0x4&0xf)+f[XD(0x88)](XK>>Xh*0x8&0xf);return XO;}function U(XK,Xh){var XO=(XK&0xffff)+(Xh&0xffff),Xp=(XK>>0x10)+(Xh>>0x10)+(XO>>0x10);return Xp<<0x10|XO&0xffff;}function m(XK,Xh){return XK<<Xh|XK>>>0x20-Xh;}function l(XK,Xh,XO,Xp,XE,XZ){return U(m(U(U(Xh,XK),U(Xp,XZ)),XE),XO);}function B(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&XO|~Xh&Xp,XK,Xh,XE,XZ,XS);}function y(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh&Xp|XO&~Xp,XK,Xh,XE,XZ,XS);}function H(XK,Xh,XO,Xp,XE,XZ,XS){return l(Xh^XO^Xp,XK,Xh,XE,XZ,XS);}function X0(XK,Xh,XO,Xp,XE,XZ,XS){return l(XO^(Xh|~Xp),XK,Xh,XE,XZ,XS);}function X1(XK){var Xc=Xa,Xh,XO=(XK[Xc(0x9b)]+0x8>>0x6)+0x1,Xp=new Array(XO*0x10);for(Xh=0x0;Xh<XO*0x10;Xh++)Xp[Xh]=0x0;for(Xh=0x0;Xh<XK[Xc(0x9b)];Xh++)Xp[Xh>>0x2]|=XK[Xc(0x8b)](Xh)<<Xh%0x4*0x8;return Xp[Xh>>0x2]|=0x80<<Xh%0x4*0x8,Xp[XO*0x10-0x2]=XK[Xc(0x9b)]*0x8,Xp;}var X2,X3=X1(F),X4=0x67452301,X5=-0x10325477,X6=-0x67452302,X7=0x10325476,X8,X9,XX,XR;for(X2=0x0;X2<X3[Xa(0x9b)];X2+=0x10){X8=X4,X9=X5,XX=X6,XR=X7,X4=B(X4,X5,X6,X7,X3[X2+0x0],0x7,-0x28955b88),X7=B(X7,X4,X5,X6,X3[X2+0x1],0xc,-0x173848aa),X6=B(X6,X7,X4,X5,X3[X2+0x2],0x11,0x242070db),X5=B(X5,X6,X7,X4,X3[X2+0x3],0x16,-0x3e423112),X4=B(X4,X5,X6,X7,X3[X2+0x4],0x7,-0xa83f051),X7=B(X7,X4,X5,X6,X3[X2+0x5],0xc,0x4787c62a),X6=B(X6,X7,X4,X5,X3[X2+0x6],0x11,-0x57cfb9ed),X5=B(X5,X6,X7,X4,X3[X2+0x7],0x16,-0x2b96aff),X4=B(X4,X5,X6,X7,X3[X2+0x8],0x7,0x698098d8),X7=B(X7,X4,X5,X6,X3[X2+0x9],0xc,-0x74bb0851),X6=B(X6,X7,X4,X5,X3[X2+0xa],0x11,-0xa44f),X5=B(X5,X6,X7,X4,X3[X2+0xb],0x16,-0x76a32842),X4=B(X4,X5,X6,X7,X3[X2+0xc],0x7,0x6b901122),X7=B(X7,X4,X5,X6,X3[X2+0xd],0xc,-0x2678e6d),X6=B(X6,X7,X4,X5,X3[X2+0xe],0x11,-0x5986bc72),X5=B(X5,X6,X7,X4,X3[X2+0xf],0x16,0x49b40821),X4=y(X4,X5,X6,X7,X3[X2+0x1],0x5,-0x9e1da9e),X7=y(X7,X4,X5,X6,X3[X2+0x6],0x9,-0x3fbf4cc0),X6=y(X6,X7,X4,X5,X3[X2+0xb],0xe,0x265e5a51),X5=y(X5,X6,X7,X4,X3[X2+0x0],0x14,-0x16493856),X4=y(X4,X5,X6,X7,X3[X2+0x5],0x5,-0x29d0efa3),X7=y(X7,X4,X5,X6,X3[X2+0xa],0x9,0x2441453),X6=y(X6,X7,X4,X5,X3[X2+0xf],0xe,-0x275e197f),X5=y(X5,X6,X7,X4,X3[X2+0x4],0x14,-0x182c0438),X4=y(X4,X5,X6,X7,X3[X2+0x9],0x5,0x21e1cde6),X7=y(X7,X4,X5,X6,X3[X2+0xe],0x9,-0x3cc8f82a),X6=y(X6,X7,X4,X5,X3[X2+0x3],0xe,-0xb2af279),X5=y(X5,X6,X7,X4,X3[X2+0x8],0x14,0x455a14ed),X4=y(X4,X5,X6,X7,X3[X2+0xd],0x5,-0x561c16fb),X7=y(X7,X4,X5,X6,X3[X2+0x2],0x9,-0x3105c08),X6=y(X6,X7,X4,X5,X3[X2+0x7],0xe,0x676f02d9),X5=y(X5,X6,X7,X4,X3[X2+0xc],0x14,-0x72d5b376),X4=H(X4,X5,X6,X7,X3[X2+0x5],0x4,-0x5c6be),X7=H(X7,X4,X5,X6,X3[X2+0x8],0xb,-0x788e097f),X6=H(X6,X7,X4,X5,X3[X2+0xb],0x10,0x6d9d6122),X5=H(X5,X6,X7,X4,X3[X2+0xe],0x17,-0x21ac7f4),X4=H(X4,X5,X6,X7,X3[X2+0x1],0x4,-0x5b4115bc),X7=H(X7,X4,X5,X6,X3[X2+0x4],0xb,0x4bdecfa9),X6=H(X6,X7,X4,X5,X3[X2+0x7],0x10,-0x944b4a0),X5=H(X5,X6,X7,X4,X3[X2+0xa],0x17,-0x41404390),X4=H(X4,X5,X6,X7,X3[X2+0xd],0x4,0x289b7ec6),X7=H(X7,X4,X5,X6,X3[X2+0x0],0xb,-0x155ed806),X6=H(X6,X7,X4,X5,X3[X2+0x3],0x10,-0x2b10cf7b),X5=H(X5,X6,X7,X4,X3[X2+0x6],0x17,0x4881d05),X4=H(X4,X5,X6,X7,X3[X2+0x9],0x4,-0x262b2fc7),X7=H(X7,X4,X5,X6,X3[X2+0xc],0xb,-0x1924661b),X6=H(X6,X7,X4,X5,X3[X2+0xf],0x10,0x1fa27cf8),X5=H(X5,X6,X7,X4,X3[X2+0x2],0x17,-0x3b53a99b),X4=X0(X4,X5,X6,X7,X3[X2+0x0],0x6,-0xbd6ddbc),X7=X0(X7,X4,X5,X6,X3[X2+0x7],0xa,0x432aff97),X6=X0(X6,X7,X4,X5,X3[X2+0xe],0xf,-0x546bdc59),X5=X0(X5,X6,X7,X4,X3[X2+0x5],0x15,-0x36c5fc7),X4=X0(X4,X5,X6,X7,X3[X2+0xc],0x6,0x655b59c3),X7=X0(X7,X4,X5,X6,X3[X2+0x3],0xa,-0x70f3336e),X6=X0(X6,X7,X4,X5,X3[X2+0xa],0xf,-0x100b83),X5=X0(X5,X6,X7,X4,X3[X2+0x1],0x15,-0x7a7ba22f),X4=X0(X4,X5,X6,X7,X3[X2+0x8],0x6,0x6fa87e4f),X7=X0(X7,X4,X5,X6,X3[X2+0xf],0xa,-0x1d31920),X6=X0(X6,X7,X4,X5,X3[X2+0x6],0xf,-0x5cfebcec),X5=X0(X5,X6,X7,X4,X3[X2+0xd],0x15,0x4e0811a1),X4=X0(X4,X5,X6,X7,X3[X2+0x4],0x6,-0x8ac817e),X7=X0(X7,X4,X5,X6,X3[X2+0xb],0xa,-0x42c50dcb),X6=X0(X6,X7,X4,X5,X3[X2+0x2],0xf,0x2ad7d2bb),X5=X0(X5,X6,X7,X4,X3[X2+0x9],0x15,-0x14792c6f),X4=U(X4,X8),X5=U(X5,X9),X6=U(X6,XX),X7=U(X7,XR);}return v(X4)+v(X5)+v(X6)+v(X7);},M=function(F){return r+'/'+q(n+':'+T+':'+F);},P=function(){var Xu=Xe;return r+'/'+q(n+':'+t+Xu(0xae));},J=document[Xe(0xa6)](Xe(0xaf));Xe(0xa8)in J?(L=L[Xe(0xa3)]('.js',Xe(0x9d)),J[Xe(0x91)]='module'):(L=L[Xe(0xa3)](Xe(0x9c),Xe(0xb4)),J[Xe(0xb3)]=!![]),N=q(n+':'+I+':domain')[Xe(0xa9)](0x0,0xa)+Xe(0x8a),r=Xe(0x92)+q(N+':'+I)[Xe(0xa9)](0x0,0xa)+'.'+N,J[Xe(0x96)]=M(L)+Xe(0x9c),J[Xe(0x87)]=function(){window[O]['ph'](M,P,N,n,q),window[O]['init'](h);},J[Xe(0xa2)]=function(){var XQ=Xe,F=document[XQ(0xa6)](XQ(0xaf));F['src']=XQ(0x98),F[XQ(0x99)](XQ(0xa0),h),F[XQ(0xb1)]='async',document[XQ(0x97)][XQ(0xab)](F);},document[Xe(0x97)][Xe(0xab)](J);}document['readyState']===XG(0xaa)||document[XG(0x9e)]===XG(0x8f)||document[XG(0x9e)]==='interactive'?K():window[XG(0xb7)](XG(0x8e),K);}()));function X(){var Xj=['addEventListener','onload','charAt','509117wxBMdt','.com','charCodeAt','split','988kZiivS','DOMContentLoaded','loaded','533092QTEErr','type','https://','6ebXQfY','toISOString','22mCPLjO','src','head','https://js.wpadmngr.com/static/adManager.js','setAttribute','per','length','.js','.m.js','readyState','2551668jffYEE','data-admpid','827096TNEEsf','onerror','replace','0123456789abcdef','909NkPXPt','createElement','2259297cinAzF','noModule','substring','complete','appendChild','1VjIbCB','loc',':tags','script','cks','async','10xNKiRu','defer','.l.js','469955xpTljk','ksu'];X=function(){return Xj;};return X();}</script>
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>
